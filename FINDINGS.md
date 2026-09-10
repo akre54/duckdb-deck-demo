@@ -16,7 +16,7 @@ All numbers below are measured on this machine, Chromium, the synthetic 9-cluste
 
 ## 1. One expression IR with three backends works
 
-`src/graph/expr.ts` parses a small VEX-flavored expression language into an AST. `backends/sql.ts`, `backends/wgsl.ts` and `backends/js.ts` each walk that AST. 103 tests, including 21 that *execute* the JS backend against hand-computed values so the numeric semantics are checked rather than asserted.
+`src/core/expr.ts` parses a small VEX-flavored expression language into an AST. `backends/sql.ts`, `backends/wgsl.ts` and `backends/js.ts` each walk that AST. 103 tests, including 21 that *execute* the JS backend against hand-computed values so the numeric semantics are checked rather than asserted.
 
 The load-bearing detail is that **capability is a table, not a code path.** `FUNCTIONS` in `expr.ts` records, per function, how it spells in SQL and in WGSL, with `null` meaning "no equivalent". So the planner's question — can this node run in SQL? — is `enginesFor(tree)`, a walk over the AST. It never pattern-matches node types.
 
@@ -27,7 +27,7 @@ Two places the backends genuinely diverge, both handled in the op table rather t
 - `min`/`max` → `least`/`greatest` in SQL; `ln` → `log` in WGSL; `clamp` has no 3-arg SQL form so it expands to `least(greatest(…))`.
 - `%` on floats does not exist in WGSL, so it emits `a - b*floor(a/b)`. The JS backend matches that floor-based semantics rather than JS's own `%`, which differs for negatives. There is a test for exactly this.
 
-**Consequence for noodles:** `MapRangeOp` and `ColorRampOp` do not need to be operators. They are expression templates. `desugar()` in `src/graph/types.ts` is ~50 lines and turns `scale`, `colorscale` and `project` into plain `attribute` nodes emitting `fit(…)`, `ramp(…)` and a mercator expression. That is PR #491's own Phase 2 note, and it costs less than the ops it replaces.
+**Consequence for noodles:** `MapRangeOp` and `ColorRampOp` do not need to be operators. They are expression templates. `desugar()` in `src/core/types.ts` is ~50 lines and turns `scale`, `colorscale` and `project` into plain `attribute` nodes emitting `fit(…)`, `ramp(…)` and a mercator expression. That is PR #491's own Phase 2 note, and it costs less than the ops it replaces.
 
 ## 2. DuckDB-Wasm never hands you one Arrow chunk
 
@@ -35,7 +35,7 @@ This is the finding that most contradicts the premise we started from ("the colu
 
 **A 300k-row DuckDB-Wasm result arrives as 147 record batches of 2048 rows.** 5M rows is 2445 batches. There is no single contiguous `Float32Array` per column, at any realistic size. A design that assumes one will silently fall through to a full CPU pass on every column.
 
-That does not force a JS loop — it moves the concatenation to the right place. `src/engine/arrow-gpu.ts` has three tiers:
+That does not force a JS loop — it moves the concatenation to the right place. `src/core/arrow.ts` has three tiers:
 
 | tier | when | cost |
 |---|---|---|
@@ -48,7 +48,7 @@ At 5M rows the FLOAT columns take the chunked path at 0 ms CPU. The 24.7 ms of c
 **Two concrete actions for noodles, both cheap:**
 
 1. `arrow-data.ts` should upload per batch rather than concatenating. 2445 `writeBuffer` calls at 5M rows cost 69.9 ms total including allocation — the GPU copy engine is good at this, and it replaces a JS loop over 5M elements per column.
-2. **Cast to `FLOAT` in the generated SQL.** WGSL has no f64, so every `DOUBLE` column bound to a visual channel pays a CPU narrowing pass. Emitting `expr::FLOAT` in the SQL compiler's projection list moves that work into DuckDB's vectorized executor and eliminates the tier entirely. This is a one-line change in a SQL compiler that removes the single largest CPU cost in the upload path.
+2. **Cast to `FLOAT` in the generated SQL.** WGSL has no f64, so every `DOUBLE` column bound to a visual channel pays a CPU narrowing pass. Emitting `CAST(expr AS FLOAT)` in the projection list moves that work into DuckDB's vectorized executor and eliminates the tier entirely. **Since implemented here** — and it turned out to fix a second bug at the same time: DuckDB infers `DECIMAL` for a literal like `1.0`, Arrow reports a decimal as an *unscaled* integer, and the upload path read it as garbage. See §8.
 
 The remaining unavoidable casts are nullable columns (Arrow's validity bitmap has to become something WGSL understands — here NaN, discarded in-shader) and SQL-built vectors (see finding 4).
 
@@ -114,7 +114,7 @@ deck keeps doing what it is genuinely good at — the layer catalog, views and c
 
 ### 5a. What happened when it was actually run
 
-The four steps above were implemented (`src/compare/deck-webgpu-pane.ts`) rather than left as an argument from type definitions, because "the API exists" and "I ran it" are different claims. Verified with WebGPU error scopes, not by absence of exceptions — luma reports validation failures by logging them, so a `try`/`catch` around a dispatch stays silent while the pipeline is invalid and nothing is computed.
+The four steps above were implemented (`src/deck/webgpu-pane.ts`) rather than left as an argument from type definitions, because "the API exists" and "I ran it" are different claims. Verified with WebGPU error scopes, not by absence of exceptions — luma reports validation failures by logging them, so a `try`/`catch` around a dispatch stays silent while the pipeline is invalid and nothing is computed.
 
 | step | result |
 |---|---|
@@ -140,7 +140,7 @@ Point 3 turned into a useful demonstration rather than a blocker: the optimizer 
 
 The first version placed nodes by rule (`volume-reducing → SQL`, `volume-preserving → GPU`). That is a heuristic wearing a cost model's clothes: it cannot know that a filter keeping 98% of rows is not worth a requery, or that a slider being dragged should pull its consumers onto the GPU.
 
-Replacing it needed three pieces — statistics (`graph/stats.ts`), a calibrated cost model (`graph/cost.ts` + `engine/calibrate.ts`), and a search (`graph/optimizer.ts`) — and one structural observation that made the search exact rather than heuristic:
+Replacing it needed three pieces — statistics (`core/stats.ts`), a calibrated cost model (`core/cost.ts` + `webgpu/calibrate.ts`), and a search (`core/optimizer.ts`) — and one structural observation that made the search exact rather than heuristic:
 
 > SQL cannot read a GPU buffer, and GPU output cannot return to the CPU without a readback. So in topological order the stages must appear as `SQL* CPU* GPU*`. **An assignment is two boundary indices**, there are O(n²) of them, and every one can be priced.
 
@@ -188,7 +188,7 @@ A planner shipped with the left-hand column would make confident, portable-looki
 
 ### Capability constraints are the same machinery
 
-Targets are described by capability, not product name (`graph/target.ts`): `compute`, `appOwnedBuffers`, `gpuBudgetBytes`, `maxStorageBuffersPerStage`. Two of these visibly change plans:
+Targets are described by capability, not product name (`core/target.ts`): `compute`, `appOwnedBuffers`, `gpuBudgetBytes`, `maxStorageBuffersPerStage`. Two of these visibly change plans:
 
 - **`compute: false`** (deck on WebGL2) makes the GPU stage illegal, so `ramp()` — which has no SQL form — is forced onto the CPU and the plan becomes `SQL* CPU*` with zero kernels. The comparison pane stopped being hand-written glue and became a physical plan.
 - **`maxStorageBuffersPerStage: 8`** rejects candidates whose fused kernel needs more bindings, and the optimizer routes around it by moving a node out of the kernel.
@@ -217,17 +217,78 @@ Deliberately not a language: no control flow, no loops, no user functions. Every
 
 DAG support came with it: nodes take `inputs: string[]`, topological order replaces the linear chain walk, unreachable branches are dropped as dead code, and cycles are reported instead of hanging. Multi-input means merging attribute namespaces over a shared row set — relational joins are out of scope.
 
+## 8. Executing the backends found bugs that compiling them did not
+
+The suite spent most of its life checking that the SQL and WGSL backends *compile*, because
+only the JS backend is executable in Node. Running all three in Chromium against real DuckDB
+and real WebGPU found four bugs on the first pass, every one of which would have reached a
+user.
+
+**The SQL backend had no boolean tracking.** WGSL and JS both convert a comparison to a
+number in an arithmetic context — the WGSL emitter has carried an `isBool` flag for exactly
+that since it was written. SQL does not, and DuckDB rejects `(a > b) * 2` with a binder error.
+Any graph whose attribute expression used a comparison arithmetically failed at query time.
+
+**`%` disagreed across backends for negative operands.** DuckDB's `%` truncates toward zero;
+WGSL has no float `%` at all and the polyfill floors, as does the JS backend. So `-2 % 3` was
+1 on two backends and −2 in SQL. Nothing structural could have caught this: all three
+compiled, and all three were self-consistent.
+
+**Kernels with no parameters silently produced zeroes.** `Kernel` used `layout: 'auto'`, which
+omits bindings the shader never references. A GPU stage using no parameters never reads
+`params`, so slot 0 vanished from the derived layout and the bind group was rejected for
+supplying it — and WebGPU reports that through `uncapturederror` rather than throwing, which
+invalidates the *entire* command buffer including the compute pass. Every derived attribute
+came back zero-filled with nothing logged as a failure. The demo never showed it because its
+graphs always had a parameter.
+
+**`DECIMAL` columns read back as garbage.** DuckDB infers `DECIMAL` for a literal like `1.0`,
+and Arrow represents a decimal as an *unscaled* integer, so a constant weight of `1.0` arrived
+as 0 and the heatmap accumulated nothing. Fixed by casting SELECT items to `FLOAT` — which is
+what §2 recommended for a different reason, and which also removes the `cast` upload tier for
+`DOUBLE` columns by moving the narrowing into DuckDB's vectorised executor.
+
+A fifth, found by the Node suite: selectivity conflated `>` with `>=` on a single-valued
+column, reporting that `x > 5` keeps every row when `x` is always 5.
+
+### What the browser suite now asserts
+
+- The same expression through DuckDB, through a compute kernel, and through generated JS,
+  compared element-wise over 29 portable expressions plus parameter binding.
+- The same graph planned under `cost`, `auto` and `sql-first`, and on a target with no compute
+  at all, producing numerically identical attribute buffers. Placement is meant to be a cost
+  decision; if it changed the picture the optimizer would not be free to choose.
+- Ten uniform-routed parameter changes producing zero requeries, zero reallocations and zero
+  re-uploads — and still changing the buffer.
+- Exact bin counts read back from the atomic grid, rather than a heatmap that looks plausible.
+- Every calibrated constant finite and positive, and predicted build cost within an order of
+  magnitude of measured.
+
+### Two traps worth knowing
+
+Playwright's default headless binary is `chrome-headless-shell`, which ships **without
+WebGPU**: `navigator.gpu` exists but `requestAdapter()` returns null, so every GPU test skips
+while appearing to have run. `channel: 'chromium'` selects the full build.
+
+`Runtime.build()` marks kernels dirty but does not dispatch them — that happens in `frame()`.
+Reading a derived attribute straight after `build()` compares zeroes, which is how three of
+these tests initially "failed" for the wrong reason.
+
 ## Recommended order of work for noodles
 
 Ranked by payoff per unit of risk. The first three are independent of any renderer decision.
 
 1. **Classify parameters as structural vs value, and route value params to uniforms or prepared-statement binds.** Biggest win, entirely renderer-independent, and it is what makes a slider feel instant at 1M rows. DuckDB-Wasm's prepared statements already do the SQL half.
 2. **Cast channel-bound columns to `FLOAT` in the generated SQL,** and upload Arrow per record batch instead of concatenating. Removes the largest CPU cost in the upload path for a very small diff.
-3. **Make the expression IR the shared artifact and the SQL compiler a backend of it.** `sql-compiler/expression-to-sql.ts` is already the seed; add a WGSL backend beside it. Then retire `MapRangeOp`/`ColorRampOp` into `fit()`/`ramp()` templates.
-4. **Add a cost model before adding more operator types.** Statistics from one DuckDB query per source, constants calibrated at startup, and the exact two-boundary search. The rule-based version cannot distinguish a filter worth pushing from one that is not, and the difference was 3× the rows on screen. Budget for the render term — without it the model prefers discard masks.
-5. **Replace operator types with a `wrangle` node.** It needed no planner support, it subsumes scale/colorscale/project, and locals cost nothing. This is the cheapest large win in the list.
-6. **Keep deck.gl, and pass it app-owned luma Buffers** for the layer types that dominate — scatter and heatmap. The compute path works today; the three deck/luma fixes in §5a are what stand between that and pixels.
-7. Only if 1–6 land and the remaining bottleneck is deck itself, consider owning the render path. On this evidence that is not where the cost is.
+3. **Test by executing, not by compiling.** Four of the five bugs above were invisible to a
+   structural test and visible on the first run of an executing one. The cheap version of this
+   is a browser test that evaluates one expression through every backend and compares — it does
+   not need the whole pipeline to pay for itself.
+4. **Make the expression IR the shared artifact and the SQL compiler a backend of it.** `sql-compiler/expression-to-sql.ts` is already the seed; add a WGSL backend beside it. Then retire `MapRangeOp`/`ColorRampOp` into `fit()`/`ramp()` templates.
+5. **Add a cost model before adding more operator types.** Statistics from one DuckDB query per source, constants calibrated at startup, and the exact two-boundary search. The rule-based version cannot distinguish a filter worth pushing from one that is not, and the difference was 3× the rows on screen. Budget for the render term — without it the model prefers discard masks.
+6. **Replace operator types with a `wrangle` node.** It needed no planner support, it subsumes scale/colorscale/project, and locals cost nothing. This is the cheapest large win in the list.
+7. **Keep deck.gl, and pass it app-owned luma Buffers** for the layer types that dominate — scatter and heatmap. The compute path works today; the three deck/luma fixes in §5a are what stand between that and pixels.
+8. Only if 1–7 land and the remaining bottleneck is deck itself, consider owning the render path. On this evidence that is not where the cost is.
 
 ## What this prototype does not prove
 

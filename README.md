@@ -1,16 +1,67 @@
 # DuckDB → WebGPU procedural graph
 
-A proof of concept for the noodles.gl design, built from first principles: a JSON graph
-of filters, aggregations, scales and color scales, compiled to DuckDB SQL and WGSL
-compute, rendered to a WebGPU canvas. No deck.gl in the critical path.
+A declarative, cost-planned data graph: JSON in, GPU pixels out. Filters, aggregations,
+scales and color scales compile to DuckDB SQL and WGSL compute, and a cost model decides
+which engine runs each node. Houdini-style named attributes (`P`, `Cd`, `pscale`).
 
 ```bash
 npm install
-npm run dev
+npm run dev        # the inspector demo
+npm test           # 528 node tests
+npm run test:gpu   # 59 browser tests, real WebGPU + real DuckDB
 ```
 
 Needs Chrome/Edge 113+ or Safari 26+. Read [FINDINGS.md](FINDINGS.md) for the measured
 results and the recommendation for noodles.
+
+## Using it as a library
+
+Four entry points, split along what each one needs. The package name is a placeholder —
+change it in `package.json` before publishing.
+
+```ts
+// Headless: no GPU, no DOM, no database driver. Only dependency is apache-arrow, and
+// even that is types-only, so the built core entry has zero runtime imports.
+import { plan, analyze, optimize, parseExpr, toSql, toWgsl } from '@noodles/gpu-graph';
+
+// The WebGPU runtime: needs a GPUDevice and a SqlEngine.
+import { initGpu, Runtime, calibrate } from '@noodles/gpu-graph/webgpu';
+
+// A SqlEngine over duckdb-wasm. Bundle URLs are passed in, so nothing here needs a bundler.
+import { DuckDbEngine } from '@noodles/gpu-graph/duckdb';
+
+// deck.gl adapters, for rendering the same plan through deck.
+import { DeckWebgl2Pane, DeckWebgpuPane } from '@noodles/gpu-graph/deck';
+```
+
+Planning is headless, so the compiler can be used on its own — a build step or a test can
+inspect the generated SQL and WGSL without ever creating a device:
+
+```ts
+import { plan, targetCaps } from '@noodles/gpu-graph';
+
+const physical = plan(graph, schema, {
+  policy: 'cost',
+  stats,                                        // from statsSql + parseStatsRow
+  caps: targetCaps('webgpu-native', device),    // or undefined, headless
+  params: { speedCutoff: 60 },
+  relation: '"my_table"',
+});
+
+physical.sql;                 // the DuckDB query, with $1-style binds
+physical.kernels[0].code;     // the fused WGSL
+physical.explain.candidates;  // every legal plan and its cost
+```
+
+Data arrives through a source provider rather than being baked in, so the library never
+needs to know where rows come from:
+
+```ts
+import { parquetUrlSource, relationSource } from '@noodles/gpu-graph';
+
+runtime.registerSource('trips', parquetUrlSource('https://example.com/trips.parquet'));
+runtime.registerSource('local', relationSource('already_loaded_table'));
+```
 
 ## The idea
 
@@ -22,19 +73,19 @@ compiles to a DuckDB `SELECT` expression, a WGSL statement, or a JS loop body fr
 same AST — so "which engine runs this node" is a cost decision, not a rewrite.
 
 ```
-src/graph/expr.ts            parser + AST + the capability table
-src/graph/backends/sql.ts    -> DuckDB, with `?` placeholders for prepared statements
-src/graph/backends/wgsl.ts   -> WGSL, width- and bool-aware
-src/graph/backends/js.ts     -> JS, for the CPU stage and the deck comparison
+src/core/expr.ts            parser + AST + the capability table
+src/core/backends/sql.ts    -> DuckDB, with $1-style binds for prepared statements
+src/core/backends/wgsl.ts   -> WGSL, width- and bool-aware
+src/core/backends/js.ts     -> JS, for the CPU stage and the deck comparison
 ```
 
 Planning is three phases, deliberately separated so a plan exists as data before anything
 is generated:
 
 ```
-src/graph/analyze.ts     topological order, feasible engines per node, widths, op counts
-src/graph/optimizer.ts   price every legal plan, pick the cheapest
-src/graph/planner.ts     emit SQL + WGSL + the CPU loop for the chosen assignment
+src/core/analyze.ts      topological order, feasible engines per node, widths, op counts
+src/core/optimizer.ts    price every legal plan, pick the cheapest
+src/core/planner.ts      emit SQL + WGSL + the CPU loop for the chosen assignment
 ```
 
 ## The planner
@@ -67,7 +118,7 @@ write instead of a requery.
 
 Inputs the planner actually uses: **statistics** (`stats.ts`, one DuckDB query per source —
 row count, distinct counts, ranges, null fractions, with System-R selectivity estimation),
-**cost constants** calibrated on your device at startup (`engine/calibrate.ts` — hand-derived
+**cost constants** calibrated on your device at startup (`webgpu/calibrate.ts` — hand-derived
 constants were off by up to 32×), and **target capabilities** (`target.ts` — compute
 availability, GPU memory budget, storage-buffer limit).
 
@@ -93,13 +144,13 @@ branches are dropped as dead code, cycles are reported. Relational joins are out
 
 ## Three graphs
 
-`src/graphs/scatter.json` — instanced points, log-scaled radius from a `stats`-derived
+`demo/graphs/scatter.json` — instanced points, log-scaled radius from a `stats`-derived
 domain, elevation through a viridis ramp. Three GPU nodes fuse into one kernel.
 
-`src/graphs/heatmap.json` — the same source binned on the GPU with `atomicAdd` into a
+`demo/graphs/heatmap.json` — the same source binned on the GPU with `atomicAdd` into a
 screen-space grid, then rasterized through the ramp.
 
-`src/graphs/wrangle.json` — the scatter graph again, but as one four-statement wrangle body
+`demo/graphs/wrangle.json` — the scatter graph again, but as one four-statement wrangle body
 instead of four operator nodes. Same image, one fused kernel.
 
 ## The inspector is the point
@@ -135,32 +186,57 @@ Things worth doing by hand:
 ## Layout
 
 ```
-src/graph/      expression IR + backends, analyze/optimize/emit, statistics, cost model,
-                target capabilities, wrangle parser, JSON schema + desugaring
-src/engine/     webgpu device, duckdb host, arrow→gpu upload, attribute registry,
-                orbit camera, kernel host, render passes, calibration, runtime
-src/compare/    CPU stage evaluation + the two deck.gl panes (webgl2 and webgpu)
-src/ui/         inspector panes, explain pane, counter strip
-src/data/       synthetic source, generated inside DuckDB
+src/core/       expression IR + backends, analyze/optimize/emit, statistics, cost model,
+                target capabilities, source providers, wrangle parser, Arrow upload,
+                CPU stage
+src/webgpu/     device, attributes, kernels, camera, calibration, render passes, runtime
+src/duckdb/     DuckDbEngine, a SqlEngine over duckdb-wasm
+src/deck/       the WebGL2 and WebGPU deck.gl panes
+demo/           the inspector app: main.ts, ui/, graphs/, data/ (not published)
+tests/          boundary guard, budgets, benchmarks, fixtures, browser/
 ```
 
 ## Tests
 
 ```bash
-npm test
+npm test          # 528 tests, node, ~0.5s
+npm run test:gpu  # 59 tests, Chromium, real WebGPU + real DuckDB
+npm run bench     # throughput, reported not asserted
 ```
 
-146 tests over the parts with a right answer:
+The split matters. Node covers everything with a right answer that does not need a device:
+expression parsing, the op table's completeness (driven off `FUNCTIONS`, so a function added
+without a JS implementation or a width rule fails a test), selectivity estimation, the cost
+model's monotonicity, planner placement and fusion, generated-code invariants,
+`perspective` mapping near→0 and far→1, shader codegen for all 16 subsets of optional
+channels, and Arrow upload tier detection.
 
-- expression parsing, and **three-backend agreement** — the JS backend is *executed*
-  against hand-computed values, so operator precedence, integer division, float modulo and
-  ternary branch order are checked rather than asserted
-- selectivity estimation, and the optimizer's decisions: pushing a selective filter to SQL,
-  preferring a real filter over a discard mask, forcing CPU placement when the target has no
-  compute, rejecting plans over the memory or binding limits
-- wrangle statement parsing, local scoping and renaming, register-only locals
-- DAG topological order, dead-code elimination, cycle detection
-- Arrow upload tier detection across Float32/Float64/int/nullable/multi-chunk fixtures
+The browser suite exists because Node can only prove the SQL and WGSL backends *compile* —
+only the JS one is executable there. In Chromium all three run, so:
+
+- the same expression is evaluated through DuckDB, through a compute kernel, and through
+  generated JS, and compared element-wise
+- the same graph is planned under `cost`, `auto` and `sql-first`, and on a target without
+  compute, and the resulting attribute buffers must be numerically identical
+- ten uniform-routed parameter changes must produce zero requeries, zero reallocations and
+  zero re-uploads, and still change the buffer
+- exact bin counts are read back from the atomic grid
+- calibration is checked against the machine it just measured
+
+That suite found three real bugs on its first run: no boolean tracking in the SQL backend,
+`%` disagreeing on negatives, and kernels with no parameters silently producing zeroes. See
+[FINDINGS.md](FINDINGS.md) §8.
+
+Two gotchas for anyone extending it. Playwright's default headless binary is
+`chrome-headless-shell`, which has no WebGPU — `navigator.gpu` exists but `requestAdapter()`
+returns null, so GPU tests skip while looking like they ran; the config uses
+`channel: 'chromium'` for the full build. And `Runtime.build()` marks kernels dirty without
+dispatching, so a derived attribute reads as zero until a frame is submitted.
+
+Performance assertions live in `tests/budgets.test.ts` and are deliberately of two kinds:
+structural ones that cannot be flaky (the chunked upload path reports zero conversion time; a
+kernel-only parameter never becomes a SQL bind) and wall-clock guards with 100–250×
+headroom, to catch an order-of-magnitude regression rather than a 20% one.
 
 ## Known limits
 
