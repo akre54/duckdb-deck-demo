@@ -13,9 +13,9 @@ exports[`dual-backend agreement — the core claim > snapshots both emissions si
     "wgsl": "(0.0 + (1.0 - 0.0) * ((a_speed) - (0.0)) / ((100.0) - (0.0)))",
   },
   {
-    "sql": "least(greatest(("x" / ?), 0.0), 1.0)",
+    "sql": "least(greatest(("x" / $1), 0.0), 1.0)",
     "src": "clamp(x / {{scale}}, 0, 1)",
-    "wgsl": "clamp((a_x / params.scale), 0.0, 1.0)",
+    "wgsl": "clamp((a_x / params.p_scale), 0.0, 1.0)",
   },
   {
     "sql": "(CASE WHEN ("speed" > 10.0) THEN 1.0 ELSE 0.0 END)",

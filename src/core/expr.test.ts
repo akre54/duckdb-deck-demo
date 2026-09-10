@@ -88,10 +88,24 @@ describe('dual-backend agreement — the core claim', () => {
 });
 
 describe('sql backend', () => {
-  it('turns params into positional binds in order', () => {
+  it('numbers params and reuses the number for a repeated name', () => {
+    // Numbered rather than positional, so an op template that repeats an argument (fit, lerp)
+    // cannot emit more placeholders than there are binds.
     const { code, params } = toSql(parseExpr('x * {{a}} + {{b}} - {{a}}'));
-    expect(params).toEqual(['a', 'b', 'a']);
-    expect(code.match(/\?/g)).toHaveLength(3);
+    expect(params).toEqual(['a', 'b']);
+    expect(code).toContain('$1');
+    expect(code).toContain('$2');
+    expect(code.match(/\$1/g)).toHaveLength(2);
+    expect(code.match(/\$3/g)).toBeNull();
+  });
+
+  it('keeps placeholder count equal to bind count even when a template repeats', () => {
+    // `fit` uses its domain-low and range-low twice. With `?` this produced 5 placeholders
+    // for 3 binds and DuckDB rejected the statement.
+    const { code, params } = toSql(parseExpr('fit(x, {{lo}}, {{hi}}, 0, {{out}})'));
+    const distinct = new Set(code.match(/\$\d+/g) ?? []);
+    expect(params).toEqual(['lo', 'hi', 'out']);
+    expect(distinct.size).toBe(params.length);
   });
 
   it('forces float literals so integer division does not truncate', () => {

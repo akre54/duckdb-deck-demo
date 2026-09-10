@@ -12,7 +12,10 @@
  *   columns    -> whatever the caller's `resolve` returns. The planner hands back an
  *                 SSA local name, which is how it fuses several attribute nodes into
  *                 one kernel and lets a node overwrite an attribute it also reads.
- *   parameters -> `params.<name>` (a field in the uniform struct)
+ *   parameters -> `params.<wgslParamMember(name)>`. Prefixed, because a parameter becomes a
+ *                 struct *member* and WGSL reserves a long list of plausible names — a
+ *                 parameter called `type`, `filter` or `mod` would emit an illegal
+ *                 declaration. Prefixing every one is cheaper than maintaining the list.
  *   ramp()     -> `sampleRamp(x)` (declared in the kernel prelude)
  */
 
@@ -81,7 +84,7 @@ function emit(e: Expr, ctx: Ctx): Val {
 
     case 'param':
       ctx.params.add(e.name);
-      return { code: `params.${e.name}`, width: 1, isBool: false };
+      return { code: `params.${wgslParamMember(e.name)}`, width: 1, isBool: false };
 
     case 'unary': {
       const v = emit(e.operand, ctx);
@@ -175,3 +178,14 @@ function formatNumber(v: number): string {
 }
 
 export { ty as wgslType };
+
+/**
+ * Uniform struct member name for a parameter.
+ *
+ * Prefixed so a parameter named after a WGSL reserved word (`type`, `filter`, `from`, `mod`,
+ * `meta`, ...) cannot produce an illegal struct declaration. The prefix also guarantees the
+ * name is a valid identifier even if the parameter contains characters WGSL rejects.
+ */
+export function wgslParamMember(name: string): string {
+  return `p_${name.replace(/[^A-Za-z0-9_]/g, '_')}`;
+}

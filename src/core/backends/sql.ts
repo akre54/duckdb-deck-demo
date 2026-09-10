@@ -1,9 +1,20 @@
 /**
  * IR -> DuckDB SQL.
  *
- * Value parameters become positional `?` placeholders so the whole stage can be a
- * prepared statement: changing a slider rebinds and re-executes without DuckDB
- * re-planning the query. The returned `params` array is the bind order.
+ * Value parameters become **numbered** placeholders (`$1`, `$2`, ...) so the whole stage can
+ * be a prepared statement: changing a slider rebinds and re-executes without DuckDB
+ * re-planning the query.
+ *
+ * Numbered rather than positional `?` for a specific reason. Several op templates repeat an
+ * argument — `fit` uses its domain-low and range-low twice, `lerp` uses its first argument
+ * twice — and each repetition duplicates whatever text that argument produced. With `?` a
+ * repeated parameter emitted two placeholders but contributed one bind, so a graph using
+ * `fit` with a parameterized domain generated 7 placeholders for 6 binds and DuckDB rejected
+ * the statement. Numbering makes repetition free: `$3` can appear five times and still means
+ * bind three.
+ *
+ * A consequence: all emissions that end up in **one statement** must share a `SqlParams`, or
+ * their numbering collides. The planner creates one per statement and passes it in.
  *
  * SQL columns are scalars, so a vector-valued expression can only appear at the top
  * level, where it is split into one column per component (`P_0`, `P_1`, `P_2`).
@@ -16,12 +27,35 @@ import { type Expr, FUNCTIONS, SQL_BINARY, ExprError } from '../expr.js';
 export interface SqlEmit {
   /** SQL expression text. */
   code: string;
-  /** Parameter names in `?` bind order. */
+  /** Distinct parameter names, in bind order: index 0 is `$1`. */
   params: string[];
 }
 
+/**
+ * Placeholder numbering for one SQL statement.
+ *
+ * Share a single instance across every expression that lands in the same statement — the
+ * SELECT list and the WHERE clause of one query — and use a fresh one per statement.
+ */
+export class SqlParams {
+  private index = new Map<string, number>();
+  /** Parameter names in bind order; `order[0]` binds `$1`. */
+  readonly order: string[] = [];
+
+  /** The placeholder text for a parameter, assigning it a number on first sight. */
+  placeholder(name: string): string {
+    let at = this.index.get(name);
+    if (at === undefined) {
+      this.order.push(name);
+      at = this.order.length;
+      this.index.set(name, at);
+    }
+    return `$${at}`;
+  }
+}
+
 interface Ctx {
-  params: string[];
+  params: SqlParams;
 }
 
 function emit(e: Expr, ctx: Ctx): string {
@@ -33,8 +67,8 @@ function emit(e: Expr, ctx: Ctx): string {
       return quoteIdent(e.name);
 
     case 'param':
-      ctx.params.push(e.name);
-      return '?';
+      // Same name -> same number, so a template that repeats an argument is harmless.
+      return ctx.params.placeholder(e.name);
 
     case 'unary':
       return e.op === '!'
@@ -68,24 +102,32 @@ function emit(e: Expr, ctx: Ctx): string {
   }
 }
 
-/** Compile one scalar expression. */
-export function toSql(e: Expr): SqlEmit {
-  const ctx: Ctx = { params: [] };
-  const code = emit(e, ctx);
-  return { code, params: ctx.params };
+/**
+ * Compile one scalar expression.
+ *
+ * Pass `params` when this expression shares a statement with others, so the numbering is
+ * consistent across the whole query.
+ */
+export function toSql(e: Expr, params: SqlParams = new SqlParams()): SqlEmit {
+  const code = emit(e, { params });
+  return { code, params: params.order };
 }
 
 /**
  * Compile a possibly-vector expression into one SELECT item per component,
  * sharing a single parameter bind order across them.
  */
-export function toSqlColumns(e: Expr, baseAlias: string): { items: string[]; params: string[] } {
-  const ctx: Ctx = { params: [] };
+export function toSqlColumns(
+  e: Expr,
+  baseAlias: string,
+  params: SqlParams = new SqlParams(),
+): { items: string[]; params: string[] } {
+  const ctx: Ctx = { params };
   if (e.kind === 'vec') {
     const items = e.components.map((c, i) => `${emit(c, ctx)} AS ${quoteIdent(`${baseAlias}_${i}`)}`);
-    return { items, params: ctx.params };
+    return { items, params: params.order };
   }
-  return { items: [`${emit(e, ctx)} AS ${quoteIdent(baseAlias)}`], params: ctx.params };
+  return { items: [`${emit(e, ctx)} AS ${quoteIdent(baseAlias)}`], params: params.order };
 }
 
 // ---------------------------------------------------------------------------

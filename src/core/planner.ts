@@ -13,8 +13,8 @@
  */
 
 import { type Expr, columnsOf, parseExpr, widthOf } from './expr.js';
-import { toSql, toSqlColumns, quoteIdent } from './backends/sql.js';
-import { toWgsl, wgslType, type Resolver } from './backends/wgsl.js';
+import { toSql, toSqlColumns, quoteIdent, SqlParams } from './backends/sql.js';
+import { toWgsl, wgslType, wgslParamMember, type Resolver } from './backends/wgsl.js';
 import {
   type Graph, type RenderNode, type Bin2dNode, type ParamSpec, type RampName,
   statExpr, statParamName,
@@ -174,9 +174,11 @@ function emit(
 
   // --- partition -----------------------------------------------------------
   const stageOfNode = (i: number) => stageOf(assignment, i);
-  const wherePredicates: { sql: string; params: string[] }[] = [];
-  const preAggSelect: { items: string[]; params: string[]; name: string; width: number }[] = [];
-  const postAggSelect: { items: string[]; params: string[]; name: string; width: number }[] = [];
+  // Expressions, not emitted text: placeholder numbering is per statement, so emission has
+  // to wait until we know which statement each expression lands in.
+  const whereExprs: Expr[] = [];
+  const preAggSelect: { name: string; width: number; expr: Expr }[] = [];
+  const postAggSelect: { name: string; width: number; expr: Expr }[] = [];
   const cpuStage: StageNode[] = [];
   const gpuStage: StageNode[] = [];
   let maskAttribute: string | undefined;
@@ -195,8 +197,7 @@ function emit(
     switch (node.kind) {
       case 'filter': {
         if (stage === 'sql') {
-          const emitted = toSql(node.expr!);
-          wherePredicates.push({ sql: emitted.code, params: emitted.params });
+          whereExprs.push(node.expr!);
           assignments.push({
             nodeId: node.id, type: 'filter', engine: 'sql',
             why: `WHERE clause; removes rows (est. ${pct(selectivityOf(chosen, node.id))} kept)`,
@@ -233,9 +234,8 @@ function emit(
 
       case 'attribute': {
         if (stage === 'sql') {
-          const emitted = toSqlColumns(node.expr!, node.name!);
           const bucket = aggregateInSql && i > aggregateIndex ? postAggSelect : preAggSelect;
-          bucket.push({ ...emitted, name: node.name!, width: node.width });
+          bucket.push({ name: node.name!, width: node.width, expr: node.expr! });
           assignments.push({
             nodeId: node.id, type: 'attribute', engine: 'sql',
             why: node.feasible.has('gpu')
@@ -276,29 +276,27 @@ function emit(
   // --- statistics queries --------------------------------------------------
   const stats: StatsPlan[] = analysis.statsNodes.map((s) => {
     const outputs = s.ops.map((op) => ({ column: `${op}`, param: statParamName(s.id, op) }));
-    // DuckDB binds `?` by order of appearance, so SELECT params precede WHERE params.
-    const params: string[] = [];
+    // A statement of its own, so it gets its own numbering. The WHERE clause is re-emitted
+    // rather than sharing text with the row query, whose numbering differs.
+    const bind = new SqlParams();
     const items = s.ops.map((op) => {
-      const emitted = toSql(parseExpr(statExpr(op, s.column)));
-      params.push(...emitted.params);
+      const emitted = toSql(parseExpr(statExpr(op, s.column)), bind);
       return `${emitted.code} AS ${quoteIdent(op)}`;
     });
-    const where = wherePredicates.length
-      ? ` WHERE ${wherePredicates.map((p) => p.sql).join(' AND ')}`
-      : '';
-    params.push(...wherePredicates.flatMap((p) => p.params));
+    const where = emitWhere(whereExprs, bind);
     return {
       nodeId: s.id,
       sql: `SELECT ${items.join(', ')} FROM ${relation}${where}`,
       outputs,
-      params,
+      params: [...bind.order],
     };
   });
   const statsParams = new Set(stats.flatMap((s) => s.outputs.map((o) => o.param)));
 
   // --- the row query -------------------------------------------------------
   const arrowAttributes: AttributeDecl[] = [];
-  const sqlParams: string[] = [];
+  // One numbering for the whole row query: SELECT list and WHERE clause together.
+  const rowBind = new SqlParams();
   let sql: string;
 
   // Columns the CPU and GPU stages still need, plus what the stats read.
@@ -307,21 +305,12 @@ function emit(
   for (const s of analysis.statsNodes) needed.add(s.column);
   if (analysis.bin2d?.weight) for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) needed.add(c);
 
-  const where = wherePredicates.length
-    ? ` WHERE ${wherePredicates.map((p) => p.sql).join(' AND ')}`
-    : '';
-  const whereParams = wherePredicates.flatMap((p) => p.params);
-
   if (aggregateInSql && aggregateNode?.aggs && aggregateNode.groupBy) {
     const groupBy = aggregateNode.groupBy;
     const aggs = aggregateNode.aggs;
     const groupItems = groupBy.map((g) => quoteIdent(g));
-    const innerParams: string[] = [];
-    const aggItems = aggs.map((a) => {
-      const emitted = toSql(a.expr);
-      innerParams.push(...emitted.params);
-      return `${emitted.code} AS ${quoteIdent(a.name)}`;
-    });
+    const aggItems = aggs.map((a) => `${toSql(a.expr, rowBind).code} AS ${quoteIdent(a.name)}`);
+    const where = emitWhere(whereExprs, rowBind);
     const inner = `SELECT ${[...groupItems, ...aggItems].join(', ')} FROM ${relation}${where} GROUP BY ${groupItems.join(', ')}`;
 
     for (const g of groupBy) {
@@ -337,15 +326,12 @@ function emit(
       const outer = [
         ...groupItems,
         ...aggs.map((a) => quoteIdent(a.name)),
-        ...postAggSelect.flatMap((s) => s.items),
+        ...postAggSelect.flatMap((item) => toSqlColumns(item.expr, item.name, rowBind).items),
       ];
       sql = `SELECT ${outer.join(', ')} FROM (${inner}) AS "agg"`;
-      sqlParams.push(...innerParams, ...whereParams);
-      for (const s of postAggSelect) sqlParams.push(...s.params);
       notes.push('a SQL attribute follows the aggregate, so the query is wrapped in a subquery');
     } else {
       sql = inner;
-      sqlParams.push(...innerParams, ...whereParams);
     }
     for (const s of postAggSelect) {
       arrowAttributes.push({
@@ -358,12 +344,10 @@ function emit(
     const passthrough = [...needed].filter((c) => analysis.sourceSchema.has(c)).sort();
     const items = [
       ...passthrough.map((c) => quoteIdent(c)),
-      ...preAggSelect.flatMap((s) => s.items),
+      ...preAggSelect.flatMap((item) => toSqlColumns(item.expr, item.name, rowBind).items),
     ];
-    for (const s of preAggSelect) sqlParams.push(...s.params);
-    sqlParams.push(...whereParams);
     if (items.length === 0) items.push('1 AS "__unit"');
-    sql = `SELECT ${items.join(', ')} FROM ${relation}${where}`;
+    sql = `SELECT ${items.join(', ')} FROM ${relation}${emitWhere(whereExprs, rowBind)}`;
 
     for (const c of passthrough) {
       arrowAttributes.push({ name: c, width: 1, provenance: 'arrow', sourceColumns: [c] });
@@ -433,7 +417,7 @@ function emit(
   for (const p of statsParams) {
     if (!declaredParams[p]) declaredParams[p] = { value: 0, kind: 'value', label: p };
   }
-  for (const p of [...sqlParams, ...uniformParams]) {
+  for (const p of [...rowBind.order, ...uniformParams]) {
     if (!declaredParams[p]) {
       throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
     }
@@ -478,7 +462,7 @@ function emit(
 
   return {
     sql,
-    sqlParams,
+    sqlParams: [...rowBind.order],
     stats,
     kernels,
     cpuStage,
@@ -591,7 +575,7 @@ function buildKernel(
   const paramList = [...params];
   bindings.push(
     paramList.length > 0
-      ? `struct Params {\n${paramList.map((p) => `  ${p}: f32,`).join('\n')}\n};\n@group(0) @binding(${slot++}) var<uniform> params: Params;`
+      ? `struct Params {\n${paramList.map((p) => `  ${wgslParamMember(p)}: f32,`).join('\n')}\n};\n@group(0) @binding(${slot++}) var<uniform> params: Params;`
       : `@group(0) @binding(${slot++}) var<uniform> params: vec4<f32>;`,
   );
   // Not `meta` — that is a WGSL reserved keyword.
@@ -641,6 +625,12 @@ ${body.join('\n')}
 }
 
 // ---------------------------------------------------------------------------
+
+/** Emit the shared WHERE clause into a statement's own placeholder numbering. */
+function emitWhere(exprs: Expr[], bind: SqlParams): string {
+  if (exprs.length === 0) return '';
+  return ` WHERE ${exprs.map((e) => toSql(e, bind).code).join(' AND ')}`;
+}
 
 function bufName(attr: string): string {
   return `b_${attr.replace(/[^A-Za-z0-9_]/g, '_')}`;

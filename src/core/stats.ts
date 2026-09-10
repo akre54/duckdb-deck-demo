@@ -159,7 +159,13 @@ function comparison(
       return (1 - 1 / col.ndv) * notNull;
     case '>':
     case '>=': {
-      if (span <= 0) return value <= col.min ? notNull : 0;
+      // A single-valued column is the one place strict and non-strict genuinely differ:
+      // for a column that is always 5, `> 5` keeps nothing while `>= 5` keeps everything.
+      // Treating them alike here reported "keeps all rows" for a predicate that keeps none.
+      if (span <= 0) {
+        const keeps = effectiveOp === '>=' ? value <= col.min : value < col.min;
+        return keeps ? notNull : 0;
+      }
       // SQL comparisons drop NULLs, so scale by the non-null fraction. Forgetting this
       // is why the 2% NULL `speed` column in this repo's source made `speed > 0` look
       // like it kept everything.
@@ -167,7 +173,10 @@ function comparison(
     }
     case '<':
     case '<=': {
-      if (span <= 0) return value >= col.max ? notNull : 0;
+      if (span <= 0) {
+        const keeps = effectiveOp === '<=' ? value >= col.max : value > col.max;
+        return keeps ? notNull : 0;
+      }
       return clamp01((value - col.min) / span) * notNull;
     }
     default:

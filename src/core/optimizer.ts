@@ -46,6 +46,14 @@ export interface Candidate {
   cost?: CostBreakdown;
   /** Estimated rows leaving the SQL stage. */
   sqlRows?: number;
+  /**
+   * Storage buffers the fused kernel would bind.
+   *
+   * Exposed so it can be compared against what `buildKernel` actually emits: these are two
+   * implementations of the same rule, and if they drift the optimizer will happily choose a
+   * plan that cannot be compiled.
+   */
+  storageBindings?: number;
   label: string;
 }
 
@@ -288,6 +296,7 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
       reason: `fused kernel needs ${bindings.total} storage buffers (${bindings.reads} read + ${bindings.writes} written${bindings.ramp ? ' + ramp LUT' : ''}), over the per-stage limit of ${caps.maxStorageBuffersPerStage}`,
       label: text,
       sqlRows,
+      storageBindings: bindings.total,
     };
   }
 
@@ -331,7 +340,10 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
     acc.addInteract(`rebind ${name} (${earliest}, ${rate}/s)`, rate * costs.horizonSec * suffix[earliest]);
   }
 
-  return { assignment, legal: true, cost: acc.result(), sqlRows, label: text };
+  return {
+    assignment, legal: true, cost: acc.result(), sqlRows, label: text,
+    storageBindings: bindings.total,
+  };
 }
 
 // ---------------------------------------------------------------------------
