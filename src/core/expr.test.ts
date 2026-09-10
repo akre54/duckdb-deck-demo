@@ -112,10 +112,13 @@ describe('sql backend', () => {
     expect(toSql(parseExpr('1 / 2')).code).toBe('(1.0 / 2.0)');
   });
 
-  it('splits a top-level vector into one column per component', () => {
+  it('splits a top-level vector into one column per component, cast to FLOAT', () => {
+    // The cast is load-bearing: without it DuckDB returns `0.0` as DECIMAL, which Arrow
+    // reports as an unscaled integer and the upload path cannot read.
     const { items } = toSqlColumns(parseExpr('[lng, lat, 0]'), 'P');
     expect(items).toHaveLength(3);
-    expect(items[2]).toBe('0.0 AS "P_2"');
+    expect(items[2]).toBe('CAST(0.0 AS FLOAT) AS "P_2"');
+    expect(items[0]).toContain('AS "P_0"');
   });
 
   it('refuses nested vectors and swizzles rather than emitting wrong SQL', () => {

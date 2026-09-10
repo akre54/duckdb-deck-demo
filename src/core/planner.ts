@@ -13,7 +13,7 @@
  */
 
 import { type Expr, columnsOf, parseExpr, widthOf } from './expr.js';
-import { toSql, toSqlColumns, quoteIdent, SqlParams } from './backends/sql.js';
+import { toSql, toSqlColumns, quoteIdent, castToFloat, SqlParams } from './backends/sql.js';
 import { toWgsl, wgslType, wgslParamMember, type Resolver } from './backends/wgsl.js';
 import {
   type Graph, type RenderNode, type Bin2dNode, type ParamSpec, type RampName,
@@ -309,7 +309,9 @@ function emit(
     const groupBy = aggregateNode.groupBy;
     const aggs = aggregateNode.aggs;
     const groupItems = groupBy.map((g) => quoteIdent(g));
-    const aggItems = aggs.map((a) => `${toSql(a.expr, rowBind).code} AS ${quoteIdent(a.name)}`);
+    const aggItems = aggs.map(
+      (a) => `${castToFloat(toSql(a.expr, rowBind).code)} AS ${quoteIdent(a.name)}`,
+    );
     const where = emitWhere(whereExprs, rowBind);
     const inner = `SELECT ${[...groupItems, ...aggItems].join(', ')} FROM ${relation}${where} GROUP BY ${groupItems.join(', ')}`;
 
@@ -343,7 +345,9 @@ function emit(
     // Projection pushdown: only source columns something downstream reads.
     const passthrough = [...needed].filter((c) => analysis.sourceSchema.has(c)).sort();
     const items = [
-      ...passthrough.map((c) => quoteIdent(c)),
+      // Cast in SQL: everything reaching a GPU buffer is f32, so narrowing here uses DuckDB's
+      // vectorised executor instead of a JS loop, and sidesteps DECIMAL entirely.
+      ...passthrough.map((c) => `${castToFloat(quoteIdent(c))} AS ${quoteIdent(c)}`),
       ...preAggSelect.flatMap((item) => toSqlColumns(item.expr, item.name, rowBind).items),
     ];
     if (items.length === 0) items.push('1 AS "__unit"');

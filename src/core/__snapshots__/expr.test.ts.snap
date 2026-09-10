@@ -28,7 +28,7 @@ exports[`dual-backend agreement — the core claim > snapshots both emissions si
     "wgsl": "mix(a_a, a_b, 0.5)",
   },
   {
-    "sql": "(abs("x") % 7.0)",
+    "sql": "(abs("x") - 7.0 * floor(abs("x") / 7.0))",
     "src": "abs(x) % 7",
     "wgsl": "(abs(a_x) - 7.0 * floor(abs(a_x) / 7.0))",
   },

@@ -153,15 +153,18 @@ export class Bin2dPass {
     rampBuffer: GPUBuffer,
   ) {
     const cells = resolution * resolution;
+    // COPY_SRC so the accumulated bins can be read back. Not needed to render, but a grid
+    // that cannot be inspected can only be checked by looking at it, and "the heatmap looks
+    // plausible" is not an assertion.
     this.grid = device.createBuffer({
       label: 'bin2d:grid',
       size: cells * 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     this.gmax = device.createBuffer({
       label: 'bin2d:max',
       size: 16,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     this.metaBuffer = device.createBuffer({
       label: 'bin2d:meta', size: 16,

@@ -13,6 +13,7 @@ import { gpuData } from './gpu-compat.js';
 
 export class Kernel {
   private pipeline: GPUComputePipeline;
+  private layout: GPUBindGroupLayout;
   private paramBuffer: GPUBuffer;
   private metaBuffer: GPUBuffer;
   private paramScratch: Float32Array;
@@ -25,9 +26,44 @@ export class Kernel {
     private readonly rampBuffer?: GPUBuffer,
   ) {
     const module = device.createShaderModule({ label: plan.id, code: plan.code });
+
+    /**
+     * An explicit layout, not `layout: 'auto'`.
+     *
+     * Auto layout omits bindings the shader does not reference. A kernel whose stage uses no
+     * parameters never reads `params`, so the derived layout has no slot 0 — and the bind
+     * group built below is then rejected for supplying one. WebGPU reports that through
+     * `uncapturederror` rather than throwing, which invalidates the whole command buffer
+     * (compute pass included) and leaves every derived attribute silently zero-filled.
+     */
+    const entries: GPUBindGroupLayoutEntry[] = [
+      { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+    ];
+    let slot = 2;
+    if (plan.usesRamp) {
+      entries.push({
+        binding: slot++, visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'read-only-storage' },
+      });
+    }
+    for (const _ of plan.reads) {
+      entries.push({
+        binding: slot++, visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'read-only-storage' },
+      });
+    }
+    for (const _ of plan.writes) {
+      entries.push({
+        binding: slot++, visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: 'storage' },
+      });
+    }
+    this.layout = device.createBindGroupLayout({ label: `${plan.id}:layout`, entries });
+
     this.pipeline = device.createComputePipeline({
       label: plan.id,
-      layout: 'auto',
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
       compute: { module, entryPoint: 'main' },
     });
 
@@ -80,7 +116,7 @@ export class Kernel {
     }
     this.bindGroup = this.device.createBindGroup({
       label: `${this.plan.id}:bg`,
-      layout: this.pipeline.getBindGroupLayout(0),
+      layout: this.layout,
       entries,
     });
     this.bindKey = key;

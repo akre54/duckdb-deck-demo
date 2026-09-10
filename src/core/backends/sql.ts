@@ -58,38 +58,91 @@ interface Ctx {
   params: SqlParams;
 }
 
-function emit(e: Expr, ctx: Ctx): string {
+/**
+ * An emitted fragment plus whether it is a SQL BOOLEAN.
+ *
+ * Tracking this matters because SQL, unlike WGSL and JS, has no implicit boolean-to-number
+ * conversion: DuckDB rejects `(a > b) * 2` with a binder error. The WGSL backend already
+ * carried an `isBool` flag for the same reason; the SQL backend did not, so a comparison used
+ * in arithmetic produced a query that failed to bind.
+ */
+interface Val {
+  code: string;
+  isBool: boolean;
+}
+
+const COMPARISONS = ['==', '!=', '<', '<=', '>', '>='];
+const LOGICAL = ['&&', '||'];
+
+/** Force a fragment into numeric form. */
+function asNumber(v: Val): string {
+  return v.isBool ? `(CASE WHEN ${v.code} THEN 1.0 ELSE 0.0 END)` : v.code;
+}
+
+/** Force a fragment into boolean form, for a WHERE clause or a CASE condition. */
+function asBool(v: Val): string {
+  return v.isBool ? v.code : `(${v.code} <> 0)`;
+}
+
+function emit(e: Expr, ctx: Ctx): Val {
   switch (e.kind) {
     case 'num':
-      return formatNumber(e.value);
+      return { code: formatNumber(e.value), isBool: false };
 
     case 'col':
-      return quoteIdent(e.name);
+      return { code: quoteIdent(e.name), isBool: false };
 
     case 'param':
       // Same name -> same number, so a template that repeats an argument is harmless.
-      return ctx.params.placeholder(e.name);
+      return { code: ctx.params.placeholder(e.name), isBool: false };
 
-    case 'unary':
+    case 'unary': {
+      const operand = emit(e.operand, ctx);
       return e.op === '!'
-        ? `(NOT ${emit(e.operand, ctx)})`
-        : `(-${emit(e.operand, ctx)})`;
-
-    case 'binary': {
-      const op = SQL_BINARY[e.op] ?? e.op;
-      return `(${emit(e.left, ctx)} ${op} ${emit(e.right, ctx)})`;
+        ? { code: `(NOT ${asBool(operand)})`, isBool: true }
+        : { code: `(-${asNumber(operand)})`, isBool: false };
     }
 
-    case 'cond':
-      return `(CASE WHEN ${emit(e.test, ctx)} THEN ${emit(e.then, ctx)} ELSE ${emit(e.else, ctx)} END)`;
+    case 'binary': {
+      const left = emit(e.left, ctx);
+      const right = emit(e.right, ctx);
+      const op = SQL_BINARY[e.op] ?? e.op;
+
+      if (LOGICAL.includes(e.op)) {
+        return { code: `(${asBool(left)} ${op} ${asBool(right)})`, isBool: true };
+      }
+      if (COMPARISONS.includes(e.op)) {
+        return { code: `(${asNumber(left)} ${op} ${asNumber(right)})`, isBool: true };
+      }
+      if (e.op === '%') {
+        // DuckDB's `%` truncates toward zero; WGSL has no float `%` at all and the other two
+        // backends use floor semantics. Emitting the floor form here is what makes
+        // `-2 % 3` agree at 1 across all three rather than being -2 in SQL only.
+        const a = asNumber(left);
+        const b = asNumber(right);
+        return { code: `(${a} - ${b} * floor(${a} / ${b}))`, isBool: false };
+      }
+      return { code: `(${asNumber(left)} ${op} ${asNumber(right)})`, isBool: false };
+    }
+
+    case 'cond': {
+      const test = emit(e.test, ctx);
+      const then = emit(e.then, ctx);
+      const otherwise = emit(e.else, ctx);
+      return {
+        code: `(CASE WHEN ${asBool(test)} THEN ${asNumber(then)} ELSE ${asNumber(otherwise)} END)`,
+        isBool: false,
+      };
+    }
 
     case 'call': {
       const spec = FUNCTIONS[e.fn];
       if (!spec.sql) {
         throw new ExprError(`${e.fn}() has no SQL equivalent; this node must run on the GPU`);
       }
-      const args = e.args.map((a) => emit(a, ctx));
-      return typeof spec.sql === 'function' ? spec.sql(args) : `${spec.sql}(${args.join(', ')})`;
+      const args = e.args.map((a) => asNumber(emit(a, ctx)));
+      const code = typeof spec.sql === 'function' ? spec.sql(args) : `${spec.sql}(${args.join(', ')})`;
+      return { code, isBool: false };
     }
 
     case 'vec':
@@ -109,25 +162,46 @@ function emit(e: Expr, ctx: Ctx): string {
  * consistent across the whole query.
  */
 export function toSql(e: Expr, params: SqlParams = new SqlParams()): SqlEmit {
-  const code = emit(e, { params });
-  return { code, params: params.order };
+  // Left in whatever form the tree produced: a predicate stays BOOLEAN for a WHERE clause.
+  const value = emit(e, { params });
+  return { code: value.code, params: params.order };
 }
 
 /**
  * Compile a possibly-vector expression into one SELECT item per component,
  * sharing a single parameter bind order across them.
  */
+/**
+ * Wrap a SELECT item so it arrives as an Arrow Float32 column.
+ *
+ * Two problems this solves at once. DuckDB infers DECIMAL for a literal like `1.0`, and Arrow
+ * represents a decimal as an *unscaled* integer — the upload path reads it as garbage, so a
+ * constant weight of 1.0 silently became 0. And every column reaching the GPU becomes f32
+ * anyway, so narrowing here moves the work into DuckDB's vectorised executor and removes the
+ * CPU cast tier entirely.
+ */
+export function castToFloat(code: string): string {
+  return `CAST(${code} AS FLOAT)`;
+}
+
 export function toSqlColumns(
   e: Expr,
   baseAlias: string,
   params: SqlParams = new SqlParams(),
 ): { items: string[]; params: string[] } {
   const ctx: Ctx = { params };
+  // Coerced to numeric: a selected column feeds an f32 attribute buffer, so a BOOLEAN result
+  // would arrive as an Arrow bool vector that the upload path cannot read.
   if (e.kind === 'vec') {
-    const items = e.components.map((c, i) => `${emit(c, ctx)} AS ${quoteIdent(`${baseAlias}_${i}`)}`);
+    const items = e.components.map(
+      (c, i) => `${castToFloat(asNumber(emit(c, ctx)))} AS ${quoteIdent(`${baseAlias}_${i}`)}`,
+    );
     return { items, params: params.order };
   }
-  return { items: [`${emit(e, ctx)} AS ${quoteIdent(baseAlias)}`], params: params.order };
+  return {
+    items: [`${castToFloat(asNumber(emit(e, ctx)))} AS ${quoteIdent(baseAlias)}`],
+    params: params.order,
+  };
 }
 
 // ---------------------------------------------------------------------------
