@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  // Library only: the demo, tests and benchmarks are not published.
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts", "src/**/*.bench.ts"]
+}

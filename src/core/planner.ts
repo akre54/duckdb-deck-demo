@@ -1,0 +1,691 @@
+/**
+ * Phase 3 of planning: emit a physical plan for a chosen assignment.
+ *
+ * This file used to do all three phases at once — decide, then generate, in a single walk.
+ * Splitting the decision out into `analyze.ts` and `optimizer.ts` is what makes a cost
+ * model possible: emit now *receives* the placement and has no opinion about it, so the
+ * same code generates the plan whichever way the optimizer or a policy decided.
+ *
+ * Three stages exist, in this order and only this order:
+ *   SQL  filters (real row removal), aggregates, scalar attribute expressions
+ *   CPU  generated JS over Arrow columns, results uploaded
+ *   GPU  one fused compute kernel writing attribute buffers in place
+ */
+
+import { type Expr, columnsOf, parseExpr, widthOf } from './expr.js';
+import { toSql, toSqlColumns, quoteIdent } from './backends/sql.js';
+import { toWgsl, wgslType, type Resolver } from './backends/wgsl.js';
+import {
+  type Graph, type RenderNode, type Bin2dNode, type ParamSpec, type RampName,
+  statExpr, statParamName,
+} from './types.js';
+import {
+  analyze, PlanError, type Analysis, type AnalyzedNode, type Schema, type Stage,
+} from './analyze.js';
+import {
+  optimize, stageOf, type Assignment, type Candidate, type Policy, type OptimizeResult,
+} from './optimizer.js';
+import { type CostConstants, DEFAULT_COSTS, type CostBreakdown } from './cost.js';
+import type { SourceStats } from './stats.js';
+import { type TargetCaps, targetCaps } from './target.js';
+
+export { PlanError };
+export type { Schema, Stage, Policy, Assignment, Candidate };
+
+export interface AttributeDecl {
+  name: string;
+  width: number;
+  /**
+   * `arrow` came out of the query, `cpu` was written by the generated JS loop, `derived`
+   * was written by a kernel. The distinction drives both invalidation and the upload path.
+   */
+  provenance: 'arrow' | 'cpu' | 'derived';
+  /** For arrow attributes: the query columns backing each component. */
+  sourceColumns?: string[];
+  /** True for wrangle locals, which the inspector hides. */
+  internal?: boolean;
+}
+
+export interface KernelPlan {
+  id: string;
+  code: string;
+  reads: string[];
+  writes: string[];
+  params: string[];
+  usesRamp: boolean;
+  nodeIds: string[];
+}
+
+export interface StatsPlan {
+  nodeId: string;
+  sql: string;
+  outputs: { column: string; param: string }[];
+  params: string[];
+}
+
+export interface StageNode {
+  nodeId: string;
+  name: string;
+  expr: Expr;
+}
+
+export interface Explain {
+  method: OptimizeResult['method'];
+  chosen: Assignment;
+  candidates: Candidate[];
+  /** Estimated cost of the chosen plan. */
+  estimated?: CostBreakdown;
+  estimatedRows: number;
+  estimatedSelectivity: OptimizeResult['estimatedSelectivity'];
+  costs: CostConstants;
+  caps: TargetCaps;
+  /** Nodes in topological order with their assigned stage. */
+  placement: { nodeId: string; kind: string; stage: Stage; ops: number; why: string }[];
+  notes: string[];
+}
+
+export interface PhysicalPlan {
+  sql: string;
+  sqlParams: string[];
+  stats: StatsPlan[];
+  kernels: KernelPlan[];
+  /** Nodes the generated JS loop evaluates, in order. */
+  cpuStage: StageNode[];
+  /** Nodes the fused kernel evaluates, in order. */
+  gpuStage: StageNode[];
+  attributes: AttributeDecl[];
+  uniformParams: string[];
+  params: Record<string, ParamSpec>;
+  render: RenderNode;
+  ramp?: RampName;
+  bin2d?: Bin2dNode;
+  assignments: { nodeId: string; type: string; engine: 'sql' | 'cpu' | 'gpu' | 'scalar' | 'render' | 'source'; why: string }[];
+  notes: string[];
+  maskAttribute?: string;
+  explain: Explain;
+}
+
+export interface PlanOptions {
+  policy?: Policy;
+  costs?: CostConstants;
+  caps?: TargetCaps;
+  stats?: SourceStats;
+  /** Current parameter values, so selectivity estimates move when a slider moves. */
+  params?: Record<string, number>;
+  /** Relation the generated SQL should read, from the source provider. */
+  relation?: string;
+}
+
+const WORKGROUP = 256;
+/**
+ * Fallback relation name when the caller does not supply one. Real callers pass the
+ * provider's relation through `PlanOptions.relation`, so the generated SQL names whatever
+ * the source actually created rather than assuming a table called `src`.
+ */
+export const DEFAULT_RELATION = '"src"';
+
+export { WORKGROUP };
+
+// ---------------------------------------------------------------------------
+
+export function plan(
+  graph: Graph,
+  sourceSchema: Schema,
+  options: Policy | PlanOptions = {},
+): PhysicalPlan {
+  const opts: PlanOptions = typeof options === 'string' ? { policy: options } : options;
+  const caps = opts.caps ?? targetCaps('webgpu-native', undefined);
+  const costs = opts.costs ?? DEFAULT_COSTS;
+  // Cost-based planning needs statistics; without them the rule-based policy is honest
+  // and the optimizer says so in its notes.
+  const policy: Policy = opts.policy ?? (opts.stats ? 'cost' : 'auto');
+
+  const analysis = analyze(graph, sourceSchema);
+  const result = optimize(analysis, {
+    costs, caps, stats: opts.stats, params: opts.params ?? {}, policy,
+  });
+
+  return emit(analysis, result, { costs, caps, relation: opts.relation ?? DEFAULT_RELATION });
+}
+
+// ---------------------------------------------------------------------------
+// Emit
+// ---------------------------------------------------------------------------
+
+function emit(
+  analysis: Analysis,
+  chosen: OptimizeResult,
+  ctx: { costs: CostConstants; caps: TargetCaps; relation: string },
+): PhysicalPlan {
+  const relation = ctx.relation;
+  const assignment = chosen.chosen;
+  const order = analysis.order;
+  const n = order.length;
+  const notes = [...analysis.notes, ...chosen.notes];
+
+  const assignments: PhysicalPlan['assignments'] = [
+    {
+      nodeId: analysis.source.id,
+      type: 'source',
+      engine: 'source',
+      why: `source '${analysis.source.dataset.ref}'`,
+    },
+  ];
+
+  // --- partition -----------------------------------------------------------
+  const stageOfNode = (i: number) => stageOf(assignment, i);
+  const wherePredicates: { sql: string; params: string[] }[] = [];
+  const preAggSelect: { items: string[]; params: string[]; name: string; width: number }[] = [];
+  const postAggSelect: { items: string[]; params: string[]; name: string; width: number }[] = [];
+  const cpuStage: StageNode[] = [];
+  const gpuStage: StageNode[] = [];
+  let maskAttribute: string | undefined;
+
+  const aggregateIndex = order.findIndex((node) => node.kind === 'aggregate');
+  const aggregateInSql = aggregateIndex >= 0 && aggregateIndex < assignment.sqlEnd;
+  const aggregateNode = aggregateIndex >= 0 ? order[aggregateIndex] : undefined;
+
+  /** Mask expression accumulated per non-SQL stage. */
+  const maskExpr: Partial<Record<'cpu' | 'gpu', Expr>> = {};
+
+  for (let i = 0; i < n; i++) {
+    const node = order[i];
+    const stage = stageOfNode(i);
+
+    switch (node.kind) {
+      case 'filter': {
+        if (stage === 'sql') {
+          const emitted = toSql(node.expr!);
+          wherePredicates.push({ sql: emitted.code, params: emitted.params });
+          assignments.push({
+            nodeId: node.id, type: 'filter', engine: 'sql',
+            why: `WHERE clause; removes rows (est. ${pct(selectivityOf(chosen, node.id))} kept)`,
+          });
+        } else {
+          // Outside SQL a predicate cannot remove rows, so it becomes a discard mask and
+          // the row keeps costing memory and an instance slot. Said plainly because it is
+          // the main reason the optimizer prefers SQL for filters.
+          maskAttribute = '__mask';
+          const prior = maskExpr[stage];
+          maskExpr[stage] = prior
+            ? { kind: 'binary', op: '&&', left: prior, right: node.expr! }
+            : node.expr!;
+          assignments.push({
+            nodeId: node.id, type: 'filter', engine: stage,
+            why: 'discard mask; the row still occupies memory and an instance slot',
+          });
+        }
+        break;
+      }
+
+      case 'aggregate': {
+        if (stage !== 'sql') {
+          throw new PlanError(
+            `Node ${node.id}: aggregate cannot run after the SQL stage has closed. Move it upstream of the GPU-only nodes.`,
+          );
+        }
+        assignments.push({
+          nodeId: node.id, type: 'aggregate', engine: 'sql',
+          why: 'aggregates collapse rows; no per-invocation GPU analogue',
+        });
+        break;
+      }
+
+      case 'attribute': {
+        if (stage === 'sql') {
+          const emitted = toSqlColumns(node.expr!, node.name!);
+          const bucket = aggregateInSql && i > aggregateIndex ? postAggSelect : preAggSelect;
+          bucket.push({ ...emitted, name: node.name!, width: node.width });
+          assignments.push({
+            nodeId: node.id, type: 'attribute', engine: 'sql',
+            why: node.feasible.has('gpu')
+              ? 'placed in SQL by the plan'
+              : 'no GPU equivalent for one of its functions',
+          });
+        } else {
+          const target = stage === 'cpu' ? cpuStage : gpuStage;
+          target.push({ nodeId: node.id, name: node.name!, expr: node.expr! });
+          assignments.push({
+            nodeId: node.id, type: 'attribute', engine: stage,
+            why: node.feasible.has('sql')
+              ? `placed on the ${stage.toUpperCase()} by the plan; value params rebind cheaply here`
+              : 'not SQL-expressible (ramp/swizzle)',
+          });
+        }
+        break;
+      }
+
+      case 'bin2d':
+        assignments.push({
+          nodeId: node.id, type: 'bin2d', engine: 'gpu', why: 'atomic binning compute pass',
+        });
+        break;
+    }
+  }
+
+  // Masks are emitted at the head of their stage so later nodes can read them.
+  if (maskExpr.cpu) cpuStage.unshift({ nodeId: '__mask_cpu', name: '__mask', expr: maskExpr.cpu });
+  if (maskExpr.gpu) {
+    // If the CPU stage already produced a mask, extend it rather than replacing it.
+    const expr: Expr = maskExpr.cpu
+      ? { kind: 'binary', op: '&&', left: { kind: 'col', name: '__mask' }, right: maskExpr.gpu }
+      : maskExpr.gpu;
+    gpuStage.unshift({ nodeId: '__mask_gpu', name: '__mask', expr });
+  }
+
+  // --- statistics queries --------------------------------------------------
+  const stats: StatsPlan[] = analysis.statsNodes.map((s) => {
+    const outputs = s.ops.map((op) => ({ column: `${op}`, param: statParamName(s.id, op) }));
+    // DuckDB binds `?` by order of appearance, so SELECT params precede WHERE params.
+    const params: string[] = [];
+    const items = s.ops.map((op) => {
+      const emitted = toSql(parseExpr(statExpr(op, s.column)));
+      params.push(...emitted.params);
+      return `${emitted.code} AS ${quoteIdent(op)}`;
+    });
+    const where = wherePredicates.length
+      ? ` WHERE ${wherePredicates.map((p) => p.sql).join(' AND ')}`
+      : '';
+    params.push(...wherePredicates.flatMap((p) => p.params));
+    return {
+      nodeId: s.id,
+      sql: `SELECT ${items.join(', ')} FROM ${relation}${where}`,
+      outputs,
+      params,
+    };
+  });
+  const statsParams = new Set(stats.flatMap((s) => s.outputs.map((o) => o.param)));
+
+  // --- the row query -------------------------------------------------------
+  const arrowAttributes: AttributeDecl[] = [];
+  const sqlParams: string[] = [];
+  let sql: string;
+
+  // Columns the CPU and GPU stages still need, plus what the stats read.
+  const needed = new Set<string>();
+  for (const s of [...cpuStage, ...gpuStage]) for (const c of columnsOf(s.expr)) needed.add(c);
+  for (const s of analysis.statsNodes) needed.add(s.column);
+  if (analysis.bin2d?.weight) for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) needed.add(c);
+
+  const where = wherePredicates.length
+    ? ` WHERE ${wherePredicates.map((p) => p.sql).join(' AND ')}`
+    : '';
+  const whereParams = wherePredicates.flatMap((p) => p.params);
+
+  if (aggregateInSql && aggregateNode?.aggs && aggregateNode.groupBy) {
+    const groupBy = aggregateNode.groupBy;
+    const aggs = aggregateNode.aggs;
+    const groupItems = groupBy.map((g) => quoteIdent(g));
+    const innerParams: string[] = [];
+    const aggItems = aggs.map((a) => {
+      const emitted = toSql(a.expr);
+      innerParams.push(...emitted.params);
+      return `${emitted.code} AS ${quoteIdent(a.name)}`;
+    });
+    const inner = `SELECT ${[...groupItems, ...aggItems].join(', ')} FROM ${relation}${where} GROUP BY ${groupItems.join(', ')}`;
+
+    for (const g of groupBy) {
+      arrowAttributes.push({ name: g, width: 1, provenance: 'arrow', sourceColumns: [g] });
+    }
+    for (const a of aggs) {
+      arrowAttributes.push({ name: a.name, width: 1, provenance: 'arrow', sourceColumns: [a.name] });
+    }
+
+    if (postAggSelect.length > 0) {
+      // A SQL-stage attribute after the aggregate must read the grouped result, which
+      // means wrapping rather than adding to the same SELECT list.
+      const outer = [
+        ...groupItems,
+        ...aggs.map((a) => quoteIdent(a.name)),
+        ...postAggSelect.flatMap((s) => s.items),
+      ];
+      sql = `SELECT ${outer.join(', ')} FROM (${inner}) AS "agg"`;
+      sqlParams.push(...innerParams, ...whereParams);
+      for (const s of postAggSelect) sqlParams.push(...s.params);
+      notes.push('a SQL attribute follows the aggregate, so the query is wrapped in a subquery');
+    } else {
+      sql = inner;
+      sqlParams.push(...innerParams, ...whereParams);
+    }
+    for (const s of postAggSelect) {
+      arrowAttributes.push({
+        name: s.name, width: s.width, provenance: 'arrow',
+        sourceColumns: componentColumns(s.name, s.width),
+      });
+    }
+  } else {
+    // Projection pushdown: only source columns something downstream reads.
+    const passthrough = [...needed].filter((c) => analysis.sourceSchema.has(c)).sort();
+    const items = [
+      ...passthrough.map((c) => quoteIdent(c)),
+      ...preAggSelect.flatMap((s) => s.items),
+    ];
+    for (const s of preAggSelect) sqlParams.push(...s.params);
+    sqlParams.push(...whereParams);
+    if (items.length === 0) items.push('1 AS "__unit"');
+    sql = `SELECT ${items.join(', ')} FROM ${relation}${where}`;
+
+    for (const c of passthrough) {
+      arrowAttributes.push({ name: c, width: 1, provenance: 'arrow', sourceColumns: [c] });
+    }
+    for (const s of preAggSelect) {
+      arrowAttributes.push({
+        name: s.name, width: s.width, provenance: 'arrow',
+        sourceColumns: componentColumns(s.name, s.width),
+      });
+    }
+    notes.push(
+      `projection pushdown: ${passthrough.length} of ${analysis.sourceSchema.size} source columns selected`,
+    );
+
+    if (aggregateIndex >= 0 && !aggregateInSql) {
+      throw new PlanError(
+        `Node ${order[aggregateIndex].id}: aggregate cannot run after the SQL stage has closed. Move it upstream of the GPU-only nodes.`,
+      );
+    }
+  }
+
+  // --- CPU stage declarations ---------------------------------------------
+  const widthOfName = new Map<string, number>();
+  for (const a of arrowAttributes) widthOfName.set(a.name, a.width);
+
+  const cpuAttributes: AttributeDecl[] = [];
+  for (const s of cpuStage) {
+    const node = order.find((o) => o.id === s.nodeId);
+    const width = node?.width ?? inferWidth(s.expr, widthOfName);
+    widthOfName.set(s.name, width);
+    if (!cpuAttributes.some((a) => a.name === s.name)) {
+      cpuAttributes.push({ name: s.name, width, provenance: 'cpu', internal: node?.internal });
+    }
+  }
+
+  // --- GPU stage: one fused kernel ----------------------------------------
+  const derivedAttributes: AttributeDecl[] = [];
+  const kernels: KernelPlan[] = [];
+  const uniformParams = new Set<string>();
+
+  if (gpuStage.length > 0) {
+    // Attributes anything outside the kernel needs: the render channels, the bin2d weight,
+    // and the discard mask. Everything else the kernel produces is a temporary — a wrangle
+    // local, typically — and lives in an SSA register rather than a storage buffer. Giving
+    // those a buffer would waste bandwidth and burn a binding slot against the per-stage
+    // limit for a value nothing outside the kernel ever reads.
+    const external = new Set<string>([
+      analysis.render.position ?? 'P',
+      analysis.render.color ?? 'Cd',
+      analysis.render.size ?? 'pscale',
+      analysis.render.opacity ?? 'Alpha',
+      '__mask',
+    ]);
+    if (analysis.bin2d?.weight) {
+      for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) external.add(c);
+    }
+    // A CPU-stage or SQL-stage attribute name reused later must keep its buffer too.
+    for (const a of [...arrowAttributes, ...cpuAttributes]) external.add(a.name);
+
+    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, external);
+    kernels.push(kernel);
+    for (const p of kernel.params) uniformParams.add(p);
+  }
+
+  // --- parameters ---------------------------------------------------------
+  const declaredParams: Record<string, ParamSpec> = { ...analysis.params };
+  for (const p of statsParams) {
+    if (!declaredParams[p]) declaredParams[p] = { value: 0, kind: 'value', label: p };
+  }
+  for (const p of [...sqlParams, ...uniformParams]) {
+    if (!declaredParams[p]) {
+      throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
+    }
+  }
+  // CPU-stage params are neither SQL binds nor uniforms, but must still be declared.
+  for (const s of cpuStage) {
+    for (const p of paramsIn(s.expr)) {
+      if (!declaredParams[p]) {
+        throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
+      }
+    }
+  }
+
+  const attributes = [...arrowAttributes, ...cpuAttributes, ...derivedAttributes];
+
+  // --- render bindings ----------------------------------------------------
+  if (analysis.render.mode === 'points') {
+    const posName = analysis.render.position ?? 'P';
+    const pos = attributes.find((a) => a.name === posName);
+    if (!pos) throw new PlanError(`Render node needs attribute '${posName}' for position; none was produced`);
+    if (pos.width < 2) throw new PlanError(`Position attribute '${posName}' must have 2+ components, got ${pos.width}`);
+  } else if (!analysis.bin2d) {
+    throw new PlanError(`Render mode 'heatmap' requires a bin2d node upstream`);
+  }
+
+  const placement = order.map((node, i) => ({
+    nodeId: node.id,
+    kind: node.kind,
+    stage: stageOfNode(i),
+    ops: node.ops,
+    why: assignments.find((a) => a.nodeId === node.id)?.why ?? '',
+  }));
+
+  const chosenCandidate = chosen.candidates.find(
+    (c) => c.assignment.sqlEnd === assignment.sqlEnd && c.assignment.cpuEnd === assignment.cpuEnd,
+  );
+
+  assignments.push({
+    nodeId: analysis.render.id, type: 'render', engine: 'render',
+    why: `mode=${analysis.render.mode}`,
+  });
+
+  return {
+    sql,
+    sqlParams,
+    stats,
+    kernels,
+    cpuStage,
+    gpuStage,
+    attributes,
+    uniformParams: [...uniformParams],
+    params: declaredParams,
+    render: analysis.render,
+    ramp: analysis.ramp,
+    bin2d: analysis.bin2d,
+    assignments,
+    notes,
+    maskAttribute,
+    explain: {
+      method: chosen.method,
+      chosen: assignment,
+      candidates: chosen.candidates,
+      estimated: chosenCandidate?.cost,
+      estimatedRows: chosen.sqlRows,
+      estimatedSelectivity: chosen.estimatedSelectivity,
+      costs: ctx.costs,
+      caps: ctx.caps,
+      placement,
+      notes,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Kernel codegen
+// ---------------------------------------------------------------------------
+
+function buildKernel(
+  stage: StageNode[],
+  widths: Map<string, number>,
+  derivedOut: AttributeDecl[],
+  order: AnalyzedNode[],
+  /** Names something outside the kernel reads. Anything else stays in a register. */
+  external: Set<string>,
+): KernelPlan {
+  /** SSA: attribute name -> current WGSL local. Lets a node overwrite what it reads. */
+  const live = new Map<string, { code: string; width: number }>();
+  let ssa = 0;
+
+  const reads = new Set<string>();
+  const writes: string[] = [];
+  const params = new Set<string>();
+  const body: string[] = [];
+  /** Kernel temporaries that never reach a buffer. */
+  const registerOnly = new Set<string>();
+  let usesRamp = false;
+
+  const resolve: Resolver = (name) => {
+    const existing = live.get(name);
+    if (existing) return existing;
+    const width = widths.get(name);
+    if (width === undefined) {
+      throw new PlanError(`Kernel references attribute '${name}' that no upstream stage produced`);
+    }
+    reads.add(name);
+    const local = `r${ssa++}`;
+    const code = width === 1
+      ? `${bufName(name)}[i]`
+      : `${wgslType(width)}(${range(width).map((c) => `${bufName(name)}[i * ${width}u + ${c}u]`).join(', ')})`;
+    body.push(`  let ${local} = ${code};`);
+    const val = { code: local, width };
+    live.set(name, val);
+    return val;
+  };
+
+  for (const node of stage) {
+    const emitted = toWgsl(node.expr, resolve);
+    for (const p of emitted.params) params.add(p);
+    if (/\bsampleRamp\(/.test(emitted.code)) usesRamp = true;
+    const local = `v${ssa++}`;
+    body.push(`  // ${node.nodeId}: ${node.name}`);
+    body.push(`  let ${local} = ${emitted.code};`);
+    live.set(node.name, { code: local, width: emitted.width });
+    widths.set(node.name, emitted.width);
+    const analyzed = order.find((o) => o.id === node.nodeId);
+
+    // A temporary nothing outside the kernel reads needs no buffer: the SSA local above
+    // already holds it for the rest of this invocation.
+    if (!external.has(node.name)) {
+      registerOnly.add(node.name);
+      continue;
+    }
+
+    if (!writes.includes(node.name)) writes.push(node.name);
+    if (!derivedOut.some((d) => d.name === node.name)) {
+      derivedOut.push({
+        name: node.name, width: emitted.width, provenance: 'derived', internal: analyzed?.internal,
+      });
+    }
+    if (emitted.width === 1) {
+      body.push(`  ${bufName(node.name)}[i] = ${local};`);
+    } else {
+      for (const c of range(emitted.width)) {
+        body.push(`  ${bufName(node.name)}[i * ${emitted.width}u + ${c}u] = ${local}[${c}];`);
+      }
+    }
+  }
+
+  // A register-only temporary is never bound, even though earlier nodes "read" it — the
+  // resolver returned its SSA local, not a buffer load.
+  const readOnly = [...reads].filter((r) => !writes.includes(r) && !registerOnly.has(r));
+
+  const bindings: string[] = [];
+  let slot = 0;
+  const paramList = [...params];
+  bindings.push(
+    paramList.length > 0
+      ? `struct Params {\n${paramList.map((p) => `  ${p}: f32,`).join('\n')}\n};\n@group(0) @binding(${slot++}) var<uniform> params: Params;`
+      : `@group(0) @binding(${slot++}) var<uniform> params: vec4<f32>;`,
+  );
+  // Not `meta` — that is a WGSL reserved keyword.
+  bindings.push(`@group(0) @binding(${slot++}) var<uniform> rowInfo: vec4<u32>; // .x = row count`);
+  if (usesRamp) {
+    bindings.push(`@group(0) @binding(${slot++}) var<storage, read> ramp_lut: array<vec4<f32>>;`);
+  }
+  for (const name of readOnly) {
+    bindings.push(`@group(0) @binding(${slot++}) var<storage, read> ${bufName(name)}: array<f32>;`);
+  }
+  for (const name of writes) {
+    bindings.push(`@group(0) @binding(${slot++}) var<storage, read_write> ${bufName(name)}: array<f32>;`);
+  }
+
+  const prelude = usesRamp
+    ? `
+fn sampleRamp(t: f32) -> vec3<f32> {
+  let n = f32(arrayLength(&ramp_lut) - 1u);
+  let x = clamp(t, 0.0, 1.0) * n;
+  let i0 = u32(floor(x));
+  let i1 = min(i0 + 1u, u32(n));
+  let f = x - floor(x);
+  return mix(ramp_lut[i0].rgb, ramp_lut[i1].rgb, f);
+}
+`
+    : '';
+
+  const code = `${bindings.join('\n')}
+${prelude}
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= rowInfo.x) { return; }
+${body.join('\n')}
+}
+`;
+
+  return {
+    id: 'kernel0',
+    code,
+    reads: readOnly,
+    writes,
+    params: paramList,
+    usesRamp,
+    nodeIds: stage.map((s) => s.nodeId),
+  };
+}
+
+// ---------------------------------------------------------------------------
+
+function bufName(attr: string): string {
+  return `b_${attr.replace(/[^A-Za-z0-9_]/g, '_')}`;
+}
+
+export { bufName };
+
+function range(n: number): number[] {
+  return Array.from({ length: n }, (_, i) => i);
+}
+
+function componentColumns(name: string, width: number): string[] {
+  return width === 1 ? [name] : range(width).map((i) => `${name}_${i}`);
+}
+
+function selectivityOf(chosen: OptimizeResult, nodeId: string): number {
+  return chosen.estimatedSelectivity.find((s) => s.nodeId === nodeId)?.selectivity ?? 1;
+}
+
+function pct(v: number): string {
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+/**
+ * Width for a synthesised stage node such as the discard mask. Analyzed nodes already
+ * carry their width; this is only the safety net for nodes emit creates itself.
+ */
+function inferWidth(e: Expr, widths: Map<string, number>): number {
+  return widthOf(e, (n) => widths.get(n) ?? 1);
+}
+
+function paramsIn(e: Expr): string[] {
+  const out = new Set<string>();
+  const walk = (n: Expr): void => {
+    switch (n.kind) {
+      case 'param': out.add(n.name); break;
+      case 'unary': walk(n.operand); break;
+      case 'binary': walk(n.left); walk(n.right); break;
+      case 'call': n.args.forEach(walk); break;
+      case 'vec': n.components.forEach(walk); break;
+      case 'swizzle': walk(n.target); break;
+      case 'cond': walk(n.test); walk(n.then); walk(n.else); break;
+      default: break;
+    }
+  };
+  walk(e);
+  return [...out];
+}

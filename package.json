@@ -1,27 +1,70 @@
 {
-  "name": "duckdb-webgpu-graph-poc",
-  "private": true,
-  "version": "0.0.1",
+  "name": "@noodles/gpu-graph",
+  "version": "0.1.0",
   "type": "module",
-  "description": "PoC: DuckDB Arrow -> JSON graph planner -> WebGPU. Houdini-style attributes, no deck.gl in the critical path.",
+  "description": "Declarative, cost-planned data graphs: JSON graph -> DuckDB SQL + WGSL compute -> WebGPU. Houdini-style named attributes.",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": ["dist", "README.md", "FINDINGS.md"],
+  "exports": {
+    ".": {
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js"
+    },
+    "./webgpu": {
+      "types": "./dist/webgpu/index.d.ts",
+      "import": "./dist/webgpu/index.js"
+    },
+    "./duckdb": {
+      "types": "./dist/duckdb/index.d.ts",
+      "import": "./dist/duckdb/index.js"
+    },
+    "./deck": {
+      "types": "./dist/deck/index.d.ts",
+      "import": "./dist/deck/index.js"
+    }
+  },
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "npm run typecheck && tsc -p tsconfig.build.json",
+    "build:demo": "vite build",
     "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "vitest run --config vitest.config.ts",
+    "test:watch": "vitest --config vitest.config.ts",
+    "test:gpu": "vitest run --config vitest.browser.config.ts",
+    "bench": "vitest bench --run --config vitest.config.ts",
+    "bench:gpu": "vitest bench --run --config vitest.browser.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "apache-arrow": "^17.0.0"
+  },
+  "peerDependencies": {
     "@deck.gl/core": "^9.4.0",
     "@deck.gl/layers": "^9.4.0",
     "@duckdb/duckdb-wasm": "^1.29.0",
-    "apache-arrow": "^17.0.0"
+    "@luma.gl/core": "^9.4.0",
+    "@luma.gl/webgpu": "^9.4.0"
+  },
+  "peerDependenciesMeta": {
+    "@deck.gl/core": { "optional": true },
+    "@deck.gl/layers": { "optional": true },
+    "@duckdb/duckdb-wasm": { "optional": true },
+    "@luma.gl/core": { "optional": true },
+    "@luma.gl/webgpu": { "optional": true }
   },
   "devDependencies": {
+    "@deck.gl/core": "^9.4.0",
+    "@deck.gl/layers": "^9.4.0",
+    "@duckdb/duckdb-wasm": "^1.29.0",
+    "@vitest/browser": "^2.1.9",
     "@webgpu/types": "^0.1.49",
+    "playwright": "^1.49.0",
     "typescript": "^5.6.0",
     "vite": "^5.4.0",
     "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

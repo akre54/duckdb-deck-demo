@@ -1,0 +1,87 @@
+{
+  "name": "heatmap \u2014 GPU atomic binning, population-weighted",
+  "params": {
+    "speedCutoff": {
+      "value": 0,
+      "min": 0,
+      "max": 120,
+      "step": 1,
+      "kind": "value",
+      "label": "speed cutoff",
+      "changeRate": 0.2
+    },
+    "elevExag": {
+      "value": 0.4,
+      "min": 0,
+      "max": 3,
+      "step": 0.01,
+      "kind": "value",
+      "label": "elevation exaggeration",
+      "changeRate": 8
+    },
+    "weightGamma": {
+      "value": 1,
+      "min": 0.2,
+      "max": 3,
+      "step": 0.05,
+      "kind": "value",
+      "label": "weight gamma",
+      "changeRate": 8
+    }
+  },
+  "nodes": [
+    {
+      "id": "src",
+      "type": "source",
+      "dataset": {
+        "ref": "synthetic",
+        "rows": 1000000,
+        "estimatedRows": 1000000
+      }
+    },
+    {
+      "id": "fast",
+      "type": "filter",
+      "input": "src",
+      "predicate": "speed > {{speedCutoff}}"
+    },
+    {
+      "id": "proj",
+      "type": "project",
+      "input": "fast",
+      "mode": "mercator",
+      "x": "lng",
+      "y": "lat",
+      "z": "elevation * {{elevExag}} * 0.0006",
+      "worldScale": "1.0"
+    },
+    {
+      "id": "weight",
+      "type": "attribute",
+      "input": "proj",
+      "name": "weight",
+      "expr": "clamp(pow(fit(ln(pop), 2.3, 13.9, 0.0, 1.0), {{weightGamma}}), 0.02, 1.0)"
+    },
+    {
+      "id": "bins",
+      "type": "bin2d",
+      "input": "weight",
+      "resolution": 512,
+      "weight": "weight",
+      "ramp": "magma",
+      "ceiling": "auto"
+    },
+    {
+      "id": "out",
+      "type": "render",
+      "input": "bins",
+      "mode": "heatmap",
+      "position": "P",
+      "background": [
+        0.01,
+        0.01,
+        0.02
+      ]
+    }
+  ]
+}
