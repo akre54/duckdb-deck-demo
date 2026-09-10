@@ -88,9 +88,13 @@ function feasibleStages(e: Expr): Set<Stage> {
 /**
  * Scalar operations in an expression, as a cost proxy.
  *
- * Counts interior tree nodes and multiplies by the result width, since an elementwise
- * vec3 operation costs three scalar operations. Crude, but it is a *relative* measure and
- * every engine is charged with the same yardstick, which is what the optimizer needs.
+ * One for the load itself plus one per interior node, times the result width — an elementwise
+ * vec3 operation costs three scalar operations. Additive rather than floored at 1, so a bare
+ * copy (`@P = pop`) is distinguishable from a call (`@P = sqrt(pop)`); flooring made every
+ * one-operation expression cost the same as a zero-operation one.
+ *
+ * Crude, but it is a *relative* measure and every engine is charged with the same yardstick,
+ * which is what the optimizer needs.
  */
 export function opCount(e: Expr, width: number): number {
   let interior = 0;
@@ -106,7 +110,7 @@ export function opCount(e: Expr, width: number): number {
     }
   };
   walk(e);
-  return Math.max(1, interior) * Math.max(1, width);
+  return (1 + interior) * Math.max(1, width);
 }
 
 export function analyze(graph: Graph, sourceSchema: Schema): Analysis {
