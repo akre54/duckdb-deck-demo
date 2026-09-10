@@ -1,0 +1,431 @@
+/**
+ * The expression IR — the load-bearing idea of this prototype.
+ *
+ * One parser, one AST, two backends. `sqrt(pop) * 2` becomes either a DuckDB SELECT
+ * expression or a WGSL statement from the same tree. If a construct can only be
+ * expressed by one backend, that is recorded in the op table below rather than
+ * special-cased in a compiler, so the planner can ask "can this node run in SQL?"
+ * by walking the tree instead of pattern-matching node types.
+ *
+ * Grammar (loosely Houdini VEX-flavored, deliberately small):
+ *   expr    := ternary
+ *   ternary := or ('?' expr ':' expr)?
+ *   or      := and ('||' and)*
+ *   and     := cmp ('&&' cmp)*
+ *   cmp     := add (('=='|'!='|'<'|'<='|'>'|'>=') add)*
+ *   add     := mul (('+'|'-') mul)*
+ *   mul     := unary (('*'|'/'|'%') unary)*
+ *   unary   := ('-'|'!') unary | postfix
+ *   postfix := primary ('.' swizzle)*
+ *   primary := number | ident | '{{' param '}}' | ident '(' args ')'
+ *            | '[' expr (',' expr)* ']' | '(' expr ')'
+ */
+
+// ---------------------------------------------------------------------------
+// AST
+// ---------------------------------------------------------------------------
+
+export type Expr =
+  | { kind: 'num'; value: number }
+  | { kind: 'col'; name: string }
+  | { kind: 'param'; name: string }
+  | { kind: 'unary'; op: UnaryOp; operand: Expr }
+  | { kind: 'binary'; op: BinaryOp; left: Expr; right: Expr }
+  | { kind: 'call'; fn: string; args: Expr[] }
+  | { kind: 'vec'; components: Expr[] }
+  | { kind: 'swizzle'; target: Expr; channels: string }
+  | { kind: 'cond'; test: Expr; then: Expr; else: Expr };
+
+export type UnaryOp = '-' | '!';
+export type BinaryOp =
+  | '+' | '-' | '*' | '/' | '%'
+  | '==' | '!=' | '<' | '<=' | '>' | '>='
+  | '&&' | '||';
+
+/** Which engines can evaluate a given construct. */
+export type Engine = 'sql' | 'gpu';
+
+// ---------------------------------------------------------------------------
+// Op table — the single source of truth for cross-backend capability
+// ---------------------------------------------------------------------------
+
+export interface FnSpec {
+  /** Arity range, inclusive. */
+  arity: [number, number];
+  /** SQL rendering. `null` means "no SQL equivalent" → forces the node onto the GPU. */
+  sql: string | ((args: string[]) => string) | null;
+  /** WGSL rendering. `null` means "no GPU equivalent" → forces the node into SQL. */
+  wgsl: string | ((args: string[]) => string) | null;
+  /**
+   * Result width in components. `'broadcast'` = widest argument wins (elementwise);
+   * a number pins it (e.g. `length` is always scalar).
+   */
+  width: 'broadcast' | number;
+  /** True for SQL aggregates, which collapse rows and so can never be a GPU kernel. */
+  aggregate?: boolean;
+}
+
+export const FUNCTIONS: Record<string, FnSpec> = {
+  // --- portable elementwise math: both backends, same semantics -------------
+  sqrt:   { arity: [1, 1], sql: 'sqrt',  wgsl: 'sqrt',  width: 'broadcast' },
+  abs:    { arity: [1, 1], sql: 'abs',   wgsl: 'abs',   width: 'broadcast' },
+  floor:  { arity: [1, 1], sql: 'floor', wgsl: 'floor', width: 'broadcast' },
+  ceil:   { arity: [1, 1], sql: 'ceil',  wgsl: 'ceil',  width: 'broadcast' },
+  round:  { arity: [1, 1], sql: 'round', wgsl: 'round', width: 'broadcast' },
+  sign:   { arity: [1, 1], sql: 'sign',  wgsl: 'sign',  width: 'broadcast' },
+  exp:    { arity: [1, 1], sql: 'exp',   wgsl: 'exp',   width: 'broadcast' },
+  sin:    { arity: [1, 1], sql: 'sin',   wgsl: 'sin',   width: 'broadcast' },
+  cos:    { arity: [1, 1], sql: 'cos',   wgsl: 'cos',   width: 'broadcast' },
+  tan:    { arity: [1, 1], sql: 'tan',   wgsl: 'tan',   width: 'broadcast' },
+  asin:   { arity: [1, 1], sql: 'asin',  wgsl: 'asin',  width: 'broadcast' },
+  atan:   { arity: [1, 1], sql: 'atan',  wgsl: 'atan',  width: 'broadcast' },
+  atan2:  { arity: [2, 2], sql: 'atan2', wgsl: 'atan2', width: 'broadcast' },
+  pow:    { arity: [2, 2], sql: 'pow',   wgsl: 'pow',   width: 'broadcast' },
+  min:    { arity: [2, 2], sql: 'least', wgsl: 'min',   width: 'broadcast' },
+  max:    { arity: [2, 2], sql: 'greatest', wgsl: 'max', width: 'broadcast' },
+  // `ln` is DuckDB's natural log; WGSL spells it `log`.
+  ln:     { arity: [1, 1], sql: 'ln',    wgsl: 'log',   width: 'broadcast' },
+  log10:  { arity: [1, 1], sql: 'log10', wgsl: 'log10', width: 'broadcast' },
+  log2:   { arity: [1, 1], sql: 'log2',  wgsl: 'log2',  width: 'broadcast' },
+
+  // `clamp` exists in both but DuckDB has no 3-arg clamp, so spell it out.
+  clamp: {
+    arity: [3, 3],
+    sql: (a) => `least(greatest(${a[0]}, ${a[1]}), ${a[2]})`,
+    wgsl: 'clamp',
+    width: 'broadcast',
+  },
+  // Houdini's `fit`, the workhorse of every scale node.
+  fit: {
+    arity: [5, 5],
+    sql: (a) =>
+      `(${a[3]} + (${a[4]} - ${a[3]}) * ((${a[0]}) - (${a[1]})) / nullif((${a[2]}) - (${a[1]}), 0))`,
+    wgsl: (a) =>
+      `(${a[3]} + (${a[4]} - ${a[3]}) * ((${a[0]}) - (${a[1]})) / ((${a[2]}) - (${a[1]})))`,
+    width: 'broadcast',
+  },
+  lerp: {
+    arity: [3, 3],
+    sql: (a) => `((${a[0]}) + ((${a[1]}) - (${a[0]})) * (${a[2]}))`,
+    wgsl: 'mix',
+    width: 'broadcast',
+  },
+
+  // --- GPU-only: no SQL equivalent, so these truncate the SQL stage ---------
+  smoothstep: { arity: [3, 3], sql: null, wgsl: 'smoothstep', width: 'broadcast' },
+  fract:      { arity: [1, 1], sql: null, wgsl: 'fract',      width: 'broadcast' },
+  length:     { arity: [1, 1], sql: null, wgsl: 'length',     width: 1 },
+  normalize:  { arity: [1, 1], sql: null, wgsl: 'normalize',  width: 'broadcast' },
+  dot:        { arity: [2, 2], sql: null, wgsl: 'dot',        width: 1 },
+  cross:      { arity: [2, 2], sql: null, wgsl: 'cross',      width: 3 },
+  /** Sample the colorscale LUT. Inherently a GPU texture/buffer read. */
+  ramp:       { arity: [1, 1], sql: null, wgsl: 'sampleRamp', width: 3 },
+
+  // --- SQL-only: aggregates collapse rows, no per-invocation GPU analogue ---
+  sum:      { arity: [1, 1], sql: 'sum',      wgsl: null, width: 1, aggregate: true },
+  avg:      { arity: [1, 1], sql: 'avg',      wgsl: null, width: 1, aggregate: true },
+  count:    { arity: [0, 1], sql: (a) => `count(${a[0] ?? '*'})`, wgsl: null, width: 1, aggregate: true },
+  minAgg:   { arity: [1, 1], sql: 'min',      wgsl: null, width: 1, aggregate: true },
+  maxAgg:   { arity: [1, 1], sql: 'max',      wgsl: null, width: 1, aggregate: true },
+  median:   { arity: [1, 1], sql: 'median',   wgsl: null, width: 1, aggregate: true },
+  quantile: { arity: [2, 2], sql: (a) => `quantile_cont(${a[0]}, ${a[1]})`, wgsl: null, width: 1, aggregate: true },
+  stddev:   { arity: [1, 1], sql: 'stddev',   wgsl: null, width: 1, aggregate: true },
+};
+
+/** Operators that SQL spells differently from WGSL. */
+const SQL_BINARY: Partial<Record<BinaryOp, string>> = {
+  '&&': 'AND',
+  '||': 'OR',
+  '==': '=',
+  '!=': '<>',
+};
+
+// ---------------------------------------------------------------------------
+// Tokenizer
+// ---------------------------------------------------------------------------
+
+type Token =
+  | { t: 'num'; v: number }
+  | { t: 'ident'; v: string }
+  | { t: 'param'; v: string }
+  | { t: 'op'; v: string }
+  | { t: 'eof' };
+
+const PUNCT = ['{{', '}}', '&&', '||', '==', '!=', '<=', '>=', '(', ')', '[', ']', ',', '?', ':', '.', '+', '-', '*', '/', '%', '<', '>', '!'];
+
+export class ExprError extends Error {}
+
+function tokenize(src: string): Token[] {
+  const out: Token[] = [];
+  let i = 0;
+  while (i < src.length) {
+    const ch = src[i];
+    if (/\s/.test(ch)) { i++; continue; }
+
+    if (/[0-9]/.test(ch) || (ch === '.' && /[0-9]/.test(src[i + 1] ?? ''))) {
+      const m = /^[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?/.exec(src.slice(i))!;
+      out.push({ t: 'num', v: Number(m[0]) });
+      i += m[0].length;
+      continue;
+    }
+
+    if (/[A-Za-z_]/.test(ch)) {
+      const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(src.slice(i))!;
+      out.push({ t: 'ident', v: m[0] });
+      i += m[0].length;
+      continue;
+    }
+
+    const punct = PUNCT.find((p) => src.startsWith(p, i));
+    if (punct) {
+      out.push({ t: 'op', v: punct });
+      i += punct.length;
+      continue;
+    }
+
+    throw new ExprError(`Unexpected character ${JSON.stringify(ch)} at ${i} in ${JSON.stringify(src)}`);
+  }
+  out.push({ t: 'eof' });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Parser (precedence climbing)
+// ---------------------------------------------------------------------------
+
+const BINARY_PRECEDENCE: Record<string, number> = {
+  '||': 1, '&&': 2,
+  '==': 3, '!=': 3,
+  '<': 4, '<=': 4, '>': 4, '>=': 4,
+  '+': 5, '-': 5,
+  '*': 6, '/': 6, '%': 6,
+};
+
+export function parseExpr(src: string): Expr {
+  const tokens = tokenize(src);
+  let pos = 0;
+
+  const peek = () => tokens[pos];
+  const isOp = (v: string) => { const t = peek(); return t.t === 'op' && t.v === v; };
+  const eat = (v: string) => {
+    if (!isOp(v)) throw new ExprError(`Expected ${JSON.stringify(v)} in ${JSON.stringify(src)}`);
+    pos++;
+  };
+
+  function parseBinary(minPrec: number): Expr {
+    let left = parseUnary();
+    for (;;) {
+      const t = peek();
+      if (t.t !== 'op') break;
+      const prec = BINARY_PRECEDENCE[t.v];
+      if (prec === undefined || prec < minPrec) break;
+      pos++;
+      const right = parseBinary(prec + 1);
+      left = { kind: 'binary', op: t.v as BinaryOp, left, right };
+    }
+    return left;
+  }
+
+  function parseTernary(): Expr {
+    const test = parseBinary(1);
+    if (!isOp('?')) return test;
+    eat('?');
+    const then = parseTernary();
+    eat(':');
+    const otherwise = parseTernary();
+    return { kind: 'cond', test, then, else: otherwise };
+  }
+
+  function parseUnary(): Expr {
+    if (isOp('-') || isOp('!')) {
+      const op = (peek() as { t: 'op'; v: string }).v as UnaryOp;
+      pos++;
+      return { kind: 'unary', op, operand: parseUnary() };
+    }
+    return parsePostfix();
+  }
+
+  function parsePostfix(): Expr {
+    let node = parsePrimary();
+    while (isOp('.')) {
+      eat('.');
+      const t = peek();
+      if (t.t !== 'ident' || !/^[xyzwrgba]+$/.test(t.v) || t.v.length > 4) {
+        throw new ExprError(`Bad swizzle after '.' in ${JSON.stringify(src)}`);
+      }
+      pos++;
+      node = { kind: 'swizzle', target: node, channels: t.v };
+    }
+    return node;
+  }
+
+  function parsePrimary(): Expr {
+    const t = peek();
+
+    if (t.t === 'num') { pos++; return { kind: 'num', value: t.v }; }
+
+    if (t.t === 'op' && t.v === '{{') {
+      pos++;
+      const name = peek();
+      if (name.t !== 'ident') throw new ExprError(`Expected parameter name after '{{'`);
+      pos++;
+      eat('}}');
+      return { kind: 'param', name: name.v };
+    }
+
+    if (t.t === 'op' && t.v === '(') {
+      pos++;
+      const inner = parseTernary();
+      eat(')');
+      return inner;
+    }
+
+    if (t.t === 'op' && t.v === '[') {
+      pos++;
+      const components: Expr[] = [];
+      if (!isOp(']')) {
+        for (;;) {
+          components.push(parseTernary());
+          if (isOp(',')) { pos++; continue; }
+          break;
+        }
+      }
+      eat(']');
+      if (components.length < 2 || components.length > 4) {
+        throw new ExprError(`Vector literals must have 2-4 components, got ${components.length}`);
+      }
+      return { kind: 'vec', components };
+    }
+
+    if (t.t === 'ident') {
+      pos++;
+      if (isOp('(')) {
+        eat('(');
+        const args: Expr[] = [];
+        if (!isOp(')')) {
+          for (;;) {
+            args.push(parseTernary());
+            if (isOp(',')) { pos++; continue; }
+            break;
+          }
+        }
+        eat(')');
+        const spec = FUNCTIONS[t.v];
+        if (!spec) throw new ExprError(`Unknown function ${JSON.stringify(t.v)}`);
+        const [lo, hi] = spec.arity;
+        if (args.length < lo || args.length > hi) {
+          throw new ExprError(`${t.v}() takes ${lo === hi ? lo : `${lo}-${hi}`} args, got ${args.length}`);
+        }
+        return { kind: 'call', fn: t.v, args };
+      }
+      return { kind: 'col', name: t.v };
+    }
+
+    throw new ExprError(`Unexpected end of expression in ${JSON.stringify(src)}`);
+  }
+
+  const root = parseTernary();
+  if (peek().t !== 'eof') {
+    throw new ExprError(`Trailing tokens in ${JSON.stringify(src)}`);
+  }
+  return root;
+}
+
+// ---------------------------------------------------------------------------
+// Analysis — what the planner asks about a tree
+// ---------------------------------------------------------------------------
+
+export function walk(e: Expr, visit: (n: Expr) => void): void {
+  visit(e);
+  switch (e.kind) {
+    case 'unary': walk(e.operand, visit); break;
+    case 'binary': walk(e.left, visit); walk(e.right, visit); break;
+    case 'call': e.args.forEach((a) => walk(a, visit)); break;
+    case 'vec': e.components.forEach((c) => walk(c, visit)); break;
+    case 'swizzle': walk(e.target, visit); break;
+    case 'cond': walk(e.test, visit); walk(e.then, visit); walk(e.else, visit); break;
+    default: break;
+  }
+}
+
+export function columnsOf(e: Expr): string[] {
+  const seen = new Set<string>();
+  walk(e, (n) => { if (n.kind === 'col') seen.add(n.name); });
+  return [...seen];
+}
+
+export function paramsOf(e: Expr): string[] {
+  const seen = new Set<string>();
+  walk(e, (n) => { if (n.kind === 'param') seen.add(n.name); });
+  return [...seen];
+}
+
+/**
+ * Which engines can evaluate this whole tree. This is what makes the planner's
+ * engine assignment a lookup rather than a heuristic.
+ */
+export function enginesFor(e: Expr): Set<Engine> {
+  const engines = new Set<Engine>(['sql', 'gpu']);
+  walk(e, (n) => {
+    if (n.kind === 'call') {
+      const spec = FUNCTIONS[n.fn];
+      if (!spec.sql) engines.delete('sql');
+      if (!spec.wgsl) engines.delete('gpu');
+    }
+    // Swizzles and vector literals have no clean SQL representation: SQL columns are
+    // scalars. A vec-valued expression has to be split into per-component columns,
+    // which the SQL backend does at the top level only (see backends/sql.ts).
+    if (n.kind === 'swizzle') engines.delete('sql');
+  });
+  return engines;
+}
+
+export function isAggregate(e: Expr): boolean {
+  let agg = false;
+  walk(e, (n) => {
+    if (n.kind === 'call' && FUNCTIONS[n.fn].aggregate) agg = true;
+  });
+  return agg;
+}
+
+// ---------------------------------------------------------------------------
+// Width inference — WGSL needs to know f32 vs vec3<f32>
+// ---------------------------------------------------------------------------
+
+export type WidthEnv = (name: string) => number;
+
+const SWIZZLE_OK = /^[xyzw]+$|^[rgba]+$/;
+
+export function widthOf(e: Expr, env: WidthEnv): number {
+  switch (e.kind) {
+    case 'num':
+    case 'param':
+      return 1;
+    case 'col':
+      return env(e.name);
+    case 'unary':
+      return widthOf(e.operand, env);
+    case 'binary': {
+      // Comparisons and logic are scalar-ish; arithmetic broadcasts.
+      const w = Math.max(widthOf(e.left, env), widthOf(e.right, env));
+      return ['==', '!=', '<', '<=', '>', '>=', '&&', '||'].includes(e.op) ? 1 : w;
+    }
+    case 'vec':
+      return e.components.length;
+    case 'swizzle': {
+      if (!SWIZZLE_OK.test(e.channels)) {
+        throw new ExprError(`Mixed swizzle sets not allowed: .${e.channels}`);
+      }
+      return e.channels.length;
+    }
+    case 'cond':
+      return Math.max(widthOf(e.then, env), widthOf(e.else, env));
+    case 'call': {
+      const spec = FUNCTIONS[e.fn];
+      if (typeof spec.width === 'number') return spec.width;
+      return e.args.reduce((m, a) => Math.max(m, widthOf(a, env)), 1);
+    }
+  }
+}
+
+export { SQL_BINARY };

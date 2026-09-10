@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DuckDB → WebGPU procedural graph</title>
+    <style>
+      /* Instrument panel, not a product UI: dense, monospaced, high signal.
+         The point of this page is to make the planner's decisions legible. */
+      :root {
+        --bg: #08090d;
+        --panel: #0e1016;
+        --panel-2: #12151d;
+        --line: #1e2230;
+        --ink: #d7dbe6;
+        --dim: #7c8598;
+        --sql: #6ea8fe;
+        --gpu: #f0a05a;
+        --scalar: #b98cf0;
+        --render: #4fd6a8;
+        --warn: #ff6b6b;
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--ink);
+        font: 12px/1.5 var(--mono);
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        overflow: hidden;
+      }
+
+      header {
+        display: flex; align-items: center; gap: 14px;
+        padding: 9px 14px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        flex-wrap: wrap;
+      }
+      header h1 {
+        font-size: 12px; font-weight: 600; margin: 0;
+        letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim);
+      }
+      label.field { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); }
+      select, input[type="number"], button {
+        font: inherit; color: var(--ink);
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+        padding: 3px 7px;
+      }
+      button { cursor: pointer; }
+      button:hover { border-color: #333a4d; }
+      button:disabled { opacity: 0.45; cursor: default; }
+      #status { margin-left: auto; color: var(--dim); }
+      #status.error { color: var(--warn); }
+
+      main { display: grid; grid-template-columns: 1fr 440px; min-height: 0; }
+      #stage { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #05060a; }
+      /* Absolutely positioned so the canvas cannot feed its own size back into the
+         grid row that sizes it — a percentage-height canvas in normal flow grows
+         without bound. */
+      #panes { position: absolute; inset: 0; display: flex; }
+      .pane { position: relative; flex: 1; min-width: 0; }
+      .pane[hidden] { display: none; }
+      .pane + .pane:not([hidden]) { border-left: 1px solid var(--line); }
+      canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+      .pane-label {
+        position: absolute; left: 10px; top: 8px;
+        color: #6b7488; letter-spacing: 0.08em; pointer-events: none;
+        font-size: 10px; text-transform: uppercase;
+      }
+      #hint {
+        position: absolute; left: 12px; bottom: 10px;
+        color: #58607280; pointer-events: none; letter-spacing: 0.04em;
+      }
+      #fatal {
+        position: absolute; inset: 0; display: none;
+        place-content: center; padding: 40px; text-align: center;
+        color: var(--warn); white-space: pre-wrap; line-height: 1.7;
+      }
+
+      aside {
+        border-left: 1px solid var(--line);
+        background: var(--panel);
+        display: grid; grid-template-rows: auto auto 1fr;
+        min-height: 0;
+      }
+      #params {
+        padding: 10px 12px; border-bottom: 1px solid var(--line);
+        display: grid; gap: 7px; max-height: 30vh; overflow: auto;
+      }
+      .param { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; }
+      .param .name { color: var(--ink); }
+      .param .route {
+        font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+        padding: 1px 5px; border: 1px solid var(--line); color: var(--dim);
+      }
+      .param .route.uniform { color: var(--gpu); border-color: #4a3520; }
+      .param .route.requery { color: var(--sql); border-color: #1f3459; }
+      .param .route.rebuild { color: var(--warn); border-color: #4d2020; }
+      .param input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: #5b6b8c; }
+      .param .val { color: var(--dim); font-size: 11px; }
+
+      #tabs { display: flex; border-bottom: 1px solid var(--line); }
+      #tabs button {
+        border: 0; border-right: 1px solid var(--line); background: transparent;
+        color: var(--dim); padding: 7px 11px; letter-spacing: 0.06em;
+      }
+      #tabs button[aria-selected="true"] { color: var(--ink); background: var(--panel-2); box-shadow: inset 0 -2px 0 #5b6b8c; }
+
+      #body { overflow: auto; padding: 12px; min-height: 0; }
+      section { display: none; }
+      section[data-active] { display: block; }
+
+      h2 {
+        font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+        color: var(--dim); margin: 0 0 8px; font-weight: 600;
+      }
+      h2:not(:first-child) { margin-top: 20px; }
+      pre {
+        margin: 0; padding: 9px 10px; background: var(--panel-2);
+        border: 1px solid var(--line); overflow-x: auto;
+        white-space: pre; font-size: 11px; line-height: 1.6;
+      }
+      table { width: 100%; border-collapse: collapse; font-size: 11px; }
+      th, td { text-align: left; padding: 3px 6px 3px 0; border-bottom: 1px solid #161a24; vertical-align: top; }
+      th { color: var(--dim); font-weight: 500; }
+      td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+      .tag {
+        font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase;
+        padding: 1px 5px; border: 1px solid var(--line);
+      }
+      .tag.sql { color: var(--sql); border-color: #1f3459; }
+      .tag.gpu { color: var(--gpu); border-color: #4a3520; }
+      .tag.scalar { color: var(--scalar); border-color: #3a2a52; }
+      .tag.render { color: var(--render); border-color: #1d4a3a; }
+      .tag.source { color: var(--dim); }
+      .tag.arrow { color: var(--render); border-color: #1d4a3a; }
+      .tag.chunked { color: var(--sql); border-color: #1f3459; }
+      .tag.cast { color: var(--gpu); border-color: #4a3520; }
+      .tag.derived { color: var(--scalar); border-color: #3a2a52; }
+      .why { color: var(--dim); }
+      ul.notes { margin: 0; padding-left: 16px; color: var(--dim); }
+      ul.notes li { margin-bottom: 3px; }
+
+      footer {
+        display: flex; gap: 18px; flex-wrap: wrap;
+        padding: 6px 14px; border-top: 1px solid var(--line);
+        background: var(--panel); color: var(--dim);
+      }
+      footer b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>DuckDB → WebGPU</h1>
+      <label class="field">graph
+        <select id="graph">
+          <option value="scatter">scatter</option>
+          <option value="heatmap">heatmap</option>
+        </select>
+      </label>
+      <label class="field">policy
+        <select id="policy">
+          <option value="auto">auto</option>
+          <option value="sql-first">sql-first</option>
+          <option value="gpu-first">gpu-first</option>
+        </select>
+      </label>
+      <label class="field">rows
+        <select id="rows">
+          <option value="100000">100k</option>
+          <option value="300000">300k</option>
+          <option value="1000000">1M</option>
+          <option value="5000000">5M</option>
+        </select>
+      </label>
+      <label class="field">render
+        <select id="mode">
+          <option value="webgpu">webgpu (this graph)</option>
+          <option value="deck">deck.gl (webgl2)</option>
+          <option value="both">both, side by side</option>
+        </select>
+      </label>
+      <button id="rebuild">rebuild</button>
+      <button id="bench">run sweep</button>
+      <span id="status">booting…</span>
+    </header>
+
+    <main>
+      <div id="stage">
+        <div id="panes">
+          <div class="pane" data-pane="webgpu">
+            <canvas id="canvas"></canvas>
+            <span class="pane-label">webgpu · graph-owned buffers</span>
+          </div>
+          <div class="pane" data-pane="deck" hidden>
+            <canvas id="deck-canvas"></canvas>
+            <span class="pane-label">deck.gl · webgl2 · binary attributes</span>
+          </div>
+        </div>
+        <div id="hint">drag orbit · shift-drag pan · scroll zoom</div>
+        <div id="fatal"></div>
+      </div>
+      <aside>
+        <div id="params"></div>
+        <div id="tabs"></div>
+        <div id="body">
+          <section data-tab="plan"></section>
+          <section data-tab="sql"></section>
+          <section data-tab="wgsl"></section>
+          <section data-tab="attrs"></section>
+          <section data-tab="bench"></section>
+          <section data-tab="compare"></section>
+        </div>
+      </aside>
+    </main>
+
+    <footer id="counters"></footer>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
