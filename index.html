@@ -134,6 +134,8 @@
       }
       .tag.sql { color: var(--sql); border-color: #1f3459; }
       .tag.gpu { color: var(--gpu); border-color: #4a3520; }
+      .tag.cpu { color: var(--scalar); border-color: #3a2a52; }
+      .param .route.cpu { color: var(--scalar); border-color: #3a2a52; }
       .tag.scalar { color: var(--scalar); border-color: #3a2a52; }
       .tag.render { color: var(--render); border-color: #1d4a3a; }
       .tag.source { color: var(--dim); }
@@ -160,13 +162,22 @@
         <select id="graph">
           <option value="scatter">scatter</option>
           <option value="heatmap">heatmap</option>
+          <option value="wrangle">wrangle</option>
         </select>
       </label>
       <label class="field">policy
         <select id="policy">
-          <option value="auto">auto</option>
+          <option value="cost">cost</option>
+          <option value="auto">auto (rules)</option>
           <option value="sql-first">sql-first</option>
           <option value="gpu-first">gpu-first</option>
+        </select>
+      </label>
+      <label class="field">target
+        <select id="target">
+          <option value="webgpu-native">webgpu-native</option>
+          <option value="deck-webgpu">deck-webgpu</option>
+          <option value="deck-webgl2">deck-webgl2 (no compute)</option>
         </select>
       </label>
       <label class="field">rows
@@ -196,9 +207,15 @@
             <canvas id="canvas"></canvas>
             <span class="pane-label">webgpu · graph-owned buffers</span>
           </div>
+          <!-- Two canvases, because a canvas keeps its first graphics context for life:
+               once WebGPU has claimed one, deck's WebGL2 path cannot reuse it. -->
           <div class="pane" data-pane="deck" hidden>
             <canvas id="deck-canvas"></canvas>
-            <span class="pane-label">deck.gl · webgl2 · binary attributes</span>
+            <span class="pane-label" id="deck-label">deck.gl · webgl2 · binary attributes</span>
+          </div>
+          <div class="pane" data-pane="deck-gpu" hidden>
+            <canvas id="deck-gpu-canvas"></canvas>
+            <span class="pane-label">deck.gl · webgpu · gpu-resident buffers</span>
           </div>
         </div>
         <div id="hint">drag orbit · shift-drag pan · scroll zoom</div>
@@ -212,8 +229,10 @@
           <section data-tab="sql"></section>
           <section data-tab="wgsl"></section>
           <section data-tab="attrs"></section>
+          <section data-tab="explain"></section>
           <section data-tab="bench"></section>
           <section data-tab="compare"></section>
+          <section data-tab="calibration"></section>
         </div>
       </aside>
     </main>

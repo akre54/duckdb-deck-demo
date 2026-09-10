@@ -8,6 +8,9 @@
  * expression templates.
  */
 
+import type { Expr } from './expr.js';
+import { parseWrangle, expandWrangle } from './wrangle.js';
+
 export type RampName = 'viridis' | 'magma' | 'turbo' | 'cividis';
 
 export interface ParamSpec {
@@ -17,6 +20,16 @@ export interface ParamSpec {
    * `structural` params change the shape of the plan and force a recompile.
    */
   kind?: 'value' | 'structural';
+  /**
+   * Expected changes per second, the planner's amortization input.
+   *
+   * This is what lets placement respond to interaction rather than only to data size: a
+   * parameter dragged on a slider is worth keeping on the GPU, where rebinding is a
+   * 16-byte uniform write, even if putting its node in SQL would build marginally faster.
+   * Defaults to 2/s for `value` params and 0 for `structural` ones (a structural change
+   * recompiles the plan, so amortizing it here would double count).
+   */
+  changeRate?: number;
   min?: number;
   max?: number;
   step?: number;
@@ -35,6 +48,12 @@ export interface FilterNode {
   id: string;
   type: 'filter';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   predicate: string;
 }
 
@@ -43,6 +62,12 @@ export interface AggregateNode {
   id: string;
   type: 'aggregate';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   groupBy: string[];
   aggs: { name: string; expr: string }[];
 }
@@ -55,6 +80,12 @@ export interface StatsNode {
   id: string;
   type: 'stats';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   column: string;
   ops: StatOp[];
 }
@@ -66,8 +97,21 @@ export interface AttributeNode {
   id: string;
   type: 'attribute';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   name: string;
-  expr: string;
+  /**
+   * The expression. A string in authored JSON; desugaring may instead pass an
+   * already-parsed tree, which avoids round-tripping through an unparser whose precedence
+   * handling would be one more thing to get wrong.
+   */
+  expr: string | Expr;
+  /** Set by wrangle expansion: the source text, for display. */
+  source?: string;
 }
 
 /** Sugar -> attribute. Numeric remap with an optional auto domain from a stats node. */
@@ -75,6 +119,12 @@ export interface ScaleNode {
   id: string;
   type: 'scale';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   name: string;
   expr: string;
   kind?: 'linear' | 'log' | 'sqrt';
@@ -90,6 +140,12 @@ export interface ColorScaleNode {
   id: string;
   type: 'colorscale';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   /** Defaults to `Cd`. */
   name?: string;
   expr: string;
@@ -103,6 +159,12 @@ export interface ProjectNode {
   id: string;
   type: 'project';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   mode: 'mercator' | 'identity';
   x: string;
   y: string;
@@ -116,6 +178,12 @@ export interface Bin2dNode {
   id: string;
   type: 'bin2d';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   resolution: number;
   /** Expression contributing to each bin; defaults to 1 (a plain count). */
   weight?: string;
@@ -128,6 +196,12 @@ export interface RenderNode {
   id: string;
   type: 'render';
   input: string;
+  /**
+   * Multi-input form. When present it replaces `input`, so a node can read attributes
+   * produced along several upstream paths. Inputs merge namespaces over a shared row set;
+   * relational joins are out of scope.
+   */
+  inputs?: string[];
   mode: 'points' | 'heatmap';
   /** Points mode: attribute names bound to visual channels. */
   position?: string;
@@ -137,9 +211,25 @@ export interface RenderNode {
   background?: [number, number, number];
 }
 
+/**
+ * Sugar -> N attribute nodes. A VEX-style multi-statement body, which is what makes the
+ * pipeline programmable rather than a closed catalogue of operator types. See
+ * `src/graph/wrangle.ts` for the grammar.
+ */
+export interface WrangleNode {
+  id: string;
+  type: 'wrangle';
+  input: string;
+  inputs?: string[];
+  /** Statements separated by `;`. `@name = expr` writes an attribute, `var name = expr` a local. */
+  body: string;
+  /** Ramp used by any `ramp()` call in the body. Defaults to viridis. */
+  ramp?: RampName;
+}
+
 export type GraphNode =
   | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode
-  | ScaleNode | ColorScaleNode | ProjectNode | Bin2dNode | RenderNode;
+  | ScaleNode | ColorScaleNode | ProjectNode | WrangleNode | Bin2dNode | RenderNode;
 
 export interface Graph {
   name?: string;
@@ -211,6 +301,12 @@ export function desugar(graph: Graph): { nodes: CoreNode[]; notes: string[]; ram
   // One LUT is bound per kernel, so this prototype supports one ramp per graph.
   // Two colorscales with different ramps is a real use case and a real limitation.
   const ramps = new Set<RampName>();
+  /**
+   * Sugar that expands into several nodes changes which id represents its output, so any
+   * node downstream still pointing at the original has to be redirected. Recorded here and
+   * applied in one pass at the end, because JSON node order is not guaranteed topological.
+   */
+  const idRewrites = new Map<string, string>();
 
   const domainRefs = (
     node: { domain?: [string, string] | 'auto'; statsFrom?: string; id: string },
@@ -272,6 +368,37 @@ export function desugar(graph: Graph): { nodes: CoreNode[]; notes: string[]; ram
         break;
       }
 
+      case 'wrangle': {
+        // One statement becomes one attribute node, so the planner places each statement
+        // independently and the existing kernel fusion merges them back into one dispatch.
+        // The planner needs no knowledge of wrangles at all.
+        const statements = parseWrangle(node.body);
+        const expanded = expandWrangle(node.id, statements);
+        if (/\bramp\s*\(/.test(node.body)) ramps.add(node.ramp ?? 'viridis');
+        let input = node.inputs?.[0] ?? node.input;
+        for (const s of expanded) {
+          out.push({
+            id: `${node.id}#${s.name}`,
+            type: 'attribute',
+            input,
+            // Only the first statement inherits the wrangle's multi-input list; the rest
+            // chain off their predecessor so ordering within the body is preserved.
+            inputs: input === (node.inputs?.[0] ?? node.input) ? node.inputs : undefined,
+            name: s.name,
+            expr: s.expr,
+            source: `line ${s.line}`,
+          });
+          input = `${node.id}#${s.name}`;
+        }
+        // The wrangle's output is its final statement, so that is what its consumers
+        // should read.
+        idRewrites.set(node.id, `${node.id}#${expanded[expanded.length - 1].name}`);
+        notes.push(
+          `${node.id}: wrangle expanded to ${expanded.length} attribute node(s) (${expanded.map((s) => s.name).join(', ')})`,
+        );
+        break;
+      }
+
       default:
         if (node.type === 'bin2d') ramps.add(node.ramp);
         out.push(node);
@@ -283,6 +410,18 @@ export function desugar(graph: Graph): { nodes: CoreNode[]; notes: string[]; ram
     throw new Error(
       `Graph uses ${ramps.size} different ramps (${[...ramps].join(', ')}); this prototype binds one LUT per graph`,
     );
+  }
+
+  // Redirect references to any node whose id changed during expansion. Nodes created by
+  // the expansion already point at each other, so only pre-existing ids are rewritten.
+  if (idRewrites.size > 0) {
+    const created = new Set(out.map((n) => n.id));
+    for (const node of out) {
+      if (!('input' in node)) continue;
+      const redirect = (id: string) => (created.has(id) ? id : idRewrites.get(id) ?? id);
+      if (node.inputs) node.inputs = node.inputs.map(redirect);
+      node.input = redirect(node.input);
+    }
   }
 
   return { nodes: out, notes, ramp: [...ramps][0] };

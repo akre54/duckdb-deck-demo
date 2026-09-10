@@ -3,20 +3,25 @@
  * frame loop. The interesting code is graph/planner.ts and graph/backends/.
  */
 
-import { initGpu, GpuUnavailable } from './engine/device.js';
+import { initGpu, GpuUnavailable, type Gpu } from './engine/device.js';
 import { Duck } from './engine/duck.js';
 import { Runtime } from './engine/runtime.js';
 import { Inspector, renderCounters, renderSweep, type SweepRow } from './ui/inspector.js';
+import { renderCalibration } from './ui/explain.js';
 import { DeckPane } from './compare/deck-pane.js';
+import { DeckWebgpuPane } from './compare/deck-webgpu-pane.js';
+import type { TargetId } from './graph/target.js';
 import type { Graph, ParamSpec } from './graph/types.js';
 import type { Policy } from './graph/planner.js';
 
 import scatterGraph from './graphs/scatter.json';
 import heatmapGraph from './graphs/heatmap.json';
+import wrangleGraph from './graphs/wrangle.json';
 
 const GRAPHS: Record<string, Graph> = {
   scatter: scatterGraph as Graph,
   heatmap: heatmapGraph as Graph,
+  wrangle: wrangleGraph as Graph,
 };
 
 const $ = <T extends HTMLElement>(sel: string): T => document.querySelector<T>(sel)!;
@@ -30,11 +35,14 @@ const graphSel = $<HTMLSelectElement>('#graph');
 const policySel = $<HTMLSelectElement>('#policy');
 const rowsSel = $<HTMLSelectElement>('#rows');
 const modeSel = $<HTMLSelectElement>('#mode');
+const targetSel = $<HTMLSelectElement>('#target');
 const rebuildBtn = $<HTMLButtonElement>('#rebuild');
 const benchBtn = $<HTMLButtonElement>('#bench');
 const deckCanvas = $<HTMLCanvasElement>('#deck-canvas');
+const deckGpuCanvas = $<HTMLCanvasElement>('#deck-gpu-canvas');
 const webgpuPane = $<HTMLElement>('.pane[data-pane="webgpu"]');
 const deckPaneEl = $<HTMLElement>('.pane[data-pane="deck"]');
+const deckGpuPaneEl = $<HTMLElement>('.pane[data-pane="deck-gpu"]');
 
 function setStatus(text: string, isError = false): void {
   statusEl.textContent = text;
@@ -51,7 +59,7 @@ async function main(): Promise<void> {
   const inspector = new Inspector($('#tabs'), $('#body'));
 
   setStatus('initializing webgpu…');
-  let gpu;
+  let gpu: Gpu;
   try {
     gpu = await initGpu(canvas);
   } catch (err) {
@@ -76,27 +84,47 @@ async function main(): Promise<void> {
   /** Currently loaded graph, with the row count from the header applied. */
   let graph: Graph = structuredClone(GRAPHS[graphSel.value]);
   let generating = false;
-  /** Created lazily: no reason to spin up a WebGL2 context unless it is asked for. */
+  /**
+   * Two deck panes, one per capability story, created lazily and never both at once —
+   * they share a canvas, and only one graphics context can own it.
+   *
+   *   deck-webgl2  no compute: attributes computed by the generated JS loop
+   *   deck-webgpu  compute available: the planner's kernel runs on luma's WebGPU device
+   *                and deck binds the resulting buffers directly
+   */
   let deckPane: DeckPane | undefined;
+  let deckGpuPane: DeckWebgpuPane | undefined;
 
   const deckWanted = () => modeSel.value !== 'webgpu';
+  const deckUsesCompute = () => targetSel.value === 'deck-webgpu';
 
   function syncPanes(): void {
+    const showDeck = modeSel.value !== 'webgpu';
     webgpuPane.hidden = modeSel.value === 'deck';
-    deckPaneEl.hidden = modeSel.value === 'webgpu';
+    // Each deck backend owns its own canvas, so only the one matching the target shows.
+    deckPaneEl.hidden = !showDeck || deckUsesCompute();
+    deckGpuPaneEl.hidden = !showDeck || !deckUsesCompute();
   }
 
-  /** Rebuild the deck layer by evaluating the plan's GPU stage on the CPU. */
-  function refreshDeck(): void {
+  /** Rebuild the deck layer, by whichever route the target's capabilities allow. */
+  async function refreshDeck(): Promise<void> {
     const result = rt.result();
     if (!deckWanted() || !result) return;
-    deckPane ??= new DeckPane(deckCanvas);
+
     try {
-      deckPane.update(result.plan, rt.sourceUploads, rt.params(), result.rows);
-      // Sync immediately: the frame loop only syncs on camera *changes*, so a pane
-      // created after the last camera move would otherwise never get a view state.
-      deckPane.syncCamera(rt.camera, deckCanvas.clientHeight || 600);
-      inspector.renderCompare(result, rt, deckPane.metrics());
+      if (deckUsesCompute()) {
+        deckGpuPane ??= new DeckWebgpuPane(deckGpuCanvas);
+        await deckGpuPane.update(result.plan, rt.sourceUploads, rt.params(), result.rows);
+        deckGpuPane.syncCamera(rt.camera, deckGpuCanvas.clientHeight || 600);
+        inspector.renderCompare(result, rt, undefined, deckGpuPane.status);
+      } else {
+        deckPane ??= new DeckPane(deckCanvas);
+        deckPane.update(result.plan, rt.sourceUploads, rt.params(), result.rows);
+        // Sync immediately: the frame loop only syncs on camera *changes*, so a pane
+        // created after the last camera move would otherwise never get a view state.
+        deckPane.syncCamera(rt.camera, deckCanvas.clientHeight || 600);
+        inspector.renderCompare(result, rt, deckPane.metrics());
+      }
     } catch (err) {
       console.error('[deck]', err);
       inspector.showError(`deck.gl comparison failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -126,7 +154,7 @@ async function main(): Promise<void> {
       inspector.render(result);
       inspector.renderCompare(result, rt, deckWanted() ? deckPane?.metrics() : undefined);
       buildParamControls(result.plan.params);
-      refreshDeck();
+      void refreshDeck();
       setStatus(`${result.rows.toLocaleString()} rows · built in ${result.timings.totalMs.toFixed(0)} ms`);
       fatalEl.style.display = 'none';
     } catch (err) {
@@ -192,7 +220,7 @@ async function main(): Promise<void> {
         }
         // deck.gl has to redo the whole CPU loop for any parameter change — that
         // asymmetry with the WebGPU path's uniform write is the point of the comparison.
-        refreshDeck();
+        void refreshDeck();
         inFlight = false;
         void flush();
       };
@@ -274,9 +302,17 @@ async function main(): Promise<void> {
     void rebuild(true);
   });
   policySel.addEventListener('change', () => void rebuild(false));
+  targetSel.addEventListener('change', () => {
+    rt.setTarget(targetSel.value as TargetId);
+    // The target picks which deck backend (and so which canvas) is on screen.
+    syncPanes();
+    // A capability change can make the current plan illegal, so this is a replan, not a
+    // render-mode switch: on deck-webgl2 the GPU stage disappears entirely.
+    void rebuild(false);
+  });
   modeSel.addEventListener('change', () => {
     syncPanes();
-    refreshDeck();
+    void refreshDeck();
   });
   rowsSel.addEventListener('change', () => void rebuild(true));
   rebuildBtn.addEventListener('click', () => void rebuild(true));
@@ -287,19 +323,35 @@ async function main(): Promise<void> {
     rowsSel.value = String(initialSource.dataset.rows);
   }
   syncPanes();
+
+  // Calibrate before the first plan: the optimizer's decisions are only as portable as
+  // its constants, and defaults measured on another machine would silently mislead it.
+  setStatus('calibrating cost model…');
+  try {
+    const report = await rt.runCalibration();
+    renderCalibration(inspector.section('calibration'), report.samples, report.elapsedMs);
+  } catch (err) {
+    console.warn('[calibrate] failed; using default constants:', err);
+    inspector.section('calibration').innerHTML =
+      `<h2>calibration failed</h2><pre>${String(err)}\n\nFalling back to the constants in graph/cost.ts.</pre>`;
+  }
+
   await rebuild(true);
 
   let counterTick = 0;
   let lastCameraVersion = -1;
   const loop = () => {
     if (!webgpuPane.hidden) rt.frame();
-    if (deckPane && !deckPaneEl.hidden) {
+    const activeDeck = deckUsesCompute() ? deckGpuPane : deckPane;
+    const activeCanvas = deckUsesCompute() ? deckGpuCanvas : deckCanvas;
+    const activePaneEl = deckUsesCompute() ? deckGpuPaneEl : deckPaneEl;
+    if (activeDeck && !activePaneEl.hidden) {
       if (rt.camera.version !== lastCameraVersion) {
-        deckPane.syncCamera(rt.camera, deckCanvas.clientHeight);
+        activeDeck.syncCamera(rt.camera, activeCanvas.clientHeight);
         lastCameraVersion = rt.camera.version;
       }
       // Both renderers must draw every frame or their frame times mean different things.
-      deckPane.tick();
+      activeDeck.tick();
     }
     // The counter strip does not need 60 Hz and re-rendering it every frame shows up
     // in the frame time it is trying to report.

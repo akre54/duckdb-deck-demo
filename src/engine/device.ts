@@ -28,6 +28,10 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<Gpu> {
         512 * 1024 * 1024,
       ),
       maxBufferSize: Math.min(adapter.limits.maxBufferSize, 512 * 1024 * 1024),
+      // A fused kernel binds one storage buffer per attribute it reads or writes, so the
+      // default of 8 is reached by a graph with only a handful of attributes. Ask for
+      // whatever the adapter allows; the planner treats the result as a hard constraint.
+      maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
     },
   });
   device.lost.then((info) => {

@@ -24,6 +24,11 @@ import { parseExpr } from '../graph/expr.js';
 import { buildRampLut, type Graph } from '../graph/types.js';
 import { SOURCE_TABLE, syntheticSql } from '../data/synthetic.js';
 import { gpuData } from './gpu-compat.js';
+import { statsSql, parseStatsRow, type SourceStats } from '../graph/stats.js';
+import { type CostConstants, DEFAULT_COSTS } from '../graph/cost.js';
+import { calibrate, type CalibrationReport } from './calibrate.js';
+import { type TargetCaps, type TargetId, targetCaps } from '../graph/target.js';
+import { evaluateStage } from '../compare/cpu-attributes.js';
 
 export interface BuildTimings {
   planMs: number;
@@ -31,6 +36,8 @@ export interface BuildTimings {
   queryMs: number;
   convertMs: number;
   uploadMs: number;
+  /** Time in the generated JS loop, when the plan placed nodes on the CPU. */
+  cpuStageMs: number;
   pipelineMs: number;
   totalMs: number;
   /** writeBuffer calls issued for this build. */
@@ -40,12 +47,13 @@ export interface BuildTimings {
 export interface AttributeReport {
   name: string;
   width: number;
-  provenance: 'arrow' | 'derived';
+  provenance: 'arrow' | 'cpu' | 'derived';
   tier?: ColumnUpload['tier'];
   arrowType?: string;
   nullCount?: number;
   chunks?: number;
   bytes: number;
+  internal?: boolean;
 }
 
 export interface BuildResult {
@@ -55,6 +63,23 @@ export interface BuildResult {
   attributes: AttributeReport[];
   statValues: Record<string, number>;
   sourceColumns: number;
+  /** Statistics the optimizer planned against, for the explain pane. */
+  stats?: SourceStats;
+  /** Milliseconds the statistics query itself cost. */
+  statsCatalogMs: number;
+}
+
+/** Does a stage node's expression reference this parameter? */
+function exprUsesParam(node: { expr: unknown }, name: string): boolean {
+  const walk = (e: unknown): boolean => {
+    if (!e || typeof e !== 'object') return false;
+    const n = e as { kind?: string; name?: string } & Record<string, unknown>;
+    if (n.kind === 'param') return n.name === name;
+    return Object.values(n).some((v) =>
+      Array.isArray(v) ? v.some(walk) : typeof v === 'object' && walk(v),
+    );
+  };
+  return walk(node.expr);
 }
 
 /** DuckDB type name -> whether a column can reach the GPU at all. */
@@ -73,10 +98,19 @@ export class Runtime {
 
   private current?: BuildResult;
   private graph?: Graph;
-  private policy: Policy = 'auto';
+  private policy: Policy = 'cost';
   private paramValues: Record<string, number> = {};
   private sourceSchema: Schema = new Map();
   private rows = 0;
+
+  /** Cost constants for this machine. Replaced by `runCalibration()`. */
+  costs: CostConstants = DEFAULT_COSTS;
+  calibration?: CalibrationReport;
+  /** Catalog statistics for the current source, computed once per source load. */
+  sourceStats?: SourceStats;
+  private statsCatalogMs = 0;
+  /** Render target capabilities the optimizer plans against. */
+  target: TargetCaps;
   /**
    * The raw uploads from the last query, kept so the CPU backend can evaluate the same
    * graph for the deck.gl comparison. Not used by the WebGPU path.
@@ -89,6 +123,8 @@ export class Runtime {
   readonly counters = {
     uniformWrites: 0,
     kernelDispatches: 0,
+    /** Times the generated JS loop re-ran for a parameter change. */
+    cpuStageRuns: 0,
     requeries: 0,
     rebuilds: 0,
     frames: 0,
@@ -100,11 +136,27 @@ export class Runtime {
 
   constructor(private readonly gpu: Gpu, private readonly duck: Duck) {
     this.attributes = new AttributeSet(gpu.device);
+    this.target = targetCaps('webgpu-native', gpu.device);
     this.viewBuffer = gpu.device.createBuffer({
       label: 'view',
       size: VIEW_UNIFORM_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
+  }
+
+  /**
+   * Measure this machine's cost constants. Worth doing once at boot: a planner with
+   * constants baked in on someone else's GPU makes confident, wrong decisions.
+   */
+  async runCalibration(): Promise<CalibrationReport> {
+    const report = await calibrate(this.gpu.device, this.duck);
+    this.costs = report.costs;
+    this.calibration = report;
+    return report;
+  }
+
+  setTarget(id: TargetId): void {
+    this.target = targetCaps(id, this.gpu.device);
   }
 
   // -------------------------------------------------------------------------
@@ -138,6 +190,37 @@ export class Runtime {
     if (skipped.length) {
       console.info(`[runtime] non-numeric columns are not GPU-bindable and were skipped: ${skipped.join(', ')}`);
     }
+
+    await this.loadStats(described);
+  }
+
+  /**
+   * Catalog statistics: row count, distinct counts, ranges and null fractions.
+   *
+   * Computed once per source rather than per build, because it is the source that changes
+   * them — a parameter move does not. Without these the optimizer has nothing to cost, and
+   * `plan()` falls back to the rule-based policy and says so.
+   */
+  private async loadStats(described: Map<string, string>): Promise<void> {
+    const columns = [...this.sourceSchema.keys()];
+    const started = performance.now();
+    this.sourceStats = undefined;
+    try {
+      const { table } = await this.duck.run(statsSql(SOURCE_TABLE, columns));
+      const row = table.get(0) as Record<string, unknown> | null;
+      if (row) this.sourceStats = parseStatsRow(row, columns, described);
+    } catch (err) {
+      // approx_count_distinct may be missing in some builds; exact DISTINCT still works.
+      console.warn('[runtime] approximate statistics failed, retrying exactly:', err);
+      try {
+        const { table } = await this.duck.run(statsSql(SOURCE_TABLE, columns, false));
+        const row = table.get(0) as Record<string, unknown> | null;
+        if (row) this.sourceStats = parseStatsRow(row, columns, described);
+      } catch (err2) {
+        console.warn('[runtime] statistics unavailable; the planner will fall back to rules:', err2);
+      }
+    }
+    this.statsCatalogMs = performance.now() - started;
   }
 
   // -------------------------------------------------------------------------
@@ -150,10 +233,26 @@ export class Runtime {
     this.counters.rebuilds++;
     const t0 = performance.now();
 
-    const plan = buildPlan(graph, this.sourceSchema, policy);
+    // Seed declared defaults *before* planning, keeping any the user has already moved.
+    // The optimizer estimates a filter's selectivity from where its threshold currently
+    // sits, so planning against an empty parameter map makes every predicate fall back to
+    // the 0.33 default and the cardinality estimate is meaningless.
+    const seeded: Record<string, number> = { ...this.paramValues };
+    for (const [name, spec] of Object.entries(graph.params ?? {})) {
+      if (seeded[name] === undefined) seeded[name] = spec.value;
+    }
+    this.paramValues = seeded;
+
+    const plan = buildPlan(graph, this.sourceSchema, {
+      policy,
+      costs: this.costs,
+      caps: this.target,
+      stats: this.sourceStats,
+      params: this.paramValues,
+    });
     const planMs = performance.now() - t0;
 
-    // Seed parameter values from the graph, keeping any the user has already moved.
+    // Statistics nodes publish parameters the graph never declared, so top up afterwards.
     const next: Record<string, number> = {};
     for (const [name, spec] of Object.entries(plan.params)) {
       next[name] = this.paramValues[name] ?? spec.value;
@@ -204,13 +303,16 @@ export class Runtime {
       } else {
         this.attributes.ensure(decl.name, decl.width, this.rows, 'derived');
         reports.push({
-          name: decl.name, width: decl.width, provenance: 'derived',
-          bytes: this.rows * decl.width * 4,
+          name: decl.name, width: decl.width, provenance: decl.provenance,
+          bytes: this.rows * decl.width * 4, internal: decl.internal,
         });
       }
     }
     this.attributes.prune(new Set(plan.attributes.map((a) => a.name)));
     const uploadMs = performance.now() - tUpload;
+
+    // --- CPU stage, when the plan placed nodes there -------------------------
+    const cpuStageMs = this.runCpuStage(plan);
 
     // --- pipelines ----------------------------------------------------------
     const tPipe = performance.now();
@@ -273,16 +375,46 @@ export class Runtime {
       timings: {
         planMs, statsMs, queryMs: timing.ms,
         convertMs: this.attributes.counters.convertMs,
-        uploadMs, pipelineMs,
+        uploadMs, cpuStageMs, pipelineMs,
         totalMs: performance.now() - t0,
         writeCalls: this.attributes.counters.writeCalls,
       },
       attributes: reports,
       statValues,
       sourceColumns: this.sourceSchema.size,
+      stats: this.sourceStats,
+      statsCatalogMs: this.statsCatalogMs,
     };
     this.current = result;
     return result;
+  }
+
+  /**
+   * Run the plan's CPU stage and upload its results.
+   *
+   * The optimizer puts nodes here for one of two reasons: the CPU was priced cheapest, or
+   * the target has no compute shaders and it was the only legal place. Either way the work
+   * is the same generated JS the deck comparison uses, so there is one implementation
+   * rather than two that could disagree.
+   */
+  private runCpuStage(plan: PhysicalPlan): number {
+    if (plan.cpuStage.length === 0) return 0;
+    const started = performance.now();
+    const evaluated = evaluateStage(plan.cpuStage, plan, this.sourceUploads, this.paramValues, this.rows);
+    for (const [name, { data, width }] of evaluated.values) {
+      const decl = plan.attributes.find((a) => a.name === name);
+      if (decl?.provenance !== 'cpu') continue;
+      this.attributes.write(name, width, this.rows, {
+        tier: 'cast',
+        data,
+        chunkCount: 1,
+        nullCount: 0,
+        convertMs: 0,
+        arrowType: 'cpu stage',
+        rows: this.rows,
+      });
+    }
+    return performance.now() - started;
   }
 
   /**
@@ -315,12 +447,19 @@ export class Runtime {
     return { ...this.paramValues };
   }
 
-  /** How a parameter change will be serviced, without changing anything. */
-  classify(name: string): 'uniform' | 'requery' | 'rebuild' | 'unused' {
+  /**
+   * How a parameter change will be serviced, without changing anything.
+   *
+   * The order is the cost order: a SQL-bound parameter is the most expensive because it
+   * forces a requery, so it wins even if the parameter also appears in a kernel. The
+   * routes are exactly the terms the optimizer amortized when it chose the placement.
+   */
+  classify(name: string): 'uniform' | 'cpu' | 'requery' | 'rebuild' | 'unused' {
     const plan = this.current?.plan;
     if (!plan) return 'unused';
     if (plan.params[name]?.kind === 'structural') return 'rebuild';
     if (plan.sqlParams.includes(name)) return 'requery';
+    if (plan.cpuStage.some((s) => exprUsesParam(s, name))) return 'cpu';
     if (plan.uniformParams.includes(name)) return 'uniform';
     return 'unused';
   }
@@ -329,7 +468,10 @@ export class Runtime {
    * Apply a parameter change by the cheapest route available. Returns which route
    * was taken so the caller can display it.
    */
-  async setParam(name: string, value: number): Promise<'uniform' | 'requery' | 'rebuild' | 'unused'> {
+  async setParam(
+    name: string,
+    value: number,
+  ): Promise<'uniform' | 'cpu' | 'requery' | 'rebuild' | 'unused'> {
     this.paramValues[name] = value;
     const route = this.classify(name);
     switch (route) {
@@ -338,6 +480,18 @@ export class Runtime {
         this.counters.uniformWrites++;
         this.kernelsDirty = true;
         break;
+      case 'cpu': {
+        // No requery, but the whole generated loop runs again and its outputs re-upload.
+        // That asymmetry with the uniform path is what the optimizer prices.
+        const plan = this.current?.plan;
+        if (plan) {
+          this.counters.cpuStageRuns++;
+          this.runCpuStage(plan);
+          for (const k of this.kernels) k.writeParams(this.paramValues);
+          this.kernelsDirty = true;
+        }
+        break;
+      }
       case 'requery':
         this.counters.requeries++;
         await this.requery();
@@ -387,6 +541,9 @@ export class Runtime {
       this.attributes.write(decl.name, decl.width, this.rows, upload);
       this.sourceUploads.set(decl.name, upload);
     }
+    // A requery changes the row count, so anything the CPU stage produced is now the wrong
+    // length and has to be recomputed before the kernel or the renderer reads it.
+    this.runCpuStage(plan);
     if (this.current) this.current.rows = this.rows;
     this.kernelsDirty = true;
   }

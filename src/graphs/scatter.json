@@ -1,16 +1,51 @@
 {
-  "name": "scatter — clustered points, log radius, elevation color",
+  "name": "scatter \u2014 clustered points, log radius, elevation color",
   "params": {
-    "speedCutoff": { "value": 0, "min": 0, "max": 120, "step": 1, "kind": "value", "label": "speed cutoff" },
-    "sizeScale": { "value": 1.6, "min": 0.2, "max": 12, "step": 0.1, "kind": "value", "label": "size scale" },
-    "elevExag": { "value": 0.4, "min": 0, "max": 3, "step": 0.01, "kind": "value", "label": "elevation exaggeration" },
-    "colorFloor": { "value": 0, "min": 0, "max": 900, "step": 5, "kind": "value", "label": "color domain floor" }
+    "speedCutoff": {
+      "value": 0,
+      "min": 0,
+      "max": 120,
+      "step": 1,
+      "kind": "value",
+      "label": "speed cutoff",
+      "changeRate": 0.2
+    },
+    "sizeScale": {
+      "value": 1.6,
+      "min": 0.2,
+      "max": 12,
+      "step": 0.1,
+      "kind": "value",
+      "label": "size scale",
+      "changeRate": 8
+    },
+    "elevExag": {
+      "value": 0.4,
+      "min": 0,
+      "max": 3,
+      "step": 0.01,
+      "kind": "value",
+      "label": "elevation exaggeration",
+      "changeRate": 8
+    },
+    "colorFloor": {
+      "value": 0,
+      "min": 0,
+      "max": 900,
+      "step": 5,
+      "kind": "value",
+      "label": "color domain floor",
+      "changeRate": 4
+    }
   },
   "nodes": [
     {
       "id": "src",
       "type": "source",
-      "dataset": { "kind": "synthetic", "rows": 300000 }
+      "dataset": {
+        "kind": "synthetic",
+        "rows": 300000
+      }
     },
     {
       "id": "fast",
@@ -23,7 +58,11 @@
       "type": "stats",
       "input": "fast",
       "column": "pop",
-      "ops": ["min", "max", "p99"]
+      "ops": [
+        "min",
+        "max",
+        "p99"
+      ]
     },
     {
       "id": "proj",
@@ -44,7 +83,10 @@
       "kind": "log",
       "domain": "auto",
       "statsFrom": "popStats",
-      "range": ["{{sizeScale}} * 0.4", "{{sizeScale}} * 3.5"]
+      "range": [
+        "{{sizeScale}} * 0.4",
+        "{{sizeScale}} * 3.5"
+      ]
     },
     {
       "id": "color",
@@ -52,7 +94,10 @@
       "input": "radius",
       "expr": "elevation",
       "ramp": "viridis",
-      "domain": ["{{colorFloor}}", "900"]
+      "domain": [
+        "{{colorFloor}}",
+        "900"
+      ]
     },
     {
       "id": "out",
@@ -62,7 +107,11 @@
       "position": "P",
       "color": "Cd",
       "size": "pscale",
-      "background": [0.035, 0.039, 0.055]
+      "background": [
+        0.035,
+        0.039,
+        0.055
+      ]
     }
   ]
 }

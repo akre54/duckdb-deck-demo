@@ -12,14 +12,18 @@
 import type { BuildResult } from '../engine/runtime.js';
 import type { Runtime } from '../engine/runtime.js';
 import type { DeckMetrics } from '../compare/deck-pane.js';
+import type { DeckWebgpuStatus } from '../compare/deck-webgpu-pane.js';
+import { renderExplain } from './explain.js';
 
 const TABS = [
+  ['explain', 'explain'],
   ['plan', 'plan'],
   ['sql', 'sql'],
   ['wgsl', 'wgsl'],
   ['attrs', 'attributes'],
   ['bench', 'bench'],
   ['compare', 'vs deck'],
+  ['calibration', 'calibration'],
 ] as const;
 
 export function escapeHtml(s: string): string {
@@ -31,7 +35,7 @@ const kb = (bytes: number) => (bytes < 1024 * 1024 ? `${(bytes / 1024).toFixed(0
 
 export class Inspector {
   private sections = new Map<string, HTMLElement>();
-  private active = 'plan';
+  private active = 'explain';
 
   constructor(tabsHost: HTMLElement, bodyHost: HTMLElement) {
     for (const [id, label] of TABS) {
@@ -60,7 +64,15 @@ export class Inspector {
     });
   }
 
+  /** The pane element for a tab, so other modules can render into it. */
+  section(id: string): HTMLElement {
+    const el = this.sections.get(id);
+    if (!el) throw new Error(`Inspector has no '${id}' section`);
+    return el;
+  }
+
   render(result: BuildResult): void {
+    renderExplain(this.sections.get('explain')!, result);
     this.sections.get('plan')!.innerHTML = this.planHtml(result);
     this.sections.get('sql')!.innerHTML = this.sqlHtml(result);
     this.sections.get('wgsl')!.innerHTML = this.wgslHtml(result);
@@ -69,8 +81,17 @@ export class Inspector {
   }
 
   /** The deck.gl comparison. Rendered separately because it updates on mode change. */
-  renderCompare(r: BuildResult, rt: Runtime, deck?: DeckMetrics): void {
+  renderCompare(
+    r: BuildResult,
+    rt: Runtime,
+    deck?: DeckMetrics,
+    gpuResident?: DeckWebgpuStatus,
+  ): void {
     const host = this.sections.get('compare')!;
+    if (gpuResident) {
+      host.innerHTML = this.gpuResidentHtml(r, gpuResident);
+      return;
+    }
     if (!deck) {
       host.innerHTML = `<h2>vs deck.gl</h2><pre>Set "render" to deck.gl or both to populate this.</pre>`;
       return;
@@ -122,6 +143,51 @@ export class Inspector {
 
       <h2>generated cpu loop (third backend, same IR)</h2>
       <pre>${escapeHtml(deck.code.trim() || '(none)')}</pre>`;
+  }
+
+  /**
+   * The deck-on-WebGPU result: whether the planner's kernel actually ran on luma's device
+   * and whether deck rendered the buffers it wrote. This is the answer to "does deck need
+   * to change for this design", so it reports what happened rather than what should.
+   */
+  private gpuResidentHtml(r: BuildResult, s: DeckWebgpuStatus): string {
+    const mark = (v: string) =>
+      v === 'ok' ? '<span class="tag arrow">ok</span>'
+      : v === 'failed' ? '<span class="tag" style="color:var(--warn);border-color:#4d2020">failed</span>'
+      : v === 'skipped' ? '<span class="tag scalar">skipped</span>'
+      : '<span class="tag">pending</span>';
+
+    const kernel = r.plan.kernels[0];
+    return `
+      <h2>deck.gl on webgpu — gpu-resident attributes</h2>
+      <table>
+        <tbody>
+          <tr><td>luma WebGPU device</td><td>${mark(s.device)}</td></tr>
+          <tr><td>planner's WGSL through luma compute</td><td>${mark(s.compute)}</td></tr>
+          <tr><td>deck rendered those buffers</td><td>${mark(s.render)}</td></tr>
+          <tr><td>kernel time</td><td class="num">${num(s.computeMs)} ms</td></tr>
+          <tr><td>buffers shared without readback</td><td>${s.sharedBuffers.map(escapeHtml).join(', ') || '—'}</td></tr>
+          <tr><td>cpu attribute work</td><td class="num">0 ms</td></tr>
+        </tbody>
+      </table>
+      <pre>${escapeHtml(s.detail || '(no detail)')}</pre>
+
+      <h2>why this matters</h2>
+      <ul class="notes">
+        <li>The WebGL2 comparison pays a full CPU attribute rebuild per parameter change because deck cannot
+        read a buffer a kernel wrote. Here the same graph's kernel writes luma <code>Buffer</code>s and deck
+        binds them, so that cost is <b>zero</b> — no readback, no fork of deck.</li>
+        <li>Available on the installed versions, not a future release: <code>@luma.gl/webgpu</code>
+        (<code>webgpuAdapter</code>) and <code>@luma.gl/gpgpu</code> ship as deck.gl 9.4 dependencies, and
+        <code>Device.createComputePipeline</code> / <code>beginComputePass</code> are in
+        <code>@luma.gl/core</code>.</li>
+        <li>deck.gl 9.4's WebGPU <i>render</i> path is still experimental, which is why the compute row and the
+        render row are reported separately above. A compute success with a render failure would still settle the
+        architectural question.</li>
+      </ul>
+
+      <h2>the kernel deck is running</h2>
+      <pre>${escapeHtml(kernel ? kernel.code.trim() : '(no GPU stage in this plan)')}</pre>`;
   }
 
   showError(message: string): void {

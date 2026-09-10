@@ -12,7 +12,7 @@
  * the WebGPU side unfairly.
  */
 
-import type { PhysicalPlan } from '../graph/planner.js';
+import type { PhysicalPlan, StageNode } from '../graph/planner.js';
 import { toJs } from '../graph/backends/js.js';
 import { widthOf } from '../graph/expr.js';
 import { buildRampLut } from '../graph/types.js';
@@ -42,7 +42,17 @@ export function materialize(upload: ColumnUpload): Float32Array {
   return out;
 }
 
-export function evaluateOnCpu(
+/**
+ * Evaluate one stage of a plan with the generated JS backend.
+ *
+ * Used two ways. The runtime calls it for `plan.cpuStage`, which the optimizer populates
+ * when the CPU is the cheapest place for a node or the only legal one (a WebGL2 target has
+ * no compute shaders). The deck.gl comparison calls it for `cpuStage` *plus* `gpuStage`,
+ * because deck cannot read a buffer a kernel wrote without a readback — which is precisely
+ * the cost that comparison exists to measure.
+ */
+export function evaluateStage(
+  stage: StageNode[],
   plan: PhysicalPlan,
   sources: Map<string, ColumnUpload>,
   params: Record<string, number>,
@@ -62,7 +72,7 @@ export function evaluateOnCpu(
   const usedSources = new Set<string>();
   let usesRamp = false;
 
-  for (const node of plan.gpuStage) {
+  for (const node of stage) {
     const width = widthOf(node.expr, (n) => widths.get(n) ?? 1);
     const emitted = toJs(node.expr, (name) => {
       const w = widths.get(name) ?? 1;

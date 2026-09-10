@@ -21,7 +21,7 @@ import { ScatterplotLayer } from '@deck.gl/layers';
 
 import type { PhysicalPlan } from '../graph/planner.js';
 import type { OrbitCamera } from '../engine/camera.js';
-import { evaluateOnCpu, toUint8Color, type CpuAttributes } from './cpu-attributes.js';
+import { evaluateStage, toUint8Color, type CpuAttributes } from './cpu-attributes.js';
 import type { ColumnUpload } from '../engine/arrow-gpu.js';
 
 export interface DeckMetrics {
@@ -114,7 +114,9 @@ export class DeckPane {
       return;
     }
 
-    const attrs = evaluateOnCpu(plan, sources, params, rows);
+    // deck gets both stages on the CPU: it cannot read a buffer the kernel wrote without
+    // a readback, so anything the plan placed on the GPU has to be recomputed here.
+    const attrs = evaluateStage([...plan.cpuStage, ...plan.gpuStage], plan, sources, params, rows);
     this.attrs = attrs;
 
     const posName = plan.render.position ?? 'P';
