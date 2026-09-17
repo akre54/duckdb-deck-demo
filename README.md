@@ -7,8 +7,8 @@ which engine runs each node. Houdini-style named attributes (`P`, `Cd`, `pscale`
 ```bash
 npm install
 npm run dev        # the inspector demo
-npm test           # 528 node tests
-npm run test:gpu   # 59 browser tests, real WebGPU + real DuckDB
+npm test           # 612 node tests
+npm run test:gpu   # 66 browser tests, real WebGPU + real DuckDB
 ```
 
 Needs Chrome/Edge 113+ or Safari 26+. Read [FINDINGS.md](FINDINGS.md) for the measured
@@ -16,29 +16,38 @@ results and the recommendation for noodles.
 
 ## Using it as a library
 
-Four entry points, split along what each one needs. The package name is a placeholder —
-change it in `package.json` before publishing.
+Two packages. The planner is the reusable half and stands entirely alone; the runtime is a
+reference implementation of executing what it plans.
 
 ```ts
-// Headless: no GPU, no DOM, no database driver. Only dependency is apache-arrow, and
-// even that is types-only, so the built core entry has zero runtime imports.
-import { plan, analyze, optimize, parseExpr, toSql, toWgsl } from '@noodles/gpu-graph';
+// @noodles.gl/planner — headless. No GPU, no DOM, no database driver, and no runtime
+// imports at all: apache-arrow is used for types only, so it erases at compile time.
+import { plan, analyze, optimize, parseExpr, toSql, toWgsl } from '@noodles.gl/planner';
 
 // The WebGPU runtime: needs a GPUDevice and a SqlEngine.
-import { initGpu, Runtime, calibrate } from '@noodles/gpu-graph/webgpu';
+import { initGpu, Runtime, calibrate } from '@noodles.gl/gpu-runtime/webgpu';
 
 // A SqlEngine over duckdb-wasm. Bundle URLs are passed in, so nothing here needs a bundler.
-import { DuckDbEngine } from '@noodles/gpu-graph/duckdb';
+import { DuckDbEngine } from '@noodles.gl/gpu-runtime/duckdb';
 
 // deck.gl adapters, for rendering the same plan through deck.
-import { DeckWebgl2Pane, DeckWebgpuPane } from '@noodles/gpu-graph/deck';
+import { DeckWebgl2Pane, DeckWebgpuPane } from '@noodles.gl/gpu-runtime/deck';
+```
+
+Measured, not asserted — `tests/boundaries.test.ts` reads the built output:
+
+```
+@noodles.gl/planner              (no bare imports at all)
+@noodles.gl/gpu-runtime/webgpu   @noodles.gl/planner
+@noodles.gl/gpu-runtime/duckdb   @duckdb/duckdb-wasm
+@noodles.gl/gpu-runtime/deck     @deck.gl/*, @luma.gl/*, @noodles.gl/planner
 ```
 
 Planning is headless, so the compiler can be used on its own — a build step or a test can
 inspect the generated SQL and WGSL without ever creating a device:
 
 ```ts
-import { plan, targetCaps } from '@noodles/gpu-graph';
+import { plan, targetCaps } from '@noodles.gl/planner';
 
 const physical = plan(graph, schema, {
   policy: 'cost',
@@ -57,7 +66,7 @@ Data arrives through a source provider rather than being baked in, so the librar
 needs to know where rows come from:
 
 ```ts
-import { parquetUrlSource, relationSource } from '@noodles/gpu-graph';
+import { parquetUrlSource, relationSource } from '@noodles.gl/planner';
 
 runtime.registerSource('trips', parquetUrlSource('https://example.com/trips.parquet'));
 runtime.registerSource('local', relationSource('already_loaded_table'));
@@ -73,19 +82,33 @@ compiles to a DuckDB `SELECT` expression, a WGSL statement, or a JS loop body fr
 same AST — so "which engine runs this node" is a cost decision, not a rewrite.
 
 ```
-src/core/expr.ts            parser + AST + the capability table
-src/core/backends/sql.ts    -> DuckDB, with $1-style binds for prepared statements
-src/core/backends/wgsl.ts   -> WGSL, width- and bool-aware
-src/core/backends/js.ts     -> JS, for the CPU stage and the deck comparison
+packages/planner/src/expr.ts          parser + AST + the capability table
+packages/planner/src/functions.ts     user-defined functions, resolved by inlining
+packages/planner/src/backends/sql.ts  -> DuckDB, with $1-style binds for prepared statements
+packages/planner/src/backends/wgsl.ts -> WGSL, width- and bool-aware
+packages/planner/src/backends/js.ts   -> JS, for the CPU stage and the deck comparison
 ```
+
+Those names are a *default*, not a constant. The vocabulary is declared, and `analyze`
+resolves every render channel once so nothing downstream applies a fallback:
+
+```ts
+plan(graph, schema, {
+  conventions: { position: 'aPosition', color: 'aColor', mask: '$keep', internalPrefix: '$' },
+});
+```
+
+A channel named with the internal prefix is rejected up front, because an internal attribute
+is never given a buffer — the symptom would otherwise be a render pass binding an attribute
+that does not exist, reported by WebGPU at submit time, nowhere near the graph that named it.
 
 Planning is three phases, deliberately separated so a plan exists as data before anything
 is generated:
 
 ```
-src/core/analyze.ts      topological order, feasible engines per node, widths, op counts
-src/core/optimizer.ts    price every legal plan, pick the cheapest
-src/core/planner.ts      emit SQL + WGSL + the CPU loop for the chosen assignment
+packages/planner/src/analyze.ts    topological order, feasible engines, widths, op counts
+packages/planner/src/optimizer.ts  price every legal plan, pick the cheapest
+packages/planner/src/planner.ts    emit SQL + WGSL + the CPU loop for the chosen assignment
 ```
 
 ## The planner
@@ -139,6 +162,44 @@ knowledge of wrangles: each statement is placed independently and the existing f
 merges them into one dispatch. Locals (`var t`) get an SSA register rather than a buffer, so
 they cost no memory, no upload and no binding slot.
 
+### User-defined functions
+
+```
+fn ease(x) = x * x * (3.0 - 2.0 * x);
+@Cd = ramp(ease(t));
+```
+
+or as a graph-level `functions` map, callable from any expression. **They are inlined, not
+compiled**: a call is replaced by its body with the arguments substituted, so every backend,
+`enginesFor`, `widthOf`, `opCount` and fusion see an ordinary tree. A real call mechanism would
+have to be implemented three times and would have to answer "which engines can run this
+function" separately from "which engines can run its body"; inlining makes those one question.
+
+The cost is duplication — `sq(expensive())` evaluates the argument twice. That is faithful
+rather than surprising, and `opCount` prices it, so a function names work without hiding it.
+Recursion is rejected with the cycle; shadowing a built-in is rejected at the declaration.
+
+### The escape hatch: `raw`
+
+For the cases the IR genuinely cannot reach — a window function, a texture sample, an atomic:
+
+```json
+{ "id": "custom", "type": "raw", "input": "src", "engine": "gpu",
+  "code": "let t = elevation / 900.0;\ntint = vec3<f32>(t * k, t, 1.0 - t);",
+  "writes": [{ "name": "tint", "width": 3 }],
+  "reads": ["elevation"], "params": ["k"], "opCost": 6 }
+```
+
+The code sees plain names: a declared read, write or param is in scope as itself, never as
+`r7` or `params.p_k`. In exchange the node declares what the planner can no longer infer — its
+engine (a feasible set of one, so it pins the boundary rather than being placed), its reads and
+writes, its parameters, and an op-count estimate. **Those declarations are trusted**: reading an
+attribute you did not declare gives you an unbound buffer, so prefer a `wrangle` whenever the
+expression fits.
+
+What it does *not* give up is fusion. A raw GPU node is spliced into the same kernel as its
+neighbours, because fusion follows the stage assignment, not legibility.
+
 Nodes take `inputs: string[]`, so the topology is a DAG — branching works, unreachable
 branches are dropped as dead code, cycles are reported. Relational joins are out of scope.
 
@@ -157,6 +218,15 @@ instead of four operator nodes. Same image, one fused kernel.
 
 Every claim the architecture makes should be checkable on screen:
 
+- **graph** — the planned DAG, each node tinted by its assigned stage, with a dashed box around
+  the nodes that fused into one dispatch. Click a node for its reason and its slice of the
+  generated code. Drawn from `plan.explain.edges`, which is the *desugared* topology — so a
+  wrangle already appears as one node per statement and dead branches are already gone.
+- **wrangle** — an editable body that replans on every keystroke (headless, ~2 ms) with a badge
+  per statement showing which engine it landed on. Switch `policy` to `sql-first` and watch
+  `@P` and `var t` move from GPU to SQL while `@Cd` stays put, because `ramp()` has no SQL form.
+  A syntax error is reported against its line and leaves the previous plan on screen. Apply
+  (or ⌘/Ctrl+Enter) does the expensive half.
 - **explain** — the chosen plan, its cost breakdown, **every candidate plan with its cost**,
   every rejected one and why, estimated vs actual rows and time, the statistics the
   optimizer used, and the calibrated constants
@@ -186,21 +256,28 @@ Things worth doing by hand:
 ## Layout
 
 ```
-src/core/       expression IR + backends, analyze/optimize/emit, statistics, cost model,
-                target capabilities, source providers, wrangle parser, Arrow upload,
-                CPU stage
-src/webgpu/     device, attributes, kernels, camera, calibration, render passes, runtime
-src/duckdb/     DuckDbEngine, a SqlEngine over duckdb-wasm
-src/deck/       the WebGL2 and WebGPU deck.gl panes
-demo/           the inspector app: main.ts, ui/, graphs/, data/ (not published)
-tests/          boundary guard, budgets, benchmarks, fixtures, browser/
+packages/planner/   @noodles.gl/planner — expression IR + backends, analyze/optimize/emit,
+                    statistics, cost model, target capabilities, attribute conventions,
+                    source providers, wrangle parser, Arrow upload, CPU stage, fixtures
+src/webgpu/         device, attributes, kernels, camera, calibration, passes, runtime
+src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
+src/deck/           the WebGL2 and WebGPU deck.gl panes
+demo/               the inspector app: main.ts, ui/, graphs/, data/ (not published)
+tests/              boundary guard, budgets, benchmarks, browser/
 ```
+
+The planner resolves to its source during development (a Vite/Vitest alias) and to its built
+`dist` when the root package is compiled. `tests/boundaries.test.ts` is the standing guard on
+the split: no relative import escapes the package, no package but Arrow's types is reached,
+Arrow is imported `import type` only, no GPU or DOM API is mentioned, and the planner's
+tsconfig keeps `lib` at ES2022 with `types: []` — so an accidental `document` or `GPUDevice`
+fails to compile rather than becoming something a consumer has to install.
 
 ## Tests
 
 ```bash
-npm test          # 528 tests, node, ~0.5s
-npm run test:gpu  # 59 tests, Chromium, real WebGPU + real DuckDB
+npm test          # 612 tests, node, ~0.6s
+npm run test:gpu  # 66 tests, Chromium, real WebGPU + real DuckDB
 npm run bench     # throughput, reported not asserted
 ```
 
@@ -222,16 +299,24 @@ only the JS one is executable there. In Chromium all three run, so:
   zero re-uploads, and still change the buffer
 - exact bin counts are read back from the atomic grid
 - calibration is checked against the machine it just measured
+- a requery that grows the row count past buffer capacity must not strand a bind group
+- raw WGSL and raw SQL compute what their code says, and a user function agrees element-wise
+  with the same body written inline
 
-That suite found three real bugs on its first run: no boolean tracking in the SQL backend,
-`%` disagreeing on negatives, and kernels with no parameters silently producing zeroes. See
-[FINDINGS.md](FINDINGS.md) §8.
+That suite found five real bugs: no boolean tracking in the SQL backend, `%` disagreeing on
+negatives, kernels with no parameters silently producing zeroes, a render pass holding a
+destroyed buffer after a reallocation, and a raw node's SSA locals declared inside the block
+that had to outlive it. See [FINDINGS.md](FINDINGS.md) §8.
 
-Two gotchas for anyone extending it. Playwright's default headless binary is
+Three gotchas for anyone extending it. Playwright's default headless binary is
 `chrome-headless-shell`, which has no WebGPU — `navigator.gpu` exists but `requestAdapter()`
 returns null, so GPU tests skip while looking like they ran; the config uses
-`channel: 'chromium'` for the full build. And `Runtime.build()` marks kernels dirty without
-dispatching, so a derived attribute reads as zero until a frame is submitted.
+`channel: 'chromium'` for the full build. `Runtime.build()` marks kernels dirty without
+dispatching, so a derived attribute reads as zero until a frame is submitted. And WebGPU
+reports a destroyed buffer only at `queue.submit`, so a bind-group cache has to key on
+something that changes when a buffer is *replaced* — neither the label (`attr:Cd`, which never
+changes) nor the capacity (which can repeat) is enough. Attributes carry a `generation` counter
+for exactly this, and passes resolve buffers by name per frame instead of capturing them.
 
 Performance assertions live in `tests/budgets.test.ts` and are deliberately of two kinds:
 structural ones that cannot be flaky (the chunked upload path reports zero conversion time; a
@@ -240,7 +325,10 @@ headroom, to catch an order-of-magnitude regression rather than a 20% one.
 
 ## Known limits
 
-One aggregate and one color ramp per graph. No relational joins, no strings, no picking, no
+One aggregate and one color ramp per graph. A `raw` node's declared reads and writes are
+trusted, not checked against its code — that is the price of the escape hatch. Raw SQL produces
+scalars only. User functions cannot recurse and are inlined, so they name work rather than
+saving it. No relational joins, no strings, no picking, no
 transitions, no line or polygon marks. The optimizer is exact only within the family "stage
 boundaries in topological order" — for a linear chain that is every legal plan, for a
 branching DAG it is not. Cardinality estimation assumes uniformity and independence, so the

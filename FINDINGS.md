@@ -248,6 +248,31 @@ as 0 and the heatmap accumulated nothing. Fixed by casting SELECT items to `FLOA
 what §2 recommended for a different reason, and which also removes the `cast` upload tier for
 `DOUBLE` columns by moving the narrowing into DuckDB's vectorised executor.
 
+**A render pass held a destroyed buffer after a reallocation.** Reported from the demo, not
+found by a test — a filter change at 1M rows produced
+`[Buffer "attr:Cd"] used in submit while destroyed`. `requery` reallocates an attribute buffer
+when the new row count outgrows capacity, but the render pass had captured the `GpuAttribute`
+*object* at build time. Its bind-group cache key was computed from that stale object, so the
+key never changed and the cached bind group kept pointing at the freed buffer. The kernel host
+was immune by accident: it looks attributes up by name from the live set each dispatch.
+
+Two things made it hard to see. WebGPU only notices at `queue.submit`, so the error surfaced on
+a later frame rather than at the reallocation. And the cache key looked adequate — it contained
+the buffer's label and its capacity, but the label is `attr:<name>` and never changes, and a
+capacity can repeat across a reallocation. Fixed by giving every attribute a `generation`
+counter bumped on each allocation, and by having the passes resolve buffers by name per frame
+the way the kernel already did. The regression test reproduces the original message exactly
+against the unfixed code.
+
+**A raw node's output locals were declared inside the block that scoped them.** The WGSL escape
+hatch splices author-written statements into a generated kernel, inside a `{ }` block so two raw
+nodes can both declare `let elevation` without colliding. The SSA locals carrying the result out
+were declared inside that block — so they were out of scope by the time the next node read them,
+the kernel failed to compile, and every derived attribute came back zero. Identical symptom to
+the `layout: 'auto'` bug above, from an unrelated cause, and identically invisible to a
+structural test: the plan was correct, the code was generated, the numbers were zero. Found on
+the first run of a browser test that compared the kernel's output against DuckDB's.
+
 A fifth, found by the Node suite: selectivity conflated `>` with `>=` on a single-valued
 column, reporting that `x > 5` keeps every row when `x` is always 5.
 
@@ -263,8 +288,11 @@ column, reporting that `x > 5` keeps every row when `x` is always 5.
 - Exact bin counts read back from the atomic grid, rather than a heatmap that looks plausible.
 - Every calibrated constant finite and positive, and predicted build cost within an order of
   magnitude of measured.
+- A requery that grows the row count past capacity reallocating without stranding a bind
+  group, and its complement: a requery that shrinks the result reusing the buffer, because
+  otherwise every drag of a filter slider allocates.
 
-### Two traps worth knowing
+### Three traps worth knowing
 
 Playwright's default headless binary is `chrome-headless-shell`, which ships **without
 WebGPU**: `navigator.gpu` exists but `requestAdapter()` returns null, so every GPU test skips
@@ -273,6 +301,62 @@ while appearing to have run. `channel: 'chromium'` selects the full build.
 `Runtime.build()` marks kernels dirty but does not dispatch them — that happens in `frame()`.
 Reading a derived attribute straight after `build()` compares zeroes, which is how three of
 these tests initially "failed" for the wrong reason.
+
+A **bind-group cache must key on buffer identity, and identity needs an explicit token**.
+Nothing observable on a `GPUBuffer` distinguishes it from its replacement: labels are not
+unique and sizes repeat. A monotonic counter on the owning attribute is the cheapest thing that
+works, and it belongs on the attribute rather than in each consumer, because every consumer
+that caches gets the invariant wrong in the same way.
+
+## 9. The attribute vocabulary had to become configuration
+
+`P`, `Cd`, `pscale` and `Alpha` were spelled out in fourteen places as `x ?? 'P'` — in
+desugaring, in the optimizer's binding count, in the emitter, in the WebGPU runtime, and in
+both deck adapters. Every one of those is the same decision made again, and a library whose
+attribute names are compiled in is only usable by a renderer that agreed to Houdini's spelling.
+
+The fix that mattered was not adding an options bag. It was moving the resolution to a single
+point: `analyze` now resolves each render channel to a concrete name and publishes them as
+`Analysis.channels`, so every consumer downstream reads a resolved name and *no* call site
+applies a fallback. The fourteen sites became one.
+
+Two things fell out of doing it properly. The internal prefix (`__`) is part of the vocabulary
+too, because it decides which attributes get a buffer — so a consumer changing the prefix
+without changing the mask name would produce an attribute that is bound but never allocated.
+That combination is now rejected at construction with an explanation, rather than surfacing as
+a WebGPU error at first draw. And renaming attributes must not change *placement*: it is a
+spelling change, not a cost change. A test asserts the chosen assignment, kernel count and
+estimated rows are identical under both vocabularies, which is the check that the naming has
+not leaked into the optimizer.
+
+## 10. Two ways to be programmable, and only one of them is free
+
+The wrangle node made the pipeline programmable without the planner learning anything. The
+question that followed was what "custom logic" should mean beyond it, and the two answers have
+very different costs.
+
+**User-defined functions are free, because they are inlined.** `fn ease(x) = x * x * (3 - 2x)`
+is resolved before anything else looks at the tree, so the three backends, `enginesFor`,
+`widthOf`, `opCount` and fusion are all unchanged. A real call mechanism would have to be
+implemented three times — SQL has no per-query user functions, WGSL has real ones, JS has
+closures — and would have to answer "which engines can run this function" separately from
+"which engines can run its body". Inlining collapses those into one question, and the price is
+argument duplication, which `opCount` prices honestly.
+
+One thing did not survive contact: the parser validates call names and arity eagerly, so a user
+function was rejected before inlining ever ran. The fix was to *declare functions to the parser*
+rather than relax the check, because relaxing it would move every typo's error from the offending
+text to a later engine-capability failure. `parseExpr(src, { functions })`.
+
+**A raw SQL/WGSL node costs exactly what it gives up.** Its feasible set is declared rather than
+derived, so it is a set of one and it pins the stage boundary instead of being placed. Its reads,
+writes, params and op count must be declared, because none of them can be inferred from opaque
+text — and the planner then *trusts* those declarations, which is the real cost: an undeclared
+read is an unbound buffer, not an error.
+
+What it does not cost is fusion. A raw GPU node is spliced into the same kernel as its
+neighbours, because fusion follows the stage assignment and has no opinion about legibility.
+That was the surprise — the escape hatch is a placement constraint, not a pipeline barrier.
 
 ## Recommended order of work for noodles
 
@@ -284,7 +368,7 @@ Ranked by payoff per unit of risk. The first three are independent of any render
    structural test and visible on the first run of an executing one. The cheap version of this
    is a browser test that evaluates one expression through every backend and compares — it does
    not need the whole pipeline to pay for itself.
-4. **Make the expression IR the shared artifact and the SQL compiler a backend of it.** `sql-compiler/expression-to-sql.ts` is already the seed; add a WGSL backend beside it. Then retire `MapRangeOp`/`ColorRampOp` into `fit()`/`ramp()` templates.
+4. **Make the expression IR the shared artifact and the SQL compiler a backend of it.** `sql-compiler/expression-to-sql.ts` is already the seed; add a WGSL backend beside it. Then retire `MapRangeOp`/`ColorRampOp` into `fit()`/`ramp()` templates — which is PR #491's own stated Phase 2, so the roadmaps already converge. The planner is a standalone package (`@noodles.gl/planner`, no runtime dependencies) precisely so this can be a dependency rather than a port.
 5. **Add a cost model before adding more operator types.** Statistics from one DuckDB query per source, constants calibrated at startup, and the exact two-boundary search. The rule-based version cannot distinguish a filter worth pushing from one that is not, and the difference was 3× the rows on screen. Budget for the render term — without it the model prefers discard masks.
 6. **Replace operator types with a `wrangle` node.** It needed no planner support, it subsumes scale/colorscale/project, and locals cost nothing. This is the cheapest large win in the list.
 7. **Keep deck.gl, and pass it app-owned luma Buffers** for the layer types that dominate — scatter and heatmap. The compute path works today; the three deck/luma fixes in §5a are what stand between that and pixels.
