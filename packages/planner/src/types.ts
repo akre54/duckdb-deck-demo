@@ -10,6 +10,11 @@
 
 import type { Expr } from './expr.js';
 import { parseWrangle, expandWrangle } from './wrangle.js';
+import { type AttributeConventions, HOUDINI_CONVENTIONS } from './conventions.js';
+import {
+  type FunctionDef, type FunctionRegistry, type FunctionSpec,
+  addFunction, buildRegistry,
+} from './functions.js';
 
 export type RampName = 'viridis' | 'magma' | 'turbo' | 'cividis';
 
@@ -237,13 +242,64 @@ export interface WrangleNode {
   ramp?: RampName;
 }
 
+/**
+ * The escape hatch: literal SQL or WGSL the planner does not understand.
+ *
+ * Everything else in this schema compiles from one expression IR, which is what lets the
+ * optimizer move it between engines. A `raw` node gives that up deliberately, for the cases
+ * the IR genuinely cannot reach — a window function, a texture sample, an atomic, a vendor
+ * intrinsic. In exchange it must declare what the planner can no longer infer:
+ *
+ *   - `engine` — the only stage it can run on. Its feasible set is this and nothing else,
+ *     so it pins the stage boundary rather than being placed.
+ *   - `reads` / `writes` — its dependency set and its outputs. The planner *trusts* these.
+ *     Reading an attribute you did not declare gives you a stale or unbound buffer; writing
+ *     one you did not declare loses the value. This is the real cost of the escape hatch,
+ *     and it is why a `wrangle` should be preferred whenever the expression fits.
+ *   - `params` — parameters the code references, so they are still bound and still routed.
+ *   - `opCost` — a scalar-operation estimate, since `opCount` cannot walk opaque text. The
+ *     optimizer needs *some* number to price the node; a wrong one misprices this node only.
+ *
+ * What it does not give up: fusion. A `raw` node on the GPU is spliced into the same kernel
+ * as its neighbours, because fusion depends on the stage assignment, not on legibility.
+ */
+export interface RawNode {
+  id: string;
+  type: 'raw';
+  input: string;
+  inputs?: string[];
+  /** The only engine this node can run on. */
+  engine: 'sql' | 'gpu';
+  /**
+   * `sql`: one expression per declared write, keyed by name.
+   * `gpu`: WGSL statements. Read an attribute as `name`, assign a write as `name = ...`;
+   * both are rewritten to the kernel's local register names.
+   */
+  code: string | Record<string, string>;
+  /** Attributes produced, with their component counts. */
+  writes: { name: string; width: number }[];
+  /** Attributes read. Declared, because the code cannot be parsed to find out. */
+  reads?: string[];
+  /** Parameters referenced, so they are still bound and routed. */
+  params?: string[];
+  /** Scalar-operation estimate per row, for costing. Defaults to 8. */
+  opCost?: number;
+  /** Shown in the inspector instead of the code, when set. */
+  label?: string;
+}
+
 export type GraphNode =
-  | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode
+  | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode | RawNode
   | ScaleNode | ColorScaleNode | ProjectNode | WrangleNode | Bin2dNode | RenderNode;
 
 export interface Graph {
   name?: string;
   params?: Record<string, ParamSpec>;
+  /**
+   * User-defined functions, callable from any expression in the graph. Inlined at analysis
+   * time, so they cost the planner and the backends nothing. See `functions.ts`.
+   */
+  functions?: Record<string, FunctionSpec>;
   nodes: GraphNode[];
   /** Node id of the render node to evaluate. Defaults to the last render node. */
   output?: string;
@@ -255,7 +311,7 @@ export interface Graph {
 
 /** Nodes that survive into the planner. */
 export type CoreNode =
-  | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode
+  | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode | RawNode
   | Bin2dNode | RenderNode;
 
 export const RAMP_STOPS: Record<RampName, [number, number, number][]> = {
@@ -305,7 +361,13 @@ export function statParamName(nodeId: string, op: StatOp): string {
  * Rewrite sugar nodes into core nodes. Every sugar node becomes one or more
  * `attribute` nodes, so the planner only ever sees expressions.
  */
-export function desugar(graph: Graph): { nodes: CoreNode[]; notes: string[]; ramp?: RampName } {
+export function desugar(
+  graph: Graph,
+  conv: AttributeConventions = HOUDINI_CONVENTIONS,
+): { nodes: CoreNode[]; notes: string[]; ramp?: RampName; functions: FunctionRegistry } {
+  // Graph-level declarations first, then any hoisted out of wrangle bodies. Both land in one
+  // flat registry, so a redefinition is an error wherever it came from.
+  const functions = buildRegistry(graph.functions);
   const out: CoreNode[] = [];
   const notes: string[] = [];
   // One LUT is bound per kernel, so this prototype supports one ramp per graph.
@@ -356,10 +418,10 @@ export function desugar(graph: Graph): { nodes: CoreNode[]; notes: string[]; ram
           id: node.id,
           type: 'attribute',
           input: node.input,
-          name: node.name ?? 'Cd',
+          name: node.name ?? conv.color,
           expr: `ramp(${t})`,
         });
-        notes.push(`${node.id}: colorscale desugared to attribute '${node.name ?? 'Cd'}' via ramp()`);
+        notes.push(`${node.id}: colorscale desugared to attribute '${node.name ?? conv.color}' via ramp()`);
         break;
       }
 
@@ -373,16 +435,28 @@ export function desugar(graph: Graph): { nodes: CoreNode[]; notes: string[]; ram
             `(ln(tan(0.7853981634 + (${node.y}) * 0.008726646259971648)) / 6.283185307) * (${scale}), ` +
             `(${z}) * (${scale})]`
           : `[(${node.x}) * (${scale}), (${node.y}) * (${scale}), (${z}) * (${scale})]`;
-        out.push({ id: node.id, type: 'attribute', input: node.input, name: 'P', expr });
-        notes.push(`${node.id}: project(${node.mode}) desugared to attribute 'P'`);
+        out.push({ id: node.id, type: 'attribute', input: node.input, name: conv.position, expr });
+        notes.push(`${node.id}: project(${node.mode}) desugared to attribute '${conv.position}'`);
         break;
       }
+
+      case 'raw':
+        // Already a core node; nothing to desugar. Listed explicitly so a new sugar type
+        // cannot fall through to the default and be silently dropped.
+        out.push(node);
+        break;
 
       case 'wrangle': {
         // One statement becomes one attribute node, so the planner places each statement
         // independently and the existing kernel fusion merges them back into one dispatch.
         // The planner needs no knowledge of wrangles at all.
-        const statements = parseWrangle(node.body);
+        const statements = parseWrangle(node.body, functions);
+        for (const s of statements) {
+          if (s.kind === 'function' && s.fn) {
+            addFunction(functions as Map<string, FunctionDef>, s.fn);
+            notes.push(`${node.id}: declared ${s.fn.name}(${s.fn.params.join(', ')}) on line ${s.line}`);
+          }
+        }
         const expanded = expandWrangle(node.id, statements);
         if (/\bramp\s*\(/.test(node.body)) ramps.add(node.ramp ?? 'viridis');
         let input = node.inputs?.[0] ?? node.input;
@@ -434,7 +508,7 @@ export function desugar(graph: Graph): { nodes: CoreNode[]; notes: string[]; ram
     }
   }
 
-  return { nodes: out, notes, ramp: [...ramps][0] };
+  return { nodes: out, notes, ramp: [...ramps][0], functions };
 }
 
 /** Build a 256-entry RGB LUT from a ramp's stops. */

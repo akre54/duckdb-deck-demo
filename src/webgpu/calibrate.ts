@@ -11,8 +11,7 @@
  * fold per-call overhead into the per-row term and badly misprice small plans.
  */
 
-import type { SqlEngine } from '../core/source.js';
-import { DEFAULT_COSTS, type CostConstants } from '../core/cost.js';
+import { DEFAULT_COSTS, type SqlEngine, type CostConstants } from '@noodles.gl/planner';
 import { gpuData } from './gpu-compat.js';
 
 export interface CalibrationReport {

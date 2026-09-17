@@ -17,7 +17,7 @@
 import * as duckdb from '@duckdb/duckdb-wasm';
 import type { Table } from 'apache-arrow';
 
-import type { QueryTiming, SqlEngine } from '../core/source.js';
+import type { QueryTiming, SqlEngine } from '@noodles.gl/planner';
 
 export type { QueryTiming, SqlEngine };
 

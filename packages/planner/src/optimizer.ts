@@ -20,7 +20,7 @@
  *      amortised interaction is what makes the answer interesting.
  */
 
-import type { Analysis, Stage } from './analyze.js';
+import type { Analysis, AnalyzedNode, Stage } from './analyze.js';
 import { PlanError } from './analyze.js';
 import {
   type CostConstants, CostAccumulator, type CostBreakdown,
@@ -427,12 +427,9 @@ function countStorageBindings(
 
   // Must match `buildKernel`: a temporary nothing outside the kernel reads stays in a
   // register and is never bound. Render channels and the mask are the external names.
+  const { position, color, size, opacity } = analysis.channels;
   const external = new Set<string>([
-    analysis.render.position ?? 'P',
-    analysis.render.color ?? 'Cd',
-    analysis.render.size ?? 'pscale',
-    analysis.render.opacity ?? 'Alpha',
-    '__mask',
+    position, color, size, opacity, analysis.conventions.mask,
   ]);
   if (analysis.bin2d?.weight) external.add(analysis.bin2d.weight);
 
@@ -446,7 +443,16 @@ function countStorageBindings(
       if (external.has(node.name)) written.add(node.name);
       else registerOnly.add(node.name);
     }
-    if (node.kind === 'filter') written.add('__mask');
+    if (node.kind === 'filter') written.add(analysis.conventions.mask);
+    // A raw node declares several writes, any of which may be external. Counted here for the
+    // same reason as everything else: exceeding the per-stage binding limit is a hard failure
+    // at pipeline creation, so it has to be caught while pricing rather than discovered later.
+    if (node.kind === 'raw') {
+      for (const w of rawWritesOf(node)) {
+        if (external.has(w)) written.add(w);
+        else registerOnly.add(w);
+      }
+    }
     if (node.expr && usesRamp(node)) ramp = true;
   }
   for (const t of registerOnly) read.delete(t);
@@ -454,6 +460,12 @@ function countStorageBindings(
   for (const w of written) read.delete(w);
   const total = read.size + written.size + (ramp ? 1 : 0);
   return { reads: read.size, writes: written.size, ramp, total };
+}
+
+/** Declared writes of a raw node, or none for any other kind. */
+function rawWritesOf(node: AnalyzedNode): string[] {
+  const n = node.node as { type?: string; writes?: { name: string }[] };
+  return n.type === 'raw' ? (n.writes ?? []).map((w) => w.name) : [];
 }
 
 function usesRamp(node: { expr?: { kind: string } }): boolean {

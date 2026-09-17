@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { resolve } from 'node:path';
 
 /**
  * Browser suite: real WebGPU and real DuckDB-Wasm in Chromium.
@@ -12,7 +13,20 @@ import { defineConfig } from 'vitest/config';
  * (CI, containers). On a real GPU it will use it. DuckDB-Wasm needs the cross-origin isolation
  * headers for its threaded bundle; we select mvp/eh at runtime so they are belt-and-braces.
  */
+
+/**
+ * The planner is a workspace package, but during development it resolves to source rather
+ * than to `packages/planner/dist`. Without this every edit to the planner would need a build
+ * before the demo or a test could see it. The published resolution is exercised by
+ * `tests/boundaries.test.ts`, which reads the built output instead of the source.
+ */
+const plannerAliases = [
+  { find: '@noodles.gl/planner/fixtures', replacement: resolve('packages/planner/src/fixtures.ts') },
+  { find: '@noodles.gl/planner', replacement: resolve('packages/planner/src/index.ts') },
+];
+
 export default defineConfig({
+  resolve: { alias: plannerAliases },
   server: {
     headers: {
       'Cross-Origin-Opener-Policy': 'same-origin',

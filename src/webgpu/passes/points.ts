@@ -10,14 +10,31 @@
  * There is no vertex buffer at all — the quad comes from `vertex_index`.
  */
 
-import type { GpuAttribute } from '../attributes.js';
+import type { AttributeSet, GpuAttribute } from '../attributes.js';
 
+/**
+ * Widths only. Used to *generate* the shader, which is fixed for the life of the pass —
+ * a width change means a new plan and therefore a new pass.
+ */
 export interface PointsBindings {
   position: GpuAttribute;
   color?: GpuAttribute;
   size?: GpuAttribute;
   opacity?: GpuAttribute;
   mask?: GpuAttribute;
+}
+
+/**
+ * Which named attribute feeds each render channel. Names rather than attributes, because
+ * the buffer behind a name is replaced whenever a requery grows the row count past
+ * capacity; the pass must look it up per frame.
+ */
+export interface PointsChannels {
+  position: string;
+  color?: string;
+  size?: string;
+  opacity?: string;
+  mask?: string;
 }
 
 /** style uniform: [sizeScale, opacity, minPx, maxPx]. */
@@ -128,12 +145,24 @@ export class PointsPass {
   private bindKey = '';
   readonly styleBuffer: GPUBuffer;
 
+  /** Channel order must match the shader's binding order in `pointsShader`. */
+  private readonly order: (string | undefined)[];
+
   constructor(
     private readonly device: GPUDevice,
     format: GPUTextureFormat,
-    private readonly bindings: PointsBindings,
+    private readonly attrs: AttributeSet,
+    channels: PointsChannels,
     private readonly viewBuffer: GPUBuffer,
   ) {
+    this.order = [channels.position, channels.color, channels.size, channels.opacity, channels.mask];
+    const bindings: PointsBindings = {
+      position: attrs.get(channels.position),
+      color: channels.color ? attrs.get(channels.color) : undefined,
+      size: channels.size ? attrs.get(channels.size) : undefined,
+      opacity: channels.opacity ? attrs.get(channels.opacity) : undefined,
+      mask: channels.mask ? attrs.get(channels.mask) : undefined,
+    };
     const code = pointsShader(bindings);
     const module = device.createShaderModule({ label: 'points', code });
     this.pipeline = device.createRenderPipeline({
@@ -169,9 +198,8 @@ export class PointsPass {
   }
 
   private resolveBindGroup(): GPUBindGroup {
-    const used = [this.bindings.position, this.bindings.color, this.bindings.size, this.bindings.opacity, this.bindings.mask]
-      .filter(Boolean) as GpuAttribute[];
-    const key = used.map((a) => `${a.name}:${a.capacityRows}`).join('|');
+    const used = this.order.filter((n): n is string => Boolean(n));
+    const key = this.attrs.bindingKey(used);
     if (this.bindGroup && key === this.bindKey) return this.bindGroup;
 
     const entries: GPUBindGroupEntry[] = [
@@ -179,7 +207,9 @@ export class PointsPass {
       { binding: 1, resource: { buffer: this.styleBuffer } },
     ];
     let slot = 2;
-    for (const a of used) entries.push({ binding: slot++, resource: { buffer: a.buffer } });
+    for (const name of used) {
+      entries.push({ binding: slot++, resource: { buffer: this.attrs.get(name).buffer } });
+    }
     this.bindGroup = this.device.createBindGroup({
       label: 'points:bg',
       layout: this.pipeline.getBindGroupLayout(0),

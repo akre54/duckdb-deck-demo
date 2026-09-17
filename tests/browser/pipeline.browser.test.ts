@@ -1,12 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initGpu, type Gpu } from '../../src/webgpu/device.js';
 import { Runtime } from '../../src/webgpu/runtime.js';
-import { readColumn } from '../../src/core/arrow.js';
-import { evaluateStage } from '../../src/core/cpu-stage.js';
-import { relationSource, sqlSource } from '../../src/core/source.js';
-import { targetCaps } from '../../src/core/target.js';
-import type { Graph } from '../../src/core/types.js';
-import { duck, readBuffer, readBufferU32 } from './harness.js';
+import { readColumn, evaluateStage, relationSource, sqlSource, targetCaps, type Graph } from '@noodles.gl/planner';
+import { duck, readBuffer, readBufferU32, expectNoGpuError } from './harness.js';
 
 /**
  * The pipeline end to end on real engines: DuckDB produces Arrow, the upload path lands it on
@@ -428,6 +424,195 @@ describe('parameter routing on the real runtime', () => {
     expect(occurrences).toBeGreaterThanOrEqual(distinct);
     expect(built.rows).toBeGreaterThan(0);
     rt.destroy();
+  });
+});
+
+describe('a requery that grows the row count does not strand a bind group', () => {
+  /**
+   * The bug this pins: `requery` reallocates an attribute buffer when the new row count
+   * outgrows capacity, but the render pass had captured the *old* `GpuAttribute` object at
+   * build time. Its bind-group cache key was computed from that stale object, so the key never
+   * changed and the cached bind group kept pointing at a destroyed buffer. WebGPU only
+   * notices at submit, which surfaced as
+   *
+   *   [Buffer "attr:Cd"] used in submit while destroyed
+   *
+   * on a later frame — far from the reallocation that caused it. Passes now resolve buffers by
+   * name per frame, and the cache keys on a per-allocation `generation`.
+   */
+  it('survives a filter change that widens the result', async () => {
+    const local = await newRuntime();
+    // Start narrow so the buffers are sized for a small result. Seeded through the graph's
+    // declared default, because a fresh runtime has no parameter state to override.
+    const narrowGraph = scatter();
+    narrowGraph.params!.cut.value = 110;
+    await local.build(narrowGraph);
+    await settle(local);
+    const narrow = local.attributes.get('Cd');
+    const narrowRows = narrow.rows;
+    const narrowGeneration = narrow.generation;
+
+    // Then widen it past capacity, which is what forces the reallocation.
+    await expectNoGpuError(gpu.device, async () => {
+      await local.setParam('cut', 0);
+      local.frame();
+    });
+
+    const wide = local.attributes.get('Cd');
+    expect(wide.rows, 'the requery should have produced more rows').toBeGreaterThan(narrowRows);
+    expect(wide.generation, 'the buffer should have been reallocated')
+      .toBeGreaterThan(narrowGeneration);
+
+    // And the contents must be real, not a stale or zeroed buffer.
+    const cd = await attribute('Cd', local);
+    expect(cd).toHaveLength(wide.rows * wide.width);
+    expect(cd.some((v) => v > 0), 'colors should be non-zero after the requery').toBe(true);
+  });
+
+  it('narrowing reuses the buffer rather than reallocating', async () => {
+    // The complement: shrinking must stay on the cheap path, or every filter drag allocates.
+    const local = await newRuntime();
+    await local.build(scatter()); // cut defaults to 0, so this is the widest result
+    await settle(local);
+    const before = local.attributes.get('Cd').generation;
+
+    await expectNoGpuError(gpu.device, async () => {
+      await local.setParam('cut', 110);
+      local.frame();
+    });
+
+    expect(local.attributes.get('Cd').generation, 'no reallocation when the result shrinks')
+      .toBe(before);
+  });
+});
+
+describe('custom logic runs on the real engines', () => {
+  /**
+   * Compiling raw code and running it are different claims, which is the lesson the rest of
+   * this file exists to encode. A raw node's WGSL is spliced into a generated kernel whose
+   * identifiers it must not collide with, and its SQL is wrapped and cast on the way out — both
+   * are the kind of thing that compiles and still produces the wrong number.
+   */
+  function withRaw(engine: 'gpu' | 'sql'): Graph {
+    return {
+      params: { k: { value: 3, kind: 'value', changeRate: 8 } },
+      nodes: [
+        { id: 'src', type: 'source', dataset: { ref: 'test', estimatedRows: ROWS } },
+        engine === 'gpu'
+          ? {
+            id: 'custom', type: 'raw', input: 'src', engine: 'gpu',
+            // Deliberately reads an attribute, a parameter, and writes a vector.
+            code: 'let t = elevation / 900.0;\ntint = vec3<f32>(t * k, t, 1.0 - t);',
+            writes: [{ name: 'tint', width: 3 }],
+            reads: ['elevation'], params: ['k'],
+          }
+          : {
+            id: 'custom', type: 'raw', input: 'src', engine: 'sql',
+            code: { tint_x: 'elevation / 900.0 * 3.0', tint_y: 'elevation / 900.0' },
+            writes: [{ name: 'tint_x', width: 1 }, { name: 'tint_y', width: 1 }],
+          },
+        {
+          id: 'wr', type: 'wrangle', input: 'custom', ramp: 'viridis',
+          body: engine === 'gpu'
+            ? '@P = [lng / 360.0, lat / 180.0, 0.0]; @Cd = tint;'
+            : '@P = [lng / 360.0, lat / 180.0, 0.0]; @Cd = [tint_x, tint_y, 0.0];',
+        },
+        { id: 'out', type: 'render', input: 'wr', mode: 'points' },
+      ],
+    };
+  }
+
+  it('a raw wgsl node computes what its code says', async () => {
+    const local = await newRuntime();
+    await local.build(withRaw('gpu'));
+    await settle(local);
+
+    const cd = await attribute('Cd', local);
+    const { table } = await (await duck()).run(
+      'SELECT elevation FROM src ORDER BY id LIMIT 32',
+    );
+    const elevation = (table.toArray() as { elevation: number }[]).map((r) => Number(r.elevation));
+    // Row order is the query's, and the kernel wrote in that order.
+    const expected = elevation.flatMap((e) => {
+      const t = e / 900;
+      return [t * 3, t, 1 - t];
+    });
+    closeTo(cd.slice(0, expected.length), expected, 'raw wgsl Cd');
+  });
+
+  it('a raw wgsl node still fuses into one dispatch', async () => {
+    const local = await newRuntime();
+    const result = await local.build(withRaw('gpu'));
+    expect(result.plan.kernels).toHaveLength(1);
+    expect(result.plan.kernels[0].nodeIds).toContain('custom');
+  });
+
+  it('a raw wgsl param rebinds as a uniform, with no requery', async () => {
+    const local = await newRuntime();
+    await local.build(withRaw('gpu'));
+    await settle(local);
+    const before = { ...local.counters };
+
+    const route = await local.setParam('k', 1);
+    await settle(local);
+
+    expect(route).toBe('uniform');
+    expect(local.counters.requeries).toBe(before.requeries);
+    const cd = await attribute('Cd', local);
+    // With k = 1 the red channel equals the green one.
+    expect(cd[0]).toBeCloseTo(cd[1], 4);
+  });
+
+  it('a raw sql node computes what its code says', async () => {
+    const local = await newRuntime();
+    await local.build(withRaw('sql'));
+    await settle(local);
+
+    const cd = await attribute('Cd', local);
+    const { table } = await (await duck()).run('SELECT elevation FROM src ORDER BY id LIMIT 32');
+    const elevation = (table.toArray() as { elevation: number }[]).map((r) => Number(r.elevation));
+    const expected = elevation.flatMap((e) => [(e / 900) * 3, e / 900, 0]);
+    closeTo(cd.slice(0, expected.length), expected, 'raw sql Cd');
+  });
+
+  it('a user function computes the same thing as its body written inline', async () => {
+    // Inlining is only correct if it is invisible: the two graphs must agree bit for bit at
+    // f32, on real engines, not merely produce the same shaped plan.
+    const base = (body: string, functions?: Graph['functions']): Graph => ({
+      functions,
+      params: { k: { value: 2, kind: 'value', changeRate: 8 } },
+      nodes: [
+        { id: 'src', type: 'source', dataset: { ref: 'test', estimatedRows: ROWS } },
+        { id: 'wr', type: 'wrangle', input: 'src', ramp: 'viridis', body },
+        { id: 'out', type: 'render', input: 'wr', mode: 'points' },
+      ],
+    });
+
+    const inlineGraph = base(
+      '@P = [lng / 360.0, lat / 180.0, 0.0];' +
+      'var t = clamp(fit(elevation, 0.0, 900.0, 0.0, 1.0), 0.0, 1.0);' +
+      '@Cd = ramp(t * t * (3.0 - 2.0 * t));' +
+      '@pscale = t * {{k}};',
+    );
+    const fnGraph = base(
+      'fn ease(x) = x * x * (3.0 - 2.0 * x);' +
+      '@P = [lng / 360.0, lat / 180.0, 0.0];' +
+      'var t = norm(elevation);' +
+      '@Cd = ramp(ease(t));' +
+      '@pscale = t * {{k}};',
+      { norm: { params: ['x'], body: 'clamp(fit(x, 0.0, 900.0, 0.0, 1.0), 0.0, 1.0)' } },
+    );
+
+    const a = await newRuntime();
+    const b = await newRuntime();
+    await a.build(inlineGraph);
+    await b.build(fnGraph);
+    await settle(a);
+    await settle(b);
+
+    for (const name of ['P', 'Cd', 'pscale']) {
+      closeTo(await attribute(name, b), await attribute(name, a), `${name} fn vs inline`, 1e-5);
+    }
   });
 });
 

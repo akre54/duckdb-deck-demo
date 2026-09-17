@@ -12,16 +12,24 @@
  * below ~0.004 contributes nothing.
  */
 
-import type { GpuAttribute } from '../attributes.js';
+import type { AttributeSet, GpuAttribute } from '../attributes.js';
 
 export const WEIGHT_FIXED_POINT = 256;
 const WORKGROUP = 256;
 
+/** Widths only, for shader generation. See `PointsBindings`. */
 export interface Bin2dBindings {
   position: GpuAttribute;
   /** Per-point weight. Omitted means a plain count. */
   weight?: GpuAttribute;
   mask?: GpuAttribute;
+}
+
+/** Which named attribute feeds each channel; resolved to a buffer per frame. */
+export interface Bin2dChannels {
+  position: string;
+  weight?: string;
+  mask?: string;
 }
 
 function binShader(b: Bin2dBindings): string {
@@ -144,14 +152,24 @@ export class Bin2dPass {
   private rasterBg: GPUBindGroup;
   private bindKey = '';
 
+  /** Channel order must match the shader's binding order in `binShader`. */
+  private readonly order: (string | undefined)[];
+
   constructor(
     private readonly device: GPUDevice,
     format: GPUTextureFormat,
     readonly resolution: number,
-    private readonly bindings: Bin2dBindings,
+    private readonly attrs: AttributeSet,
+    channels: Bin2dChannels,
     private readonly viewBuffer: GPUBuffer,
     rampBuffer: GPUBuffer,
   ) {
+    this.order = [channels.position, channels.weight, channels.mask];
+    const bindings: Bin2dBindings = {
+      position: attrs.get(channels.position),
+      weight: channels.weight ? attrs.get(channels.weight) : undefined,
+      mask: channels.mask ? attrs.get(channels.mask) : undefined,
+    };
     const cells = resolution * resolution;
     // COPY_SRC so the accumulated bins can be read back. Not needed to render, but a grid
     // that cannot be inspected can only be checked by looking at it, and "the heatmap looks
@@ -219,15 +237,17 @@ export class Bin2dPass {
   }
 
   private resolveBinBg0(): GPUBindGroup {
-    const used = [this.bindings.position, this.bindings.weight, this.bindings.mask].filter(Boolean) as GpuAttribute[];
-    const key = used.map((a) => `${a.name}:${a.capacityRows}`).join('|');
+    const used = this.order.filter((n): n is string => Boolean(n));
+    const key = this.attrs.bindingKey(used);
     if (this.binBg0 && key === this.bindKey) return this.binBg0;
     const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: this.viewBuffer } },
       { binding: 1, resource: { buffer: this.metaBuffer } },
     ];
     let slot = 2;
-    for (const a of used) entries.push({ binding: slot++, resource: { buffer: a.buffer } });
+    for (const name of used) {
+      entries.push({ binding: slot++, resource: { buffer: this.attrs.get(name).buffer } });
+    }
     this.binBg0 = this.device.createBindGroup({
       label: 'bin2d:data-bg',
       layout: this.binPipeline.getBindGroupLayout(0),

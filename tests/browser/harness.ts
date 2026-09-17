@@ -10,7 +10,7 @@
 
 import * as duckdb from '@duckdb/duckdb-wasm';
 import type { Table } from 'apache-arrow';
-import type { QueryTiming, SqlEngine } from '../../src/core/source.js';
+import type { QueryTiming, SqlEngine } from '@noodles.gl/planner';
 
 import mvpWasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url';
 import mvpWorker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url';

@@ -128,6 +128,47 @@
       th, td { text-align: left; padding: 3px 6px 3px 0; border-bottom: 1px solid #161a24; vertical-align: top; }
       th { color: var(--dim); font-weight: 500; }
       td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+      /* --- graph view ------------------------------------------------------ */
+      .dag-legend { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+      svg.dag { display: block; max-width: 100%; height: auto; overflow: visible; }
+      svg.dag .edge { fill: none; stroke: var(--line); stroke-width: 1.5; }
+      svg.dag .box { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+      svg.dag .box.sql { stroke: var(--sql); }
+      svg.dag .box.gpu { stroke: var(--gpu); }
+      svg.dag .box.cpu { stroke: var(--scalar); }
+      svg.dag .box.scalar { stroke: var(--render); }
+      svg.dag .box.source { stroke: var(--line); }
+      svg.dag .id { fill: var(--ink); font: 600 11px var(--mono); }
+      svg.dag .detail { fill: var(--dim); font: 10px var(--mono); }
+      svg.dag .dag-node { cursor: pointer; }
+      svg.dag .dag-node:hover .box { fill: #141824; }
+      svg.dag .dag-node[data-selected] .box { fill: #1a1f2e; stroke-width: 2; }
+      /* Fused nodes share one dispatch; the box is the only place that shows it. */
+      svg.dag .kernel-box { fill: rgba(240, 160, 90, 0.06); stroke: var(--gpu);
+        stroke-dasharray: 3 3; stroke-width: 1; }
+      svg.dag .kernel-label { fill: var(--gpu); font: 9px var(--mono); }
+      .dag-detail { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+      .dag-head { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+
+      /* --- wrangle editor -------------------------------------------------- */
+      .editor-head { display: flex; gap: 12px; align-items: flex-start;
+        justify-content: space-between; margin-bottom: 8px; }
+      .editor-apply { flex: none; }
+      .editor-split { display: grid; grid-template-columns: 1fr 190px; gap: 10px; }
+      textarea.editor-body { width: 100%; box-sizing: border-box; resize: vertical;
+        background: #0a0c12; color: var(--ink); border: 1px solid var(--line);
+        border-radius: 4px; padding: 8px; font: 12px/1.55 var(--mono); tab-size: 2; }
+      textarea.editor-body:focus { outline: none; border-color: var(--sql); }
+      textarea.editor-body:disabled { opacity: 0.4; }
+      .editor-badges { display: flex; flex-direction: column; gap: 4px; }
+      .editor-badge { display: flex; gap: 6px; align-items: center; font: 11px var(--mono); }
+      .editor-badge .ln { color: var(--dim); min-width: 14px; text-align: right; }
+      .editor-badge code { color: var(--ink); flex: 1; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; }
+      .editor-status { margin-top: 8px; }
+      .editor-status[data-error] { color: var(--warn); }
+      [data-empty] .editor-split { display: none; }
+
       .tag {
         font-size: 10px; letter-spacing: 0.07em; text-transform: uppercase;
         padding: 1px 5px; border: 1px solid var(--line);
@@ -225,6 +266,8 @@
         <div id="params"></div>
         <div id="tabs"></div>
         <div id="body">
+          <section data-tab="graph"></section>
+          <section data-tab="edit"></section>
           <section data-tab="plan"></section>
           <section data-tab="sql"></section>
           <section data-tab="wgsl"></section>

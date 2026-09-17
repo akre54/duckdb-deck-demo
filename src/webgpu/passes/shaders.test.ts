@@ -16,6 +16,7 @@ import type { GpuAttribute } from '../attributes.js';
 
 const attribute = (name: string, width: number): GpuAttribute => ({
   name, width, buffer: {} as GPUBuffer, capacityRows: 100, rows: 100, provenance: 'derived',
+  generation: 1,
 });
 
 const bindings = (extra: Partial<PointsBindings> = {}): PointsBindings => ({

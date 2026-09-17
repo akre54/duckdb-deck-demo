@@ -6,7 +6,7 @@
  *   0 params uniform, 1 meta uniform, [2 ramp LUT], then reads, then writes.
  */
 
-import type { KernelPlan } from '../core/planner.js';
+import type { KernelPlan } from '@noodles.gl/planner';
 import type { AttributeSet } from './attributes.js';
 import { align4 } from './attributes.js';
 import { gpuData } from './gpu-compat.js';
@@ -102,7 +102,9 @@ export class Kernel {
   /** (Re)build the bind group if any attribute buffer identity changed. */
   private resolveBindGroup(attrs: AttributeSet): GPUBindGroup {
     const names = [...this.plan.reads, ...this.plan.writes];
-    const key = names.map((n) => `${n}:${attrs.get(n).buffer.label}:${attrs.get(n).capacityRows}`).join('|');
+    // Keyed on generation, not on the label (which is `attr:<name>` and so never changes)
+    // or on capacity (which can repeat across a reallocation).
+    const key = attrs.bindingKey(names);
     if (this.bindGroup && key === this.bindKey) return this.bindGroup;
 
     const entries: GPUBindGroupEntry[] = [

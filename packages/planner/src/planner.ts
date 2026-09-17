@@ -16,12 +16,14 @@ import { type Expr, columnsOf, parseExpr, widthOf } from './expr.js';
 import { toSql, toSqlColumns, quoteIdent, castToFloat, SqlParams } from './backends/sql.js';
 import { toWgsl, wgslType, wgslParamMember, type Resolver } from './backends/wgsl.js';
 import {
-  type Graph, type RenderNode, type Bin2dNode, type ParamSpec, type RampName,
+  type Graph, type RenderNode, type Bin2dNode, type RawNode, type ParamSpec, type RampName,
   statExpr, statParamName,
 } from './types.js';
 import {
   analyze, PlanError, type Analysis, type AnalyzedNode, type Schema, type Stage,
+  type RenderChannels,
 } from './analyze.js';
+import type { AttributeConventions } from './conventions.js';
 import {
   optimize, stageOf, type Assignment, type Candidate, type Policy, type OptimizeResult,
 } from './optimizer.js';
@@ -66,7 +68,39 @@ export interface StatsPlan {
 export interface StageNode {
   nodeId: string;
   name: string;
-  expr: Expr;
+  /** The compiled expression. Absent exactly when `raw` is present. */
+  expr?: Expr;
+  /** Literal backend code for a `raw` node, spliced instead of compiled. */
+  raw?: RawStage;
+}
+
+/** A `raw` node reduced to what the emitters need. */
+export interface RawStage {
+  engine: 'sql' | 'gpu';
+  /** WGSL statements, or one SQL expression per write. */
+  code: string | Record<string, string>;
+  writes: { name: string; width: number }[];
+  reads: string[];
+  params: string[];
+  label?: string;
+}
+
+/**
+ * Names the generated kernel already uses. A raw node's reads, writes and params are exposed
+ * to its code under their plain names, so one of these would shadow the loop index or the
+ * uniform block and produce WGSL that compiles into something quietly wrong.
+ */
+const KERNEL_RESERVED = new Set(['i', 'params', 'rowInfo', 'ramp_lut', 'gid', 'sampleRamp']);
+
+function checkRawNames(raw: RawStage, nodeId: string): void {
+  for (const name of [...raw.reads, ...raw.params, ...raw.writes.map((w) => w.name)]) {
+    if (KERNEL_RESERVED.has(name) || /^[rv]\d+$/.test(name)) {
+      throw new PlanError(
+        `Node ${nodeId}: '${name}' collides with a name the generated kernel uses ` +
+        `(${[...KERNEL_RESERVED].join(', ')}, or r<N>/v<N>)`,
+      );
+    }
+  }
 }
 
 export interface Explain {
@@ -81,6 +115,12 @@ export interface Explain {
   caps: TargetCaps;
   /** Nodes in topological order with their assigned stage. */
   placement: { nodeId: string; kind: string; stage: Stage; ops: number; why: string }[];
+  /**
+   * Edges of the *desugared* graph, `[from, to]`. Sugar has already been expanded and dead
+   * branches removed, so this is the topology that was actually planned rather than the one
+   * that was authored — which is what a consumer drawing the plan wants to see.
+   */
+  edges: [string, string][];
   notes: string[];
 }
 
@@ -96,7 +136,15 @@ export interface PhysicalPlan {
   attributes: AttributeDecl[];
   uniformParams: string[];
   params: Record<string, ParamSpec>;
+  /** The render node as authored, for its id and mode. */
   render: RenderNode;
+  /**
+   * The render channels with every attribute name resolved by `analyze`. Consumers bind
+   * from these; nothing outside `analyze` applies a naming default.
+   */
+  channels: RenderChannels;
+  /** The naming vocabulary this plan was produced under. */
+  conventions: AttributeConventions;
   ramp?: RampName;
   bin2d?: Bin2dNode;
   assignments: { nodeId: string; type: string; engine: 'sql' | 'cpu' | 'gpu' | 'scalar' | 'render' | 'source'; why: string }[];
@@ -114,6 +162,11 @@ export interface PlanOptions {
   params?: Record<string, number>;
   /** Relation the generated SQL should read, from the source provider. */
   relation?: string;
+  /**
+   * Override the attribute vocabulary. Defaults to Houdini's `P` / `Cd` / `pscale` /
+   * `Alpha`. Only meaningful when `plan` does its own `analyze`.
+   */
+  conventions?: Partial<AttributeConventions>;
 }
 
 const WORKGROUP = 256;
@@ -140,12 +193,153 @@ export function plan(
   // and the optimizer says so in its notes.
   const policy: Policy = opts.policy ?? (opts.stats ? 'cost' : 'auto');
 
-  const analysis = analyze(graph, sourceSchema);
+  const analysis = analyze(graph, sourceSchema, opts.conventions);
   const result = optimize(analysis, {
     costs, caps, stats: opts.stats, params: opts.params ?? {}, policy,
   });
 
   return emit(analysis, result, { costs, caps, relation: opts.relation ?? DEFAULT_RELATION });
+}
+
+// ---------------------------------------------------------------------------
+// Raw nodes
+// ---------------------------------------------------------------------------
+
+/**
+ * SQL text for one write of a raw node.
+ *
+ * `code` may be a bare string when the node has a single write, or a map keyed by write name.
+ * The map form is required as soon as there are two, because there is no ordering convention
+ * that would not be a trap.
+ */
+function rawSqlFor(raw: RawStage, name: string, nodeId: string): string {
+  if (typeof raw.code === 'string') {
+    if (raw.writes.length !== 1) {
+      throw new PlanError(
+        `Node ${nodeId}: raw sql declares ${raw.writes.length} writes, so 'code' must be an ` +
+        `object keyed by write name (${raw.writes.map((w) => w.name).join(', ')})`,
+      );
+    }
+    return raw.code;
+  }
+  const code = raw.code[name];
+  if (code === undefined) {
+    throw new PlanError(`Node ${nodeId}: raw sql has no expression for declared write '${name}'`);
+  }
+  return code;
+}
+
+/** Select-list text for one item, compiled or spliced. */
+function selectItems(
+  item: { name: string; width: number; expr?: Expr; raw?: string },
+  bind: SqlParams,
+): string[] {
+  if (item.raw !== undefined) {
+    // Wrapped in parentheses and cast, so a raw expression behaves like a compiled one:
+    // `a + b` cannot bind tighter than the alias, and a DECIMAL result cannot reach Arrow
+    // unscaled. Vector writes are not supported here — a raw SQL node produces scalars,
+    // because component naming would have to be invented and would not match `toSqlColumns`.
+    if (item.width !== 1) {
+      throw new PlanError(
+        `Raw sql write '${item.name}' has width ${item.width}; raw sql produces scalars only. ` +
+        'Declare one write per component, or use a raw gpu node.',
+      );
+    }
+    return [`${castToFloat(`(${item.raw})`)} AS ${quoteIdent(item.name)}`];
+  }
+  return toSqlColumns(item.expr!, item.name, bind).items;
+}
+
+/**
+ * Splice a raw WGSL node into the kernel body.
+ *
+ * The contract with the author is that their code sees plain names: a declared read, write or
+ * param is in scope under exactly the name they declared. That is worth the small amount of
+ * preamble below, because the alternative — exposing `r7` and `params.p_cut` — would make raw
+ * code depend on generated identifiers that change whenever a neighbouring node does.
+ *
+ * Writes are `var` rather than `let` so the code can assign them, and are declared before the
+ * body so the code may also read them.
+ */
+function emitRaw(
+  node: StageNode,
+  raw: RawStage,
+  ctx: {
+    resolve: Resolver;
+    body: string[];
+    live: Map<string, { code: string; width: number }>;
+    widths: Map<string, number>;
+    params: Set<string>;
+    writes: string[];
+    derivedOut: AttributeDecl[];
+    external: Set<string>;
+    registerOnly: Set<string>;
+    order: AnalyzedNode[];
+    next: () => string;
+  },
+): void {
+  if (typeof raw.code !== 'string') {
+    throw new PlanError(
+      `Node ${node.nodeId}: raw gpu code must be a string of WGSL statements, not an object`,
+    );
+  }
+  checkRawNames(raw, node.nodeId);
+
+  const { body } = ctx;
+
+  // Reads are resolved *before* the block opens, because `resolve` appends its own load
+  // statements to the body and those must not land inside a scope that closes.
+  const bound = raw.reads.map((name) => [name, ctx.resolve(name)] as const);
+
+  body.push(`  // ${node.nodeId}: raw wgsl${raw.label ? ` (${raw.label})` : ''}`);
+
+  /**
+   * The SSA locals are declared outside the block and assigned inside it.
+   *
+   * They have to outlive the block — a later node reads this attribute through the local — and
+   * the block has to exist, so that two raw nodes can both declare `let elevation` without
+   * colliding. Declaring them inside was the first version, and it produced WGSL that failed to
+   * compile; WebGPU reports that by leaving every derived attribute zero-filled, so it looked
+   * like an arithmetic bug rather than a scope bug.
+   */
+  const locals = new Map<string, string>();
+  for (const w of raw.writes) {
+    const local = ctx.next();
+    locals.set(w.name, local);
+    body.push(`  var ${local}: ${wgslType(w.width)};`);
+  }
+
+  body.push('  {');
+  for (const [name, val] of bound) body.push(`    let ${name} = ${val.code};`);
+  for (const p of raw.params) {
+    ctx.params.add(p);
+    body.push(`    let ${p} = params.${wgslParamMember(p)};`);
+  }
+  for (const w of raw.writes) body.push(`    var ${w.name}: ${wgslType(w.width)};`);
+  for (const line of raw.code.split('\n')) body.push(`    ${line.trim()}`);
+  for (const w of raw.writes) body.push(`    ${locals.get(w.name)!} = ${w.name};`);
+  body.push('  }');
+
+  for (const w of raw.writes) {
+    const local = locals.get(w.name)!;
+    ctx.live.set(w.name, { code: local, width: w.width });
+    ctx.widths.set(w.name, w.width);
+    if (!ctx.external.has(w.name)) {
+      ctx.registerOnly.add(w.name);
+      continue;
+    }
+    if (!ctx.writes.includes(w.name)) ctx.writes.push(w.name);
+    if (!ctx.derivedOut.some((d) => d.name === w.name)) {
+      ctx.derivedOut.push({ name: w.name, width: w.width, provenance: 'derived' });
+    }
+    if (w.width === 1) {
+      body.push(`  ${bufName(w.name)}[i] = ${local};`);
+    } else {
+      for (const c of range(w.width)) {
+        body.push(`  ${bufName(w.name)}[i * ${w.width}u + ${c}u] = ${local}[${c}];`);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -177,11 +371,14 @@ function emit(
   // Expressions, not emitted text: placeholder numbering is per statement, so emission has
   // to wait until we know which statement each expression lands in.
   const whereExprs: Expr[] = [];
-  const preAggSelect: { name: string; width: number; expr: Expr }[] = [];
-  const postAggSelect: { name: string; width: number; expr: Expr }[] = [];
+  type SelectItem = { name: string; width: number; expr?: Expr; raw?: string };
+  const preAggSelect: SelectItem[] = [];
+  const postAggSelect: SelectItem[] = [];
   const cpuStage: StageNode[] = [];
   const gpuStage: StageNode[] = [];
   let maskAttribute: string | undefined;
+  /** Where a GPU- or CPU-stage filter writes its discard mask, per the conventions. */
+  const mask = analysis.conventions.mask;
 
   const aggregateIndex = order.findIndex((node) => node.kind === 'aggregate');
   const aggregateInSql = aggregateIndex >= 0 && aggregateIndex < assignment.sqlEnd;
@@ -206,7 +403,7 @@ function emit(
           // Outside SQL a predicate cannot remove rows, so it becomes a discard mask and
           // the row keeps costing memory and an instance slot. Said plainly because it is
           // the main reason the optimizer prefers SQL for filters.
-          maskAttribute = '__mask';
+          maskAttribute = mask;
           const prior = maskExpr[stage];
           maskExpr[stage] = prior
             ? { kind: 'binary', op: '&&', left: prior, right: node.expr! }
@@ -255,6 +452,31 @@ function emit(
         break;
       }
 
+      case 'raw': {
+        const src = node.node as RawNode;
+        const rawStage: RawStage = {
+          engine: src.engine,
+          code: src.code,
+          writes: src.writes,
+          reads: [...(src.reads ?? [])],
+          params: [...(src.params ?? [])],
+          label: src.label,
+        };
+        if (src.engine === 'sql') {
+          const bucket = aggregateInSql && i > aggregateIndex ? postAggSelect : preAggSelect;
+          for (const w of src.writes) {
+            bucket.push({ name: w.name, width: w.width, raw: rawSqlFor(rawStage, w.name, src.id) });
+          }
+        } else {
+          gpuStage.push({ nodeId: src.id, name: src.writes[0].name, raw: rawStage });
+        }
+        assignments.push({
+          nodeId: src.id, type: 'raw', engine: src.engine,
+          why: `raw ${src.engine}; pinned by declaration, not placed`,
+        });
+        break;
+      }
+
       case 'bin2d':
         assignments.push({
           nodeId: node.id, type: 'bin2d', engine: 'gpu', why: 'atomic binning compute pass',
@@ -264,13 +486,13 @@ function emit(
   }
 
   // Masks are emitted at the head of their stage so later nodes can read them.
-  if (maskExpr.cpu) cpuStage.unshift({ nodeId: '__mask_cpu', name: '__mask', expr: maskExpr.cpu });
+  if (maskExpr.cpu) cpuStage.unshift({ nodeId: `${mask}_cpu`, name: mask, expr: maskExpr.cpu });
   if (maskExpr.gpu) {
     // If the CPU stage already produced a mask, extend it rather than replacing it.
     const expr: Expr = maskExpr.cpu
-      ? { kind: 'binary', op: '&&', left: { kind: 'col', name: '__mask' }, right: maskExpr.gpu }
+      ? { kind: 'binary', op: '&&', left: { kind: 'col', name: mask }, right: maskExpr.gpu }
       : maskExpr.gpu;
-    gpuStage.unshift({ nodeId: '__mask_gpu', name: '__mask', expr });
+    gpuStage.unshift({ nodeId: `${mask}_gpu`, name: mask, expr });
   }
 
   // --- statistics queries --------------------------------------------------
@@ -301,7 +523,11 @@ function emit(
 
   // Columns the CPU and GPU stages still need, plus what the stats read.
   const needed = new Set<string>();
-  for (const s of [...cpuStage, ...gpuStage]) for (const c of columnsOf(s.expr)) needed.add(c);
+  for (const s of [...cpuStage, ...gpuStage]) {
+    // A raw node cannot be walked, so its declared reads stand in for `columnsOf`.
+    if (s.raw) { for (const r of s.raw.reads) needed.add(r); continue; }
+    for (const c of columnsOf(s.expr!)) needed.add(c);
+  }
   for (const s of analysis.statsNodes) needed.add(s.column);
   if (analysis.bin2d?.weight) for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) needed.add(c);
 
@@ -328,7 +554,7 @@ function emit(
       const outer = [
         ...groupItems,
         ...aggs.map((a) => quoteIdent(a.name)),
-        ...postAggSelect.flatMap((item) => toSqlColumns(item.expr, item.name, rowBind).items),
+        ...postAggSelect.flatMap((item) => selectItems(item, rowBind)),
       ];
       sql = `SELECT ${outer.join(', ')} FROM (${inner}) AS "agg"`;
       notes.push('a SQL attribute follows the aggregate, so the query is wrapped in a subquery');
@@ -348,7 +574,7 @@ function emit(
       // Cast in SQL: everything reaching a GPU buffer is f32, so narrowing here uses DuckDB's
       // vectorised executor instead of a JS loop, and sidesteps DECIMAL entirely.
       ...passthrough.map((c) => `${castToFloat(quoteIdent(c))} AS ${quoteIdent(c)}`),
-      ...preAggSelect.flatMap((item) => toSqlColumns(item.expr, item.name, rowBind).items),
+      ...preAggSelect.flatMap((item) => selectItems(item, rowBind)),
     ];
     if (items.length === 0) items.push('1 AS "__unit"');
     sql = `SELECT ${items.join(', ')} FROM ${relation}${emitWhere(whereExprs, rowBind)}`;
@@ -380,7 +606,7 @@ function emit(
   const cpuAttributes: AttributeDecl[] = [];
   for (const s of cpuStage) {
     const node = order.find((o) => o.id === s.nodeId);
-    const width = node?.width ?? inferWidth(s.expr, widthOfName);
+    const width = node?.width ?? inferWidth(s.expr!, widthOfName);
     widthOfName.set(s.name, width);
     if (!cpuAttributes.some((a) => a.name === s.name)) {
       cpuAttributes.push({ name: s.name, width, provenance: 'cpu', internal: node?.internal });
@@ -398,12 +624,9 @@ function emit(
     // local, typically — and lives in an SSA register rather than a storage buffer. Giving
     // those a buffer would waste bandwidth and burn a binding slot against the per-stage
     // limit for a value nothing outside the kernel ever reads.
+    const { position, color, size, opacity } = analysis.channels;
     const external = new Set<string>([
-      analysis.render.position ?? 'P',
-      analysis.render.color ?? 'Cd',
-      analysis.render.size ?? 'pscale',
-      analysis.render.opacity ?? 'Alpha',
-      '__mask',
+      position, color, size, opacity, analysis.conventions.mask,
     ]);
     if (analysis.bin2d?.weight) {
       for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) external.add(c);
@@ -428,7 +651,7 @@ function emit(
   }
   // CPU-stage params are neither SQL binds nor uniforms, but must still be declared.
   for (const s of cpuStage) {
-    for (const p of paramsIn(s.expr)) {
+    for (const p of paramsIn(s.expr!)) {
       if (!declaredParams[p]) {
         throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
       }
@@ -438,14 +661,28 @@ function emit(
   const attributes = [...arrowAttributes, ...cpuAttributes, ...derivedAttributes];
 
   // --- render bindings ----------------------------------------------------
-  if (analysis.render.mode === 'points') {
-    const posName = analysis.render.position ?? 'P';
+  if (analysis.channels.mode === 'points') {
+    const posName = analysis.channels.position;
     const pos = attributes.find((a) => a.name === posName);
     if (!pos) throw new PlanError(`Render node needs attribute '${posName}' for position; none was produced`);
     if (pos.width < 2) throw new PlanError(`Position attribute '${posName}' must have 2+ components, got ${pos.width}`);
   } else if (!analysis.bin2d) {
     throw new PlanError(`Render mode 'heatmap' requires a bin2d node upstream`);
   }
+
+  // Edges over the nodes that survived: the placeable ones, plus the source and render nodes
+  // that bracket them. Read off `input`/`inputs` rather than recomputed, so this cannot
+  // disagree with the order the planner actually used.
+  const planned = new Set<string>([
+    analysis.source.id, analysis.render.id, ...order.map((o) => o.id),
+  ]);
+  const edges: [string, string][] = [];
+  const addEdges = (to: string, node: { input?: string; inputs?: string[] }) => {
+    const froms = node.inputs ?? (node.input ? [node.input] : []);
+    for (const from of froms) if (planned.has(from)) edges.push([from, to]);
+  };
+  for (const o of order) addEdges(o.id, o.node as { input?: string; inputs?: string[] });
+  addEdges(analysis.render.id, analysis.render);
 
   const placement = order.map((node, i) => ({
     nodeId: node.id,
@@ -475,6 +712,8 @@ function emit(
     uniformParams: [...uniformParams],
     params: declaredParams,
     render: analysis.render,
+    channels: analysis.channels,
+    conventions: analysis.conventions,
     ramp: analysis.ramp,
     bin2d: analysis.bin2d,
     assignments,
@@ -490,6 +729,7 @@ function emit(
       costs: ctx.costs,
       caps: ctx.caps,
       placement,
+      edges,
       notes,
     },
   };
@@ -538,7 +778,14 @@ function buildKernel(
   };
 
   for (const node of stage) {
-    const emitted = toWgsl(node.expr, resolve);
+    if (node.raw) {
+      emitRaw(node, node.raw, {
+        resolve, body, live, widths, params, writes, derivedOut, external, registerOnly, order,
+        next: () => `v${ssa++}`,
+      });
+      continue;
+    }
+    const emitted = toWgsl(node.expr!, resolve);
     for (const p of emitted.params) params.add(p);
     if (/\bsampleRamp\(/.test(emitted.code)) usesRamp = true;
     const local = `v${ssa++}`;

@@ -1,16 +1,16 @@
 {
-  "name": "@noodles/gpu-graph",
+  "name": "@noodles.gl/gpu-runtime",
   "version": "0.1.0",
   "type": "module",
-  "description": "Declarative, cost-planned data graphs: JSON graph -> DuckDB SQL + WGSL compute -> WebGPU. Houdini-style named attributes.",
+  "description": "WebGPU runtime, DuckDB engine and deck.gl adapters for @noodles.gl/planner: executes a planned graph on a device.",
   "license": "MIT",
   "sideEffects": false,
-  "files": ["dist", "README.md", "FINDINGS.md"],
+  "files": [
+    "dist",
+    "README.md",
+    "FINDINGS.md"
+  ],
   "exports": {
-    ".": {
-      "types": "./dist/core/index.d.ts",
-      "import": "./dist/core/index.js"
-    },
     "./webgpu": {
       "types": "./dist/webgpu/index.d.ts",
       "import": "./dist/webgpu/index.js"
@@ -26,7 +26,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "npm run typecheck && tsc -p tsconfig.build.json",
+    "build": "npm run typecheck && npm run build --workspace @noodles.gl/planner && tsc -p tsconfig.build.json",
     "build:demo": "vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts",
@@ -37,7 +37,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "apache-arrow": "^17.0.0"
+    "@noodles.gl/planner": "*"
   },
   "peerDependencies": {
     "@deck.gl/core": "^9.4.0",
@@ -47,11 +47,21 @@
     "@luma.gl/webgpu": "^9.4.0"
   },
   "peerDependenciesMeta": {
-    "@deck.gl/core": { "optional": true },
-    "@deck.gl/layers": { "optional": true },
-    "@duckdb/duckdb-wasm": { "optional": true },
-    "@luma.gl/core": { "optional": true },
-    "@luma.gl/webgpu": { "optional": true }
+    "@deck.gl/core": {
+      "optional": true
+    },
+    "@deck.gl/layers": {
+      "optional": true
+    },
+    "@duckdb/duckdb-wasm": {
+      "optional": true
+    },
+    "@luma.gl/core": {
+      "optional": true
+    },
+    "@luma.gl/webgpu": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deck.gl/core": "^9.4.0",
@@ -62,9 +72,13 @@
     "playwright": "^1.49.0",
     "typescript": "^5.6.0",
     "vite": "^5.4.0",
-    "vitest": "^2.1.0"
+    "vitest": "^2.1.0",
+    "apache-arrow": "^17.0.0"
   },
   "engines": {
     "node": ">=20"
-  }
+  },
+  "workspaces": [
+    "packages/planner"
+  ]
 }

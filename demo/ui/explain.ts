@@ -8,7 +8,7 @@
  */
 
 import type { BuildResult } from '../../src/webgpu/runtime.js';
-import type { Candidate } from '../../src/core/planner.js';
+import type { Candidate } from '@noodles.gl/planner';
 import { escapeHtml } from './inspector.js';
 
 const ms = (v: number, digits = 2) => `${v.toFixed(digits)} ms`;

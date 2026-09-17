@@ -201,7 +201,20 @@ const BINARY_PRECEDENCE: Record<string, number> = {
   '*': 6, '/': 6, '%': 6,
 };
 
-export function parseExpr(src: string): Expr {
+/** Anything callable that is not in `FUNCTIONS`: a user-defined function. */
+export interface ParseScope {
+  readonly functions?: ReadonlyMap<string, { readonly params: readonly string[] }>;
+}
+
+/**
+ * `scope.functions` lets a user-defined name parse.
+ *
+ * The parser validates call names and arity eagerly, which is worth keeping — a typo is
+ * reported at the offending text rather than surfacing later as a mysterious engine
+ * capability failure. So user functions have to be *declared to the parser* rather than the
+ * check being relaxed for everyone.
+ */
+export function parseExpr(src: string, scope?: ParseScope): Expr {
   const tokens = tokenize(src);
   let pos = 0;
 
@@ -311,8 +324,11 @@ export function parseExpr(src: string): Expr {
         }
         eat(')');
         const spec = FUNCTIONS[t.v];
-        if (!spec) throw new ExprError(`Unknown function ${JSON.stringify(t.v)}`);
-        const [lo, hi] = spec.arity;
+        const user = spec ? undefined : scope?.functions?.get(t.v);
+        if (!spec && !user) throw new ExprError(`Unknown function ${JSON.stringify(t.v)}`);
+        const [lo, hi]: [number, number] = spec
+          ? spec.arity
+          : [user!.params.length, user!.params.length];
         if (args.length < lo || args.length > hi) {
           throw new ExprError(`${t.v}() takes ${lo === hi ? lo : `${lo}-${hi}`} args, got ${args.length}`);
         }

@@ -2,7 +2,8 @@
  * Headless core: everything from a JSON graph to a physical plan, with no GPU, no DOM and
  * no database driver.
  *
- * The only runtime dependency is `apache-arrow`. Import this entry to use the expression IR,
+ * `apache-arrow` is used for types only, so the built output has no runtime imports at all.
+ * Import this entry to use the expression IR,
  * the planner and the cost model on their own — a build step, a server, or a test can plan a
  * graph and inspect the generated SQL and WGSL without ever creating a device.
  */
@@ -15,9 +16,26 @@ export {
 } from './expr.js';
 
 // --- backends --------------------------------------------------------------
-export { toSql, toSqlColumns, quoteIdent, type SqlEmit } from './backends/sql.js';
-export { toWgsl, wgslType, type Resolver, type WgslEmit } from './backends/wgsl.js';
+export {
+  toSql, toSqlColumns, quoteIdent, castToFloat, SqlParams, type SqlEmit,
+} from './backends/sql.js';
+export {
+  toWgsl, wgslType, wgslParamMember, type Resolver, type WgslEmit,
+} from './backends/wgsl.js';
 export { toJs, type JsResolver, type JsEmit } from './backends/js.js';
+
+// --- attribute vocabulary --------------------------------------------------
+export {
+  attributeConventions, isInternal, HOUDINI_CONVENTIONS,
+  type AttributeConventions,
+} from './conventions.js';
+
+// --- user-defined functions ------------------------------------------------
+export {
+  buildRegistry, defineFunction, addFunction, inlineFunctions,
+  parseFunctionDeclaration, FunctionError,
+  type FunctionDef, type FunctionSpec, type FunctionRegistry,
+} from './functions.js';
 
 // --- graph schema and sugar ------------------------------------------------
 export {
@@ -25,7 +43,7 @@ export {
   type Graph, type GraphNode, type CoreNode, type ParamSpec, type RampName,
   type SourceNode, type FilterNode, type AggregateNode, type StatsNode, type StatOp,
   type AttributeNode, type ScaleNode, type ColorScaleNode, type ProjectNode,
-  type WrangleNode, type Bin2dNode, type RenderNode,
+  type WrangleNode, type Bin2dNode, type RenderNode, type RawNode,
 } from './types.js';
 export {
   parseWrangle, expandWrangle, localName, renameColumns, WrangleError,
@@ -35,7 +53,7 @@ export {
 // --- planning --------------------------------------------------------------
 export {
   analyze, opCount, PlanError,
-  type Analysis, type AnalyzedNode, type Schema, type Stage,
+  type Analysis, type AnalyzedNode, type Schema, type Stage, type RenderChannels,
 } from './analyze.js';
 export {
   optimize, stageOf,
@@ -44,7 +62,7 @@ export {
 export {
   plan, WORKGROUP, DEFAULT_RELATION, bufName,
   type PhysicalPlan, type PlanOptions, type AttributeDecl, type KernelPlan,
-  type StatsPlan, type StageNode, type Explain,
+  type StatsPlan, type StageNode, type RawStage, type Explain,
 } from './planner.js';
 
 // --- cost model and statistics --------------------------------------------
@@ -61,7 +79,9 @@ export {
 } from './stats.js';
 
 // --- targets ---------------------------------------------------------------
-export { targetCaps, TARGET_IDS, type TargetId, type TargetCaps } from './target.js';
+export {
+  targetCaps, TARGET_IDS, type TargetId, type TargetCaps, type DeviceLimits,
+} from './target.js';
 
 // --- data sources ----------------------------------------------------------
 export {

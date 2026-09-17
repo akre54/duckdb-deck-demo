@@ -1,19 +1,7 @@
 import { bench, describe } from 'vitest';
-import { parseExpr } from '../src/core/expr.js';
-import { toSql } from '../src/core/backends/sql.js';
-import { toWgsl } from '../src/core/backends/wgsl.js';
-import { toJs } from '../src/core/backends/js.js';
-import { analyze } from '../src/core/analyze.js';
-import { optimize } from '../src/core/optimizer.js';
-import { plan } from '../src/core/planner.js';
-import { DEFAULT_COSTS } from '../src/core/cost.js';
-import { estimateSelectivity } from '../src/core/stats.js';
-import { targetCaps } from '../src/core/target.js';
-import { buildRampLut } from '../src/core/types.js';
-import { evaluateStage } from '../src/core/cpu-stage.js';
-import { readColumn } from '../src/core/arrow.js';
+import { parseExpr, toSql, toWgsl, toJs, analyze, optimize, plan, DEFAULT_COSTS, estimateSelectivity, targetCaps, buildRampLut, evaluateStage, readColumn } from '@noodles.gl/planner';
 import { tableFromArrays, Table } from 'apache-arrow';
-import { SCHEMA, STATS, scatterGraph, wrangleGraph, sourceUploads } from './fixtures.js';
+import { SCHEMA, STATS, scatterGraph, wrangleGraph, sourceUploads } from '@noodles.gl/planner/fixtures';
 
 /**
  * Throughput, reported not asserted — budgets live in `budgets.test.ts` so a slow machine

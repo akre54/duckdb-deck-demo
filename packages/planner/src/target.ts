@@ -43,7 +43,23 @@ const RENDER_RESERVE = 0.25;
 /** WebGPU's guaranteed minimum for `maxStorageBuffersPerShaderStage`. */
 const WEBGPU_DEFAULT_STORAGE_BUFFERS = 8;
 
-export function targetCaps(id: TargetId, device: GPUDevice | undefined): TargetCaps {
+/**
+ * The four limits the planner reads off a device, described structurally.
+ *
+ * A real `GPUDevice` satisfies this, but naming that type here would make `@webgpu/types` a
+ * requirement for anyone importing the planner — including a consumer planning on a server,
+ * where there is no device at all. Structural typing means `targetCaps(id, device)` still
+ * accepts a `GPUDevice` without the planner ever depending on WebGPU's type declarations.
+ */
+export interface DeviceLimits {
+  limits: {
+    maxBufferSize: number;
+    maxStorageBufferBindingSize: number;
+    maxStorageBuffersPerShaderStage: number;
+  };
+}
+
+export function targetCaps(id: TargetId, device: DeviceLimits | undefined): TargetCaps {
   // Without a device (unit tests) assume a modest budget so tests are deterministic.
   const limit = device
     ? Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize * 4)

@@ -1,8 +1,5 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { parseExpr, enginesFor } from '../../src/core/expr.js';
-import { toSql, SqlParams } from '../../src/core/backends/sql.js';
-import { toWgsl, wgslParamMember } from '../../src/core/backends/wgsl.js';
-import { toJs } from '../../src/core/backends/js.js';
+import { parseExpr, enginesFor, toSql, SqlParams, toWgsl, wgslParamMember, toJs } from '@noodles.gl/planner';
 import {
   gpuDevice, duck, readBuffer, storageBuffer, emptyStorageBuffer, expectNoGpuError,
 } from './harness.js';

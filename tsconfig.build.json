@@ -1,6 +1,13 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
+    /**
+     * Resolve `@noodles.gl/planner` through node_modules (the workspace symlink to its built
+     * `dist`) rather than through the root tsconfig's `paths` alias to its source. Compiling
+     * against the source would pull the planner's files into this program, outside `rootDir`,
+     * and emit a copy of them into this package's `dist`.
+     */
+    "paths": {},
     "noEmit": false,
     "declaration": true,
     "declarationMap": true,

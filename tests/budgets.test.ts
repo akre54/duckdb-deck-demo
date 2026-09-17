@@ -1,17 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { plan } from '../src/core/planner.js';
-import { analyze } from '../src/core/analyze.js';
-import { optimize } from '../src/core/optimizer.js';
-import { DEFAULT_COSTS } from '../src/core/cost.js';
-import { targetCaps } from '../src/core/target.js';
-import { evaluateStage } from '../src/core/cpu-stage.js';
-import { readColumn } from '../src/core/arrow.js';
-import { parseExpr } from '../src/core/expr.js';
-import { toWgsl } from '../src/core/backends/wgsl.js';
+import { plan, analyze, optimize, DEFAULT_COSTS, targetCaps, evaluateStage, readColumn, parseExpr, toWgsl } from '@noodles.gl/planner';
 import { tableFromArrays, Table } from 'apache-arrow';
 import {
   SCHEMA, STATS, scatterGraph, wrangleGraph, heatmapGraph, sourceUploads,
-} from './fixtures.js';
+} from '@noodles.gl/planner/fixtures';
 
 /**
  * Performance *assertions*, as opposed to the benchmarks in `*.bench.ts` which only report.

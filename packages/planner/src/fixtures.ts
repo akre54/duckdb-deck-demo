@@ -7,10 +7,10 @@
  * from the public entry points.
  */
 
-import type { Schema } from '../src/core/analyze.js';
-import type { SourceStats } from '../src/core/stats.js';
-import type { Graph } from '../src/core/types.js';
-import type { ColumnUpload } from '../src/core/arrow.js';
+import type { Schema } from './analyze.js';
+import type { SourceStats } from './stats.js';
+import type { Graph } from './types.js';
+import type { ColumnUpload } from './arrow.js';
 
 /** The demo's synthetic schema, as the planner sees it. */
 export const SCHEMA: Schema = new Map([

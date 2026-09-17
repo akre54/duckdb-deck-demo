@@ -12,20 +12,31 @@
  * `parseExpr`, so a wrangle gets all three backends and the planner's capability analysis
  * for free.
  *
- * Deliberately *not* a language: no control flow, no loops, no user functions. Each
- * statement must be a pure expression so it stays placeable on any of the three engines.
- * Adding an `if` would mean either divergence in the kernel or an escape to CPU-only, and
- * the point of the IR is that placement stays open.
+ * Deliberately *not* a general language: no control flow and no loops. Each statement must be
+ * a pure expression so it stays placeable on any of the three engines. Adding an `if` would
+ * mean either divergence in the kernel or an escape to CPU-only, and the point of the IR is
+ * that placement stays open.
+ *
+ * The one exception is `fn name(a, b) = expr;`, which declares a user function. It is not a
+ * call mechanism — the declaration is hoisted and every call is inlined (see
+ * `functions.ts`), so a function names an expression without changing what any engine has to
+ * support.
  */
 
 import { parseExpr, type Expr } from './expr.js';
+import { type FunctionDef, parseFunctionDeclaration } from './functions.js';
 
 export interface WrangleStatement {
-  /** Attribute or local name as written, without the `@`. */
+  /** Attribute, local or function name as written, without the `@`. */
   name: string;
-  /** `attribute` is externally visible; `local` is scoped to this wrangle. */
-  kind: 'attribute' | 'local';
+  /**
+   * `attribute` is externally visible; `local` is scoped to this wrangle; `function` is a
+   * declaration that produces no value and is hoisted into the graph's function registry.
+   */
+  kind: 'attribute' | 'local' | 'function';
   expr: Expr;
+  /** Set for `kind: 'function'`: the declaration, ready to register. */
+  fn?: FunctionDef;
   /** 1-based line in the body, for error messages. */
   line: number;
 }
@@ -42,9 +53,18 @@ const STATEMENT = /^\s*(?:(var)\s+([A-Za-z_][A-Za-z0-9_]*)|@([A-Za-z_][A-Za-z0-9
  * Statements are separated by `;`. Newlines are not separators, so a long expression may
  * wrap. `//` starts a comment that runs to end of line.
  */
-export function parseWrangle(body: string): WrangleStatement[] {
+export function parseWrangle(
+  body: string,
+  /**
+   * Functions already visible to this body — the graph-level ones. Declarations found here are
+   * added to a private copy, so a later statement can call an earlier declaration without this
+   * function mutating its caller's registry; hoisting into the real one is `desugar`'s job.
+   */
+  functions?: ReadonlyMap<string, FunctionDef>,
+): WrangleStatement[] {
   const stripped = stripComments(body);
   const out: WrangleStatement[] = [];
+  const scope = new Map<string, FunctionDef>(functions ?? []);
 
   let line = 1;
   let buffer = '';
@@ -52,6 +72,15 @@ export function parseWrangle(body: string): WrangleStatement[] {
     const text = buffer.trim();
     buffer = '';
     if (text === '') return;
+
+    // `fn` declarations are checked first: they are not assignments and would otherwise be
+    // reported as a malformed one.
+    const fn = parseFunctionDeclaration(text, `Line ${atLine}`, { functions: scope });
+    if (fn) {
+      scope.set(fn.name, fn);
+      out.push({ name: fn.name, kind: 'function', expr: fn.body, fn, line: atLine });
+      return;
+    }
 
     const m = STATEMENT.exec(text);
     if (!m) {
@@ -63,7 +92,7 @@ export function parseWrangle(body: string): WrangleStatement[] {
     const name = varKeyword ? localName : attrName;
     let expr: Expr;
     try {
-      expr = parseExpr(rhs);
+      expr = parseExpr(rhs, { functions: scope });
     } catch (err) {
       throw new WrangleError(`Line ${atLine}: ${(err as Error).message}`);
     }
@@ -89,7 +118,9 @@ export function parseWrangle(body: string): WrangleStatement[] {
 
   if (out.length === 0) throw new WrangleError('Wrangle body has no statements');
   if (!out.some((s) => s.kind === 'attribute')) {
-    throw new WrangleError('Wrangle body assigns no attributes; every statement is a local');
+    throw new WrangleError(
+      'Wrangle body assigns no attributes; every statement is a local or a function',
+    );
   }
   return out;
 }
@@ -117,7 +148,8 @@ export function expandWrangle(
   statements: WrangleStatement[],
 ): { name: string; expr: Expr; internal: boolean; line: number }[] {
   const locals = new Set<string>();
-  return statements.map((s) => {
+  // Declarations are hoisted by `desugar` and produce no node.
+  return statements.filter((s) => s.kind !== 'function').map((s) => {
     // Rewrite references before adding this statement's own name, so `var t = t + 1`
     // reads the upstream `t` rather than itself.
     const expr = renameColumns(s.expr, (n) => (locals.has(n) ? localName(nodeId, n) : n));

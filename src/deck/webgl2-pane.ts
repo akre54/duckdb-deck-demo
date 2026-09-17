@@ -19,10 +19,8 @@
 import { Deck, OrbitView } from '@deck.gl/core';
 import { ScatterplotLayer } from '@deck.gl/layers';
 
-import type { PhysicalPlan } from '../core/planner.js';
+import { evaluateStage, toUint8Color, type PhysicalPlan, type CpuAttributes, type ColumnUpload } from '@noodles.gl/planner';
 import type { OrbitCamera } from '../webgpu/camera.js';
-import { evaluateStage, toUint8Color, type CpuAttributes } from '../core/cpu-stage.js';
-import type { ColumnUpload } from '../core/arrow.js';
 
 export interface DeckMetrics {
   rows: number;
@@ -119,12 +117,12 @@ export class DeckPane {
     const attrs = evaluateStage([...plan.cpuStage, ...plan.gpuStage], plan, sources, params, rows);
     this.attrs = attrs;
 
-    const posName = plan.render.position ?? 'P';
+    const posName = plan.channels.position;
     const pos = attrs.values.get(posName);
     if (!pos) throw new Error(`deck pane: no '${posName}' attribute after CPU evaluation`);
 
-    const colorName = plan.render.color ?? 'Cd';
-    const sizeName = plan.render.size ?? 'pscale';
+    const colorName = plan.channels.color;
+    const sizeName = plan.channels.size;
     const colorSrc = attrs.values.get(colorName);
     const sizeSrc = attrs.values.get(sizeName);
 

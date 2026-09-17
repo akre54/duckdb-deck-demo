@@ -73,6 +73,10 @@ export function evaluateStage(
   let usesRamp = false;
 
   for (const node of stage) {
+    if (!node.expr) {
+      // `raw` declares `engine: 'sql' | 'gpu'`, so the optimizer can never place one here.
+      throw new Error(`CPU stage node '${node.nodeId}' has no expression; raw nodes cannot run on the CPU`);
+    }
     const width = widthOf(node.expr, (n) => widths.get(n) ?? 1);
     const emitted = toJs(node.expr, (name) => {
       const w = widths.get(name) ?? 1;

@@ -18,9 +18,8 @@ import { Inspector, renderCounters, renderSweep, type SweepRow } from './ui/insp
 import { renderCalibration } from './ui/explain.js';
 import { DeckPane } from '../src/deck/webgl2-pane.js';
 import { DeckWebgpuPane } from '../src/deck/webgpu-pane.js';
-import type { TargetId } from '../src/core/target.js';
-import type { Graph, ParamSpec } from '../src/core/types.js';
-import type { Policy } from '../src/core/planner.js';
+import { type TargetId, type Graph, type ParamSpec, type Policy } from '@noodles.gl/planner';
+import { WrangleEditor } from './ui/editor.js';
 
 import scatterGraph from './graphs/scatter.json';
 import heatmapGraph from './graphs/heatmap.json';
@@ -166,6 +165,7 @@ async function main(): Promise<void> {
       setStatus('planning…');
       const result = await rt.build(graph, policySel.value as Policy);
       inspector.render(result);
+      editor.sync();
       inspector.renderCompare(result, rt, deckWanted() ? deckPane?.metrics() : undefined);
       buildParamControls(result.plan.params);
       void refreshDeck();
@@ -306,6 +306,24 @@ async function main(): Promise<void> {
   }
 
   benchBtn.addEventListener('click', () => void runSweep());
+
+  /**
+   * The wrangle editor plans a candidate graph on every keystroke (headless, single-digit ms)
+   * and rebuilds only when applied. Its `apply` writes the edited body back into the live
+   * graph, so the edit persists across policy and target changes.
+   */
+  const editor = new WrangleEditor(inspector.section('edit'), {
+    graph: () => graph,
+    runtime: () => rt,
+    policy: () => policySel.value as Policy,
+    apply: (body) => {
+      const node = graph.nodes.find((n) => n.type === 'wrangle');
+      if (node?.type !== 'wrangle') return;
+      node.body = body;
+      void rebuild(false);
+    },
+  });
+  editor.sync();
 
   graphSel.addEventListener('change', () => {
     graph = structuredClone(GRAPHS[graphSel.value]);

@@ -14,9 +14,12 @@ import type { Runtime } from '../../src/webgpu/runtime.js';
 import type { DeckMetrics } from '../../src/deck/webgl2-pane.js';
 import type { DeckWebgpuStatus } from '../../src/deck/webgpu-pane.js';
 import { renderExplain } from './explain.js';
+import { renderDag } from './dag.js';
 
 const TABS = [
   ['explain', 'explain'],
+  ['graph', 'graph'],
+  ['edit', 'wrangle'],
   ['plan', 'plan'],
   ['sql', 'sql'],
   ['wgsl', 'wgsl'],
@@ -73,6 +76,7 @@ export class Inspector {
 
   render(result: BuildResult): void {
     renderExplain(this.sections.get('explain')!, result);
+    renderDag(this.sections.get('graph')!, result);
     this.sections.get('plan')!.innerHTML = this.planHtml(result);
     this.sections.get('sql')!.innerHTML = this.sqlHtml(result);
     this.sections.get('wgsl')!.innerHTML = this.wgslHtml(result);

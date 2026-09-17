@@ -14,8 +14,10 @@ import {
 } from './expr.js';
 import {
   type Graph, type CoreNode, type RenderNode, type Bin2dNode, type StatsNode,
-  type SourceNode, type ParamSpec, type RampName, desugar,
+  type SourceNode, type RawNode, type ParamSpec, type RampName, desugar,
 } from './types.js';
+import { type AttributeConventions, attributeConventions, isInternal } from './conventions.js';
+import { type FunctionRegistry, inlineFunctions } from './functions.js';
 
 export type Stage = 'sql' | 'cpu' | 'gpu';
 
@@ -27,7 +29,7 @@ export type Schema = Map<string, number>;
 export interface AnalyzedNode {
   id: string;
   node: CoreNode;
-  kind: 'filter' | 'aggregate' | 'attribute' | 'bin2d';
+  kind: 'filter' | 'aggregate' | 'attribute' | 'bin2d' | 'raw';
   /** Attribute nodes: the name they write. */
   name?: string;
   /** Filter predicate or attribute expression. */
@@ -50,9 +52,32 @@ export interface AnalyzedNode {
   params: string[];
 }
 
+/**
+ * The render node's channels with every name resolved to a concrete attribute.
+ *
+ * Resolution happens here, once. Downstream code — the optimizer, the emitters, the WebGPU
+ * runtime, the deck.gl adapters — reads these without a fallback, so there is no `?? 'P'`
+ * anywhere else to disagree with. Whether a channel is actually *bound* is a separate
+ * question, answered by whether the named attribute exists after the graph has run.
+ */
+export interface RenderChannels {
+  mode: 'points' | 'heatmap';
+  position: string;
+  color: string;
+  size: string;
+  opacity: string;
+  background?: [number, number, number];
+}
+
 export interface Analysis {
   source: SourceNode;
   render: RenderNode;
+  /** `render`'s channels, with the attribute conventions applied. */
+  channels: RenderChannels;
+  /** The naming vocabulary this analysis was produced under. */
+  conventions: AttributeConventions;
+  /** User functions declared by the graph. Already inlined into every `expr` below. */
+  functions: FunctionRegistry;
   bin2d?: Bin2dNode;
   statsNodes: StatsNode[];
   /** Placeable nodes in topological order. */
@@ -113,8 +138,13 @@ export function opCount(e: Expr, width: number): number {
   return (1 + interior) * Math.max(1, width);
 }
 
-export function analyze(graph: Graph, sourceSchema: Schema): Analysis {
-  const { nodes, notes: sugarNotes, ramp } = desugar(graph);
+export function analyze(
+  graph: Graph,
+  sourceSchema: Schema,
+  conventionOverrides?: Partial<AttributeConventions>,
+): Analysis {
+  const conventions = attributeConventions(conventionOverrides);
+  const { nodes, notes: sugarNotes, ramp, functions } = desugar(graph, conventions);
   const notes = [...sugarNotes];
   const byId = new Map(nodes.map((n) => [n.id, n]));
 
@@ -124,6 +154,15 @@ export function analyze(graph: Graph, sourceSchema: Schema): Analysis {
   const render = (graph.output ? byId.get(graph.output) : [...nodes].reverse().find((n) => n.type === 'render')) as
     | RenderNode | undefined;
   if (!render || render.type !== 'render') throw new PlanError('Graph has no render node');
+
+  const channels: RenderChannels = {
+    mode: render.mode,
+    position: render.position ?? conventions.position,
+    color: render.color ?? conventions.color,
+    size: render.size ?? conventions.size,
+    opacity: render.opacity ?? conventions.opacity,
+    background: render.background,
+  };
 
   // --- topological order over the ancestry of the render node --------------
   const ordered = topoSort(nodes, byId, render, notes);
@@ -135,13 +174,22 @@ export function analyze(graph: Graph, sourceSchema: Schema): Analysis {
   let aggregateNames: string[] = [];
   let sawAggregate = false;
 
-  const parseOrThrow = (src: string, nodeId: string): Expr => {
+  /**
+   * Parse if needed, then inline user functions.
+   *
+   * Every expression in the graph goes through here, which is what makes functions free: by
+   * the time anything else looks at a tree, the calls are gone. Wrangle statements arrive
+   * already parsed, so the `Expr` branch matters as much as the string one.
+   */
+  const resolve = (src: string | Expr, nodeId: string): Expr => {
     try {
-      return parseExpr(src);
+      const tree = typeof src === 'string' ? parseExpr(src, { functions }) : src;
+      return inlineFunctions(tree, functions);
     } catch (err) {
       throw new PlanError(`Node ${nodeId}: ${(err as Error).message}`);
     }
   };
+  const parseOrThrow = (src: string, nodeId: string): Expr => resolve(src, nodeId);
 
   const requireColumns = (e: Expr, nodeId: string) => {
     for (const c of columnsOf(e)) {
@@ -215,7 +263,7 @@ export function analyze(graph: Graph, sourceSchema: Schema): Analysis {
       }
 
       case 'attribute': {
-        const expr = typeof node.expr === 'string' ? parseOrThrow(node.expr, node.id) : node.expr;
+        const expr = resolve(node.expr, node.id);
         requireColumns(expr, node.id);
         if (isAggregate(expr)) {
           throw new PlanError(`Node ${node.id}: attribute expressions cannot aggregate; use an 'aggregate' node`);
@@ -225,10 +273,42 @@ export function analyze(graph: Graph, sourceSchema: Schema): Analysis {
         order.push({
           id: node.id, node, kind: 'attribute', name: node.name, expr, width,
           ops: opCount(expr, width), feasible,
-          internal: node.name.startsWith('__'),
+          internal: isInternal(node.name, conventions),
           reads: columnsOf(expr), params: paramsOfExpr(expr),
         });
         schema.set(node.name, width);
+        break;
+      }
+
+      case 'raw': {
+        const raw = node as RawNode;
+        if (raw.writes.length === 0) {
+          throw new PlanError(`Node ${raw.id}: a raw node must declare at least one write`);
+        }
+        for (const r of raw.reads ?? []) {
+          if (!schema.has(r)) {
+            throw new PlanError(
+              `Node ${raw.id} declares a read of unknown attribute '${r}'. ` +
+              `Available: ${[...schema.keys()].join(', ')}`,
+            );
+          }
+        }
+        // The one node whose feasible set is declared rather than derived, because there is
+        // no expression to derive it from. A set of one means it pins the stage boundary.
+        const width = Math.max(...raw.writes.map((w) => w.width));
+        order.push({
+          id: raw.id, node: raw, kind: 'raw', name: raw.writes[0].name, width,
+          ops: (raw.opCost ?? 8) * Math.max(1, width),
+          feasible: new Set<Stage>([raw.engine === 'sql' ? 'sql' : 'gpu']),
+          internal: false,
+          reads: [...(raw.reads ?? [])],
+          params: [...(raw.params ?? [])],
+        });
+        for (const w of raw.writes) schema.set(w.name, w.width);
+        notes.push(
+          `${raw.id}: raw ${raw.engine} node, pinned; ` +
+          `declares ${raw.writes.map((w) => `${w.name}:${w.width}`).join(', ')}`,
+        );
         break;
       }
 
@@ -254,6 +334,9 @@ export function analyze(graph: Graph, sourceSchema: Schema): Analysis {
   return {
     source,
     render,
+    channels,
+    conventions,
+    functions,
     bin2d: ordered.find((n): n is Bin2dNode => n.type === 'bin2d'),
     statsNodes,
     order,

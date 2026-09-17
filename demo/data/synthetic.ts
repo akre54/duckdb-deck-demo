@@ -12,7 +12,7 @@
  *   id, cluster      INTEGER          -> 'cast' tier
  */
 
-import type { SourceProvider, SqlEngine } from '../../src/core/source.js';
+import type { SourceProvider, SqlEngine } from '@noodles.gl/planner';
 
 export const SOURCE_TABLE = 'src';
 

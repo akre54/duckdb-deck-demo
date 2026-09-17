@@ -13,7 +13,12 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@noodles.gl/planner": ["packages/planner/src/index.ts"],
+      "@noodles.gl/planner/fixtures": ["packages/planner/src/fixtures.ts"]
+    }
   },
-  "include": ["src", "demo", "tests", "vite.config.ts", "vitest.browser.config.ts"]
+  "include": ["src", "demo", "tests", "packages/planner/src", "vite.config.ts", "vitest.browser.config.ts"]
 }

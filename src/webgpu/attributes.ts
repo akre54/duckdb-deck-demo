@@ -8,7 +8,7 @@
  * rather than a re-upload.
  */
 
-import type { ColumnUpload } from '../core/arrow.js';
+import type { ColumnUpload } from '@noodles.gl/planner';
 import { gpuData } from './gpu-compat.js';
 
 export interface GpuAttribute {
@@ -19,6 +19,13 @@ export interface GpuAttribute {
   /** Rows the buffer can hold; >= the current row count. */
   capacityRows: number;
   rows: number;
+  /**
+   * Bumped every time `buffer` is replaced. Consumers cache bind groups, and a bind group
+   * holding a destroyed buffer is only detected at submit time — so the cache key has to
+   * change on reallocation. Neither the label (not unique) nor `capacityRows` (can repeat)
+   * is sufficient on its own.
+   */
+  generation: number;
   provenance: 'arrow' | 'derived';
   /** Set for arrow-sourced attributes: how the column got here and what it cost. */
   upload?: ColumnUpload;
@@ -26,6 +33,7 @@ export interface GpuAttribute {
 
 export class AttributeSet {
   private map = new Map<string, GpuAttribute>();
+  private nextGeneration = 1;
 
   readonly counters = {
     allocations: 0,
@@ -85,9 +93,26 @@ export class AttributeSet {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
     this.counters.allocations++;
-    const attr: GpuAttribute = { name, width, buffer, capacityRows, rows, provenance };
+    const attr: GpuAttribute = {
+      name, width, buffer, capacityRows, rows, provenance,
+      generation: this.nextGeneration++,
+    };
     this.map.set(name, attr);
     return attr;
+  }
+
+  /**
+   * A cache key over a set of attributes that changes whenever any of their buffers is
+   * replaced. Bind-group caches must key on this, not on the `GpuAttribute` objects they
+   * captured — those go stale when `ensure` reallocates, and a stale bind group fails as
+   * "buffer used in submit while destroyed" on a later frame rather than at the point of
+   * the mistake.
+   */
+  bindingKey(names: readonly (string | undefined)[]): string {
+    return names
+      .filter((n): n is string => Boolean(n))
+      .map((n) => `${n}:${this.get(n).generation}`)
+      .join('|');
   }
 
   /**

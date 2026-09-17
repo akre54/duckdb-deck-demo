@@ -14,23 +14,16 @@
 import type { Gpu } from './device.js';
 
 import { AttributeSet } from './attributes.js';
-import { readColumn, readVectorColumns, type ColumnUpload } from '../core/arrow.js';
+import { readColumn, readVectorColumns, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, evaluateStage, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
 import { Kernel } from './compute.js';
 import { OrbitCamera, VIEW_UNIFORM_SIZE } from './camera.js';
 import { PointsPass } from './passes/points.js';
 import { Bin2dPass } from './passes/bin2d.js';
-import { plan as buildPlan, type PhysicalPlan, type Policy, type Schema, WORKGROUP, PlanError } from '../core/planner.js';
-import { parseExpr } from '../core/expr.js';
-import { buildRampLut, type Graph } from '../core/types.js';
 import {
   SourceRegistry, type SourceProvider, type SqlEngine,
-} from '../core/source.js';
+} from '@noodles.gl/planner';
 import { gpuData } from './gpu-compat.js';
-import { statsSql, parseStatsRow, type SourceStats } from '../core/stats.js';
-import { type CostConstants, DEFAULT_COSTS } from '../core/cost.js';
 import { calibrate, type CalibrationReport } from './calibrate.js';
-import { type TargetCaps, type TargetId, targetCaps } from '../core/target.js';
-import { evaluateStage } from '../core/cpu-stage.js';
 
 export interface BuildTimings {
   planMs: number;
@@ -102,7 +95,17 @@ export class Runtime {
   private graph?: Graph;
   private policy: Policy = 'cost';
   private paramValues: Record<string, number> = {};
-  private sourceSchema: Schema = new Map();
+  private schema: Schema = new Map();
+
+  /**
+   * The source schema, as the planner sees it. Public because planning is headless: a caller
+   * that wants to replan a candidate graph — an editor previewing an edit, a test, a build
+   * step — needs the same inputs `build()` uses, and re-deriving them would mean a second
+   * `describe()` round trip against the database.
+   */
+  get sourceSchema(): Schema {
+    return this.schema;
+  }
   private rows = 0;
 
   /** Cost constants for this machine. Replaced by `runCalibration()`. */
@@ -116,7 +119,12 @@ export class Runtime {
   /** Providers a graph's `source.dataset.ref` can name. */
   private readonly sources = new SourceRegistry();
   /** Relation the current source materialized, used by every generated query. */
-  private relation = '"src"';
+  private currentRelation = '"src"';
+
+  /** The relation the generated SQL reads, from the resolved source provider. */
+  get relation(): string {
+    return this.currentRelation;
+  }
   /**
    * The raw uploads from the last query, kept so the CPU backend can evaluate the same
    * graph for the deck.gl comparison. Not used by the WebGPU path.
@@ -186,14 +194,14 @@ export class Runtime {
     if (!source || source.type !== 'source') throw new PlanError('Graph has no source node');
 
     const provider = this.sources.resolve(source.dataset.ref);
-    this.relation = provider.relation;
+    this.currentRelation = provider.relation;
     await provider.materialize(this.duck);
 
-    const described = await this.duck.describe(this.relation);
-    this.sourceSchema = new Map();
+    const described = await this.duck.describe(this.currentRelation);
+    this.schema = new Map();
     const skipped: string[] = [];
     for (const [name, type] of described) {
-      if (NUMERIC_DUCKDB_TYPES.test(type)) this.sourceSchema.set(name, 1);
+      if (NUMERIC_DUCKDB_TYPES.test(type)) this.schema.set(name, 1);
       else skipped.push(`${name}:${type}`);
     }
     if (skipped.length) {
@@ -211,18 +219,18 @@ export class Runtime {
    * `plan()` falls back to the rule-based policy and says so.
    */
   private async loadStats(described: Map<string, string>): Promise<void> {
-    const columns = [...this.sourceSchema.keys()];
+    const columns = [...this.schema.keys()];
     const started = performance.now();
     this.sourceStats = undefined;
     try {
-      const { table } = await this.duck.run(statsSql(this.relation, columns));
+      const { table } = await this.duck.run(statsSql(this.currentRelation, columns));
       const row = table.get(0) as Record<string, unknown> | null;
       if (row) this.sourceStats = parseStatsRow(row, columns, described);
     } catch (err) {
       // approx_count_distinct may be missing in some builds; exact DISTINCT still works.
       console.warn('[runtime] approximate statistics failed, retrying exactly:', err);
       try {
-        const { table } = await this.duck.run(statsSql(this.relation, columns, false));
+        const { table } = await this.duck.run(statsSql(this.currentRelation, columns, false));
         const row = table.get(0) as Record<string, unknown> | null;
         if (row) this.sourceStats = parseStatsRow(row, columns, described);
       } catch (err2) {
@@ -252,13 +260,13 @@ export class Runtime {
     }
     this.paramValues = seeded;
 
-    const plan = buildPlan(graph, this.sourceSchema, {
+    const plan = buildPlan(graph, this.schema, {
       policy,
       costs: this.costs,
       caps: this.target,
       stats: this.sourceStats,
       params: this.paramValues,
-      relation: this.relation,
+      relation: this.currentRelation,
     });
     const planMs = performance.now() - t0;
 
@@ -342,30 +350,40 @@ export class Runtime {
     this.kernels = plan.kernels.map((k) => new Kernel(this.gpu.device, k, this.rampBuffer));
     for (const k of this.kernels) k.writeParams(this.paramValues);
 
-    const attr = (name?: string) => (name && this.attributes.has(name) ? this.attributes.get(name) : undefined);
-    const mask = attr(plan.maskAttribute);
+    // Channels are wired by *name*. The pass looks the buffer up per frame, so a requery
+    // that reallocates an attribute does not leave a bind group holding a destroyed buffer.
+    // Channel names are already resolved by `analyze`; nothing here defaults.
+    const bound = (name?: string) => (name && this.attributes.has(name) ? name : undefined);
+    const mask = bound(plan.maskAttribute);
+    const { position } = plan.channels;
+    this.attributes.get(position); // fail here, with the attribute list, not in the pass
 
-    if (plan.render.mode === 'points') {
+    if (plan.channels.mode === 'points') {
       this.pointsPass = new PointsPass(
         this.gpu.device,
         this.gpu.format,
+        this.attributes,
         {
-          position: this.attributes.get(plan.render.position ?? 'P'),
-          color: attr(plan.render.color ?? 'Cd'),
-          size: attr(plan.render.size ?? 'pscale'),
-          opacity: attr(plan.render.opacity ?? 'Alpha'),
+          position,
+          color: bound(plan.channels.color),
+          size: bound(plan.channels.size),
+          opacity: bound(plan.channels.opacity),
           mask,
         },
         this.viewBuffer,
       );
       this.pointsPass.setStyle(1, 1, 0.5, 64);
     } else if (plan.bin2d) {
-      const weightAttr = plan.bin2d.weight ? this.resolveWeightAttribute(plan.bin2d.weight) : undefined;
       this.binPass = new Bin2dPass(
         this.gpu.device,
         this.gpu.format,
         plan.bin2d.resolution,
-        { position: this.attributes.get(plan.render.position ?? 'P'), weight: weightAttr, mask },
+        this.attributes,
+        {
+          position,
+          weight: plan.bin2d.weight ? this.resolveWeightAttribute(plan.bin2d.weight) : undefined,
+          mask,
+        },
         this.viewBuffer,
         this.rampBuffer!,
       );
@@ -391,7 +409,7 @@ export class Runtime {
       },
       attributes: reports,
       statValues,
-      sourceColumns: this.sourceSchema.size,
+      sourceColumns: this.schema.size,
       stats: this.sourceStats,
       statsCatalogMs: this.statsCatalogMs,
     };
@@ -432,14 +450,16 @@ export class Runtime {
    * attribute reference is supported; anything else should be an explicit attribute node
    * upstream, so the cost stays visible in the graph.
    */
-  private resolveWeightAttribute(src: string) {
+  /** Returns the attribute *name*, having checked it is actually bound. */
+  private resolveWeightAttribute(src: string): string {
     const e = parseExpr(src);
     if (e.kind !== 'col') {
       throw new PlanError(
         `bin2d weight must name an attribute (got '${src}'). Add an attribute node for the expression first.`,
       );
     }
-    return this.attributes.get(e.name);
+    this.attributes.get(e.name);
+    return e.name;
   }
 
   private evalScalar(src: string): number {
@@ -469,7 +489,7 @@ export class Runtime {
     if (!plan) return 'unused';
     if (plan.params[name]?.kind === 'structural') return 'rebuild';
     if (plan.sqlParams.includes(name)) return 'requery';
-    if (plan.cpuStage.some((s) => exprUsesParam(s, name))) return 'cpu';
+    if (plan.cpuStage.some((s) => s.expr && exprUsesParam({ expr: s.expr }, name))) return 'cpu';
     if (plan.uniformParams.includes(name)) return 'uniform';
     return 'unused';
   }

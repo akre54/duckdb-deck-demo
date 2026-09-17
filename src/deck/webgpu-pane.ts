@@ -25,12 +25,8 @@ import { ScatterplotLayer } from '@deck.gl/layers';
 import { luma, Buffer as LumaBuffer, type Device, type ComputePipeline } from '@luma.gl/core';
 import { webgpuAdapter } from '@luma.gl/webgpu';
 
-import type { PhysicalPlan } from '../core/planner.js';
-import { WORKGROUP } from '../core/planner.js';
+import { WORKGROUP, materialize, buildRampLut, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
 import type { OrbitCamera } from '../webgpu/camera.js';
-import type { ColumnUpload } from '../core/arrow.js';
-import { materialize } from '../core/cpu-stage.js';
-import { buildRampLut } from '../core/types.js';
 
 export interface DeckWebgpuStatus {
   /** Whether a luma WebGPU device was obtained. */
@@ -192,9 +188,9 @@ export class DeckWebgpuPane {
       }
 
       // --- bind the app-owned buffers to a deck layer ------------------------
-      const posName = plan.render.position ?? 'P';
-      const colName = plan.render.color ?? 'Cd';
-      const sizeName = plan.render.size ?? 'pscale';
+      const posName = plan.channels.position;
+      const colName = plan.channels.color;
+      const sizeName = plan.channels.size;
       const width = (n: string) => plan.attributes.find((a) => a.name === n)?.width ?? 1;
 
       const position = this.buffers.get(posName);

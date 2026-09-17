@@ -2,3 +2,9 @@ node_modules
 dist
 .DS_Store
 dist-demo
+
+# Build output. The src patterns catch a mis-set rootDir emitting beside the source.
+packages/*/dist
+packages/*/src/**/*.js
+packages/*/src/**/*.d.ts
+packages/*/src/**/*.map
