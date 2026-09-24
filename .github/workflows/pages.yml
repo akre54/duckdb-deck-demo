@@ -1,0 +1,53 @@
+# Publishes the inspector demo (demo/, with its three example graphs) to GitHub Pages.
+#
+# Pages cannot set COOP/COEP headers, so SharedArrayBuffer is unavailable there. That is fine:
+# the demo selects DuckDB's single-threaded mvp/eh bundle at runtime and never relied on them.
+# The site needs WebGPU, so the deployed page is useful in Chromium-family browsers and recent
+# Safari; elsewhere it shows the GpuUnavailable message rather than a blank canvas.
+#
+# One-time setup: repository Settings → Pages → Source: "GitHub Actions".
+name: Publish demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time; a newer push supersedes a queued one but never cancels a live deploy.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # Project pages live under /<repo>/, and the DuckDB wasm/worker URLs are baked in at
+      # build time, so the base has to be known here.
+      - run: npm run build:demo
+        env:
+          VITE_BASE: /${{ github.event.repository.name }}/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist-demo
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

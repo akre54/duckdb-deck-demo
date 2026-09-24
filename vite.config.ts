@@ -18,8 +18,16 @@ const plannerAliases = [
   { find: '@noodles.gl/planner', replacement: resolve('packages/planner/src/index.ts') },
 ];
 
+/**
+ * The demo is served from a sub-path on GitHub Pages (`/duckdb-deck-demo/`), so asset URLs —
+ * including the DuckDB wasm and worker `?url` imports — need a base. Local dev and the default
+ * build keep `/`; the Pages workflow sets `VITE_BASE`.
+ */
+const base = process.env.VITE_BASE ?? '/';
+
 export default defineConfig({
   root: 'demo',
+  base,
   resolve: { alias: plannerAliases },
   server: {
     // duckdb-wasm's threaded bundle wants SharedArrayBuffer. We select the mvp/eh bundle

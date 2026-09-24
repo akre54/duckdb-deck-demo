@@ -4,6 +4,9 @@ A declarative, cost-planned data graph: JSON in, GPU pixels out. Filters, aggreg
 scales and color scales compile to DuckDB SQL and WGSL compute, and a cost model decides
 which engine runs each node. Houdini-style named attributes (`P`, `Cd`, `pscale`).
 
+**Live demo:** <https://akre54.github.io/duckdb-deck-demo/> — the inspector with the three
+example graphs below, published from `main` by `.github/workflows/pages.yml`.
+
 ```bash
 npm install
 npm run dev        # the inspector demo
