@@ -150,6 +150,7 @@ async function main(): Promise<void> {
       zoom: 1.2,
       attributionControl: { compact: true },
     });
+    Object.assign(window as unknown as Record<string, unknown>, { map });
     // The example graphs project into the orbit view's normalized mercator; the pane
     // inverts that back to degrees. A graph written for a map would emit lng/lat instead.
     mapPane = new DeckMaplibrePane(map, { coordinates: 'normalized-mercator' });

@@ -136,6 +136,11 @@ export class DeckMaplibrePane {
       getFillColor: colors ? undefined : [140, 200, 242],
       getRadius: sizes ? undefined : 2,
       pickable: false,
+      // Every circle lies on the ground plane, so depth testing only makes them z-fight at
+      // nonzero pitch. Jittering altitude was the alternative, but depth precision at world
+      // zoom is kilometres, and an offset that large lifts points visibly at street zoom.
+      // Without the test, overlapping points draw in row order at every zoom and pitch.
+      parameters: { depthCompare: 'always' },
     });
     this.overlay.setProps({ layers: [layer] });
 
