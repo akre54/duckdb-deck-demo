@@ -66,6 +66,7 @@
       .pane[hidden] { display: none; }
       .pane + .pane:not([hidden]) { border-left: 1px solid var(--line); }
       canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+      #map { position: absolute; inset: 0; }
       .pane-label {
         position: absolute; left: 10px; top: 8px;
         color: #6b7488; letter-spacing: 0.08em; pointer-events: none;
@@ -234,6 +235,7 @@
           <option value="webgpu">webgpu (this graph)</option>
           <option value="deck">deck.gl (webgl2)</option>
           <option value="both">both, side by side</option>
+          <option value="map">deck.gl + maplibre (basemap)</option>
         </select>
       </label>
       <button id="rebuild">rebuild</button>
@@ -257,6 +259,12 @@
           <div class="pane" data-pane="deck-gpu" hidden>
             <canvas id="deck-gpu-canvas"></canvas>
             <span class="pane-label">deck.gl · webgpu · gpu-resident buffers</span>
+          </div>
+          <!-- MapLibre owns this container and its WebGL2 canvas; deck joins it as a
+               MapboxOverlay control rather than bringing a canvas of its own. -->
+          <div class="pane" data-pane="map" hidden>
+            <div id="map"></div>
+            <span class="pane-label">deck.gl · maplibre · MapboxOverlay</span>
           </div>
         </div>
         <div id="hint">drag orbit · shift-drag pan · scroll zoom</div>

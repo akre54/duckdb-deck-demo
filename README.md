@@ -8,6 +8,18 @@ which engine runs each node. Houdini-style named attributes (`P`, `Cd`, `pscale`
 the three example graphs described below. It is published from `main` by
 `.github/workflows/pages.yml`.
 
+## How this fits with deck.gl and luma.gl
+
+This repo does not replace deck.gl. It computes the attributes a deck layer draws, such as
+position, color and radius, from a declarative graph. A planner decides whether DuckDB,
+generated JavaScript, or a WebGPU compute kernel produces each one. The output reaches deck
+either as typed arrays bound as binary attributes, which works today on WebGL2 and on a
+MapLibre basemap through `@deck.gl/mapbox`, or as luma.gl `Buffer`s a compute kernel wrote,
+bound with no readback. The compute half of that second path works on luma's WebGPU device.
+deck's WebGPU draw of those buffers is blocked by three deck/luma bugs.
+[docs/deck-and-luma.md](docs/deck-and-luma.md) shows each integration in code and lists
+suggested next changes and open research.
+
 ## Quick start
 
 ```bash
@@ -40,8 +52,8 @@ import { initGpu, Runtime, calibrate } from '@noodles.gl/gpu-runtime/webgpu';
 // A SqlEngine over duckdb-wasm. You pass in the bundle URLs, so no bundler is required.
 import { DuckDbEngine } from '@noodles.gl/gpu-runtime/duckdb';
 
-// deck.gl adapters, for rendering the same plan through deck.
-import { DeckWebgl2Pane, DeckWebgpuPane } from '@noodles.gl/gpu-runtime/deck';
+// deck.gl adapters, for rendering the same plan through deck, or over a MapLibre map.
+import { DeckWebgl2Pane, DeckWebgpuPane, DeckMaplibrePane } from '@noodles.gl/gpu-runtime/deck';
 ```
 
 Each entry point's dependencies are checked by a test, `tests/boundaries.test.ts`, which
@@ -275,7 +287,8 @@ The inspector exists so every claim the architecture makes can be checked on scr
 - **attributes**: each column's upload tier, so "zero copy" is measured rather than claimed.
 - **bench**: `run sweep` rebuilds at 100k, 1M and 5M rows and times each.
 - **vs deck**: the same graph rendered through deck.gl, either from CPU-computed binary
-  attributes (WebGL2) or from buffers a compute kernel wrote (WebGPU).
+  attributes (WebGL2) or from buffers a compute kernel wrote (WebGPU). The mode menu's
+  `deck.gl + maplibre` option draws the WebGL2 path over a MapLibre basemap.
 - **calibration**: the raw micro-benchmarks behind the cost constants.
 
 ### Things to try
@@ -301,7 +314,8 @@ packages/planner/   @noodles.gl/planner: expression IR and backends, analyze/opt
                     source providers, wrangle parser, Arrow upload, CPU stage, fixtures
 src/webgpu/         device, attributes, kernels, camera, calibration, passes, runtime
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
-src/deck/           the WebGL2 and WebGPU deck.gl panes
+src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes
+docs/               how the planner integrates with deck.gl and luma.gl
 demo/               the inspector app: main.ts, ui/, graphs/, data/ (not published)
 tests/              boundary guard, budgets, benchmarks, browser/
 ```

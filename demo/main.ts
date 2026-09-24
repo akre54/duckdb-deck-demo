@@ -18,6 +18,9 @@ import { Inspector, renderCounters, renderSweep, type SweepRow } from './ui/insp
 import { renderCalibration } from './ui/explain.js';
 import { DeckPane } from '../src/deck/webgl2-pane.js';
 import { DeckWebgpuPane } from '../src/deck/webgpu-pane.js';
+import { DeckMaplibrePane } from '../src/deck/maplibre-pane.js';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import { type TargetId, type Graph, type ParamSpec, type Policy } from '@noodles.gl/planner';
 import { WrangleEditor } from './ui/editor.js';
 
@@ -50,6 +53,11 @@ const deckGpuCanvas = $<HTMLCanvasElement>('#deck-gpu-canvas');
 const webgpuPane = $<HTMLElement>('.pane[data-pane="webgpu"]');
 const deckPaneEl = $<HTMLElement>('.pane[data-pane="deck"]');
 const deckGpuPaneEl = $<HTMLElement>('.pane[data-pane="deck-gpu"]');
+const mapPaneEl = $<HTMLElement>('.pane[data-pane="map"]');
+const hintEl = $('#hint');
+
+/** A free, keyless vector style. The basemap is the demo's choice, not the library's. */
+const BASEMAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 
 function setStatus(text: string, isError = false): void {
   statusEl.textContent = text;
@@ -105,16 +113,47 @@ async function main(): Promise<void> {
    */
   let deckPane: DeckPane | undefined;
   let deckGpuPane: DeckWebgpuPane | undefined;
+  /**
+   * The map pane has its own camera — MapLibre's — so it is not driven by the orbit
+   * camera. Created on first use, because the map fetches its style and tiles immediately.
+   */
+  let mapPane: DeckMaplibrePane | undefined;
 
   const deckWanted = () => modeSel.value !== 'webgpu';
+  const mapMode = () => modeSel.value === 'map';
   const deckUsesCompute = () => targetSel.value === 'deck-webgpu';
 
+  // The orbit camera captures the pointer on the pane container, which would steal every
+  // drag from the map. Stopping propagation here leaves MapLibre's own handlers intact.
+  for (const type of ['pointerdown', 'wheel'] as const) {
+    mapPaneEl.addEventListener(type, (e) => e.stopPropagation());
+  }
+
   function syncPanes(): void {
-    const showDeck = modeSel.value !== 'webgpu';
-    webgpuPane.hidden = modeSel.value === 'deck';
+    const showDeck = deckWanted() && !mapMode();
+    webgpuPane.hidden = modeSel.value === 'deck' || mapMode();
     // Each deck backend owns its own canvas, so only the one matching the target shows.
     deckPaneEl.hidden = !showDeck || deckUsesCompute();
     deckGpuPaneEl.hidden = !showDeck || !deckUsesCompute();
+    mapPaneEl.hidden = !mapMode();
+    hintEl.textContent = mapMode()
+      ? 'drag pan · scroll zoom · right-drag rotate and pitch'
+      : 'drag orbit · shift-drag pan · scroll zoom';
+  }
+
+  function ensureMapPane(): DeckMaplibrePane {
+    if (mapPane) return mapPane;
+    const map = new maplibregl.Map({
+      container: $('#map'),
+      style: BASEMAP_STYLE,
+      center: [0, 15],
+      zoom: 1.2,
+      attributionControl: { compact: true },
+    });
+    // The example graphs project into the orbit view's normalized mercator; the pane
+    // inverts that back to degrees. A graph written for a map would emit lng/lat instead.
+    mapPane = new DeckMaplibrePane(map, { coordinates: 'normalized-mercator' });
+    return mapPane;
   }
 
   /** Rebuild the deck layer, by whichever route the target's capabilities allow. */
@@ -123,7 +162,11 @@ async function main(): Promise<void> {
     if (!deckWanted() || !result) return;
 
     try {
-      if (deckUsesCompute()) {
+      if (mapMode()) {
+        const pane = ensureMapPane();
+        pane.update(result.plan, rt.sourceUploads, rt.params(), result.rows);
+        inspector.renderCompare(result, rt, pane.metrics());
+      } else if (deckUsesCompute()) {
         deckGpuPane ??= new DeckWebgpuPane(deckGpuCanvas);
         await deckGpuPane.update(result.plan, rt.sourceUploads, rt.params(), result.rows);
         deckGpuPane.syncCamera(rt.camera, deckGpuCanvas.clientHeight || 600);

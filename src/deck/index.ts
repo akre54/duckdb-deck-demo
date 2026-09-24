@@ -7,10 +7,13 @@
  *                     loop and handed to deck as binary attributes.
  *   `DeckWebgpuPane`  compute available, so the plan's kernel writes luma Buffers and deck
  *                     binds them with no readback.
+ *   `DeckMaplibrePane` the WebGL2 path again, drawn over a MapLibre basemap through
+ *                     `@deck.gl/mapbox`'s `MapboxOverlay`. The caller creates the map.
  *
- * Requires `@deck.gl/core`, `@deck.gl/layers` and `@luma.gl/*` as peer dependencies; the
- * core entry does not.
+ * Requires `@deck.gl/core`, `@deck.gl/layers` and `@luma.gl/*` as peer dependencies, plus
+ * `@deck.gl/mapbox` for the map pane; the core entry does not.
  */
 
 export { DeckPane as DeckWebgl2Pane, type DeckMetrics } from './webgl2-pane.js';
 export { DeckWebgpuPane, type DeckWebgpuStatus } from './webgpu-pane.js';
+export { DeckMaplibrePane, type DeckMaplibreOptions, type MapLike } from './maplibre-pane.js';

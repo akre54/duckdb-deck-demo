@@ -13,7 +13,7 @@ packages/planner/   @noodles.gl/planner — headless. Expression IR + three back
                     CPU stage, test fixtures. Zero runtime dependencies.
 src/webgpu/         device, attributes, kernels, camera, calibration, render passes, runtime
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
-src/deck/           the WebGL2 and WebGPU deck.gl panes
+src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes (see docs/deck-and-luma.md)
 demo/              the inspector app (not published)
 tests/             boundary guard, budgets, benchmarks, browser/
 ```

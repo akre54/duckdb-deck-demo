@@ -387,6 +387,6 @@ Stated plainly, because the numbers above are easy to over-read.
 - **Cardinality estimation assumes uniformity and independence.** The 0.5% accuracy above is a property of uniformly-generated synthetic data, not of the estimator. Skewed or correlated columns are where it will be wrong, and the explain pane exists to show that rather than hide it.
 - The cost model does not model: DuckDB's own parallelism or its choice of scan strategy, GPU occupancy or cache behavior, overdraw (a render term proportional to instances ignores that zoomed-out points overlap), or the possibility that a plan changes what is *visible* rather than only what it costs.
 - Change rates are declared in the graph, not measured from real interaction. A planner that watched actual slider traffic would need no `changeRate` field.
-- No strings, no picking, no transitions, no basemap, no geo beyond a hand-rolled mercator, no line or polygon marks.
+- No strings, no picking, no transitions, no line or polygon marks. The MapLibre basemap (`src/deck/maplibre-pane.ts`) uses the WebGL2 attribute path only, so it has no GPU stage; the orbit view's geo is still a hand-rolled mercator.
 - Heatmap weights are quantized to 1/256 and accumulated as `u32`, because WebGPU has no float atomics. Weights below ~0.004 contribute nothing.
 - Single machine, single GPU, synthetic data. The 5M-row case allocates 206 MB of attribute buffers, which needed an explicit `maxStorageBufferBindingSize` request.
