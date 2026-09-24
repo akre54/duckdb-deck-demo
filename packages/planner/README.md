@@ -2,7 +2,7 @@
 
 A cost-based query planner for data graphs that span DuckDB, the CPU and a compute shader.
 
-You describe a graph — filters, aggregates, scales, colour scales, arbitrary expressions — and
+You describe a graph of filters, aggregates, scales, colour scales and arbitrary expressions, and
 the planner decides **which engine runs each node**, then emits the SQL, the WGSL and the JS to
 do it. Not a renderer, not a database driver: given a graph and some statistics, it hands back a
 plan as data.
@@ -12,12 +12,12 @@ npm install @noodles.gl/planner
 ```
 
 Zero runtime dependencies. `apache-arrow` is used for types only, so the built output has no
-imports at all — you can plan a graph in a browser, in Node, or in a build step.
+imports at all. You can plan a graph in a browser, in Node, or in a build step.
 
 ## The idea
 
-The load-bearing piece is **one expression IR with three backends**. `sqrt(pop) * 2` compiles to
-a DuckDB `SELECT` expression, a WGSL statement, or a JS loop body from the same AST — so "which
+The central piece is **one expression IR with three backends**. `sqrt(pop) * 2` compiles to
+a DuckDB `SELECT` expression, a WGSL statement, or a JS loop body from the same AST, so "which
 engine runs this node" is a cost decision rather than a rewrite. Without that, moving a filter
 from SQL to a GPU discard mask means maintaining two implementations in two languages, and
 choosing between them is a refactor instead of an integer.
@@ -35,7 +35,7 @@ functions.ts       user-defined functions, resolved by inlining
 Deliberately separated, so a plan exists as data before anything is generated:
 
 ```
-analyze.ts     topological order, feasible engines per node, widths, op counts — no decisions
+analyze.ts     topological order, feasible engines per node, widths, op counts. No decisions
 optimizer.ts   price every legal plan, pick the cheapest
 planner.ts     emit SQL + WGSL + the CPU loop for the chosen assignment
 ```
@@ -61,7 +61,7 @@ cost = build
      + horizon × Σ rate_p × rebind(stage owning p)    parameters have change rates
 ```
 
-The second term is why a filter that removes rows beats a GPU discard mask — masked rows are
+The second term is why a filter that removes rows beats a GPU discard mask: masked rows are
 re-rasterized every frame. The third is the "parameterized query" idea as an objective: a dragged
 slider pulls its consumers onto the GPU, where rebinding is a 16-byte uniform write instead of a
 requery.
@@ -92,7 +92,7 @@ physical.explain.candidates;  // every legal plan and its cost
 physical.explain.edges;       // the desugared topology, for drawing the plan
 ```
 
-`caps` is a capability description, not a product name — compute availability, whether the
+`caps` is a capability description, not a product name. It covers compute availability, whether the
 renderer accepts app-owned buffers, a GPU memory budget, and the per-stage storage-binding limit.
 Memory and binding limits are **hard constraints inside the search**, so exceeding them changes
 the plan rather than producing a validation error at first draw.
@@ -114,7 +114,7 @@ internal attributes get no buffer.
 
 ## Programmable
 
-`scale`, `colorscale` and `project` are sugar over the IR. `wrangle` is the general case — a
+`scale`, `colorscale` and `project` are sugar over the IR. `wrangle` is the general case, a
 VEX-style multi-statement body:
 
 ```
@@ -126,7 +126,7 @@ var t   = clamp(fit(ln(pop), {{lo}}, {{hi}}, 0.0, 1.0), 0.0, 1.0);
 ```
 
 Each statement becomes one attribute node, is placed independently, and the existing fusion merges
-them back into one dispatch — the planner needs no knowledge of wrangles at all. `var` locals get
+them back into one dispatch. The planner needs no knowledge of wrangles at all. `var` locals get
 an SSA register rather than a buffer, so they cost no memory, no upload and no binding slot.
 
 User functions are **inlined**, so the backends, `enginesFor`, `widthOf`, `opCount` and fusion all
@@ -142,10 +142,10 @@ For what the IR genuinely cannot express, a `raw` node carries literal SQL or WG
   "reads": ["elevation"], "opCost": 4 }
 ```
 
-Its code sees plain names — a declared read, write or param is in scope as itself. In exchange it
+Its code sees plain names: a declared read, write or param is in scope as itself. In exchange it
 declares what the planner can no longer infer, and those declarations are **trusted**: an
 undeclared read is an unbound buffer, not an error. Prefer a `wrangle` whenever the expression
-fits. It does not block fusion, though — a raw GPU node is spliced into the same kernel as its
+fits. It does not block fusion, though. A raw GPU node is spliced into the same kernel as its
 neighbours, because fusion follows the stage assignment rather than legibility.
 
 ## Sources
@@ -162,7 +162,7 @@ import { relationSource, parquetUrlSource, sqlSource, type SqlEngine } from '@no
 ## Known limits
 
 One aggregate and one colour ramp per graph. No relational joins, no strings. The optimizer is
-exact only within the family "stage boundaries in topological order" — for a linear chain that is
+exact only within the family "stage boundaries in topological order". For a linear chain that is
 every legal plan; for a branching DAG it is not. Cardinality estimation assumes uniformity and
 independence, so it is least trustworthy exactly where data is skewed; `explain` reports estimated
 against actual rather than hiding it. Change rates are declared in the graph, not measured from
@@ -171,5 +171,5 @@ real interaction.
 ## See also
 
 The [repository README](../../README.md) for the WebGPU runtime, the deck.gl adapters and the
-inspector demo, and [FINDINGS.md](../../FINDINGS.md) for the measured results — including the
+inspector demo, and [FINDINGS.md](../../FINDINGS.md) for the measured results, including the
 bugs that were invisible until the backends were actually executed.
