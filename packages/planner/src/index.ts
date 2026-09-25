@@ -43,8 +43,12 @@ export {
   type Graph, type GraphNode, type CoreNode, type ParamSpec, type RampName,
   type SourceNode, type FilterNode, type AggregateNode, type StatsNode, type StatOp,
   type AttributeNode, type ScaleNode, type ColorScaleNode, type ProjectNode,
-  type WrangleNode, type Bin2dNode, type RenderNode, type RawNode,
+  type WrangleNode, type Bin2dNode, type RenderNode, type RawNode, type LayerNode,
 } from './types.js';
+export {
+  LAYER_KINDS, LAYER_SPECS, propParam, resolveProps,
+  type LayerKind, type LayerKindSpec, type ChannelSpec, type ChannelType, type LayerPropValue,
+} from './layers.js';
 export {
   parseWrangle, expandWrangle, localName, renameColumns, WrangleError,
   type WrangleStatement,
@@ -52,8 +56,9 @@ export {
 
 // --- planning --------------------------------------------------------------
 export {
-  analyze, opCount, PlanError,
+  analyze, opCount, PlanError, externalAttributes,
   type Analysis, type AnalyzedNode, type Schema, type Stage, type RenderChannels,
+  type LayerAnalysis, type LayerBinding,
 } from './analyze.js';
 export {
   optimize, stageOf,

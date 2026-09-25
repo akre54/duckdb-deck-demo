@@ -11,6 +11,7 @@
 import type { Expr } from './expr.js';
 import { parseWrangle, expandWrangle } from './wrangle.js';
 import { type AttributeConventions, HOUDINI_CONVENTIONS } from './conventions.js';
+import type { LayerKind, LayerPropValue } from './layers.js';
 import {
   type FunctionDef, type FunctionRegistry, type FunctionSpec,
   addFunction, buildRegistry,
@@ -227,6 +228,28 @@ export interface RenderNode {
 }
 
 /**
+ * A deck.gl layer output: `render` generalized to a layer kind with its own channels.
+ *
+ * `channels` maps a channel of the kind (see `LAYER_SPECS`) to the attribute that feeds it.
+ * A channel left out falls back to the convention attribute where the spec names one, so a
+ * scatter over a graph that wrote `P` and `Cd` needs no channels at all.
+ */
+export interface LayerNode {
+  id: string;
+  type: 'layer';
+  kind: LayerKind;
+  input: string;
+  inputs?: string[];
+  channels?: Record<string, string>;
+  /** deck layer props, applied as uniforms. `{{name}}` reads a parameter. */
+  props?: Record<string, LayerPropValue>;
+  /** Vertex layers: the column grouping rows into paths. Read raw, never cast. */
+  pathId?: string;
+  /** Row order of the output. Vertex layers need it; others may use it for draw order. */
+  orderBy?: string[];
+}
+
+/**
  * Sugar -> N attribute nodes. A VEX-style multi-statement body, which is what makes the
  * pipeline programmable rather than a closed catalogue of operator types. See
  * `src/graph/wrangle.ts` for the grammar.
@@ -290,7 +313,7 @@ export interface RawNode {
 
 export type GraphNode =
   | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode | RawNode
-  | ScaleNode | ColorScaleNode | ProjectNode | WrangleNode | Bin2dNode | RenderNode;
+  | ScaleNode | ColorScaleNode | ProjectNode | WrangleNode | Bin2dNode | RenderNode | LayerNode;
 
 export interface Graph {
   name?: string;
@@ -301,7 +324,7 @@ export interface Graph {
    */
   functions?: Record<string, FunctionSpec>;
   nodes: GraphNode[];
-  /** Node id of the render node to evaluate. Defaults to the last render node. */
+  /** Node id of the render or layer node to evaluate. Defaults to the last render node. */
   output?: string;
 }
 
@@ -312,7 +335,7 @@ export interface Graph {
 /** Nodes that survive into the planner. */
 export type CoreNode =
   | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode | RawNode
-  | Bin2dNode | RenderNode;
+  | Bin2dNode | RenderNode | LayerNode;
 
 export const RAMP_STOPS: Record<RampName, [number, number, number][]> = {
   // 8-stop approximations, linearly interpolated in the LUT builder. Close enough for

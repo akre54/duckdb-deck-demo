@@ -20,8 +20,8 @@ import {
   statExpr, statParamName,
 } from './types.js';
 import {
-  analyze, PlanError, type Analysis, type AnalyzedNode, type Schema, type Stage,
-  type RenderChannels,
+  analyze, PlanError, externalAttributes, type Analysis, type AnalyzedNode, type Schema, type Stage,
+  type RenderChannels, type LayerAnalysis,
 } from './analyze.js';
 import type { AttributeConventions } from './conventions.js';
 import {
@@ -136,8 +136,10 @@ export interface PhysicalPlan {
   attributes: AttributeDecl[];
   uniformParams: string[];
   params: Record<string, ParamSpec>;
-  /** The render node as authored, for its id and mode. */
+  /** The render node as authored, for its id and mode. For a layer output, synthesized. */
   render: RenderNode;
+  /** The layer output with its channels resolved, when the output is a `layer` node. */
+  layer?: LayerAnalysis;
   /**
    * The render channels with every attribute name resolved by `analyze`. Consumers bind
    * from these; nothing outside `analyze` applies a naming default.
@@ -529,7 +531,11 @@ function emit(
     for (const c of columnsOf(s.expr!)) needed.add(c);
   }
   for (const s of analysis.statsNodes) needed.add(s.column);
-  if (analysis.bin2d?.weight) for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) needed.add(c);
+  // Anything bound outside the graph — a channel, a layer binding, a path id, a sort key —
+  // must be selected even when no stage reads it. A channel bound straight to a source column
+  // (`size: 'mag'`) used to be dropped here, and the runtime then skipped the binding silently.
+  const external = externalAttributes(analysis);
+  for (const name of external) if (analysis.sourceSchema.has(name)) needed.add(name);
 
   if (aggregateInSql && aggregateNode?.aggs && aggregateNode.groupBy) {
     const groupBy = aggregateNode.groupBy;
@@ -539,7 +545,19 @@ function emit(
       (a) => `${castToFloat(toSql(a.expr, rowBind).code)} AS ${quoteIdent(a.name)}`,
     );
     const where = emitWhere(whereExprs, rowBind);
-    const inner = `SELECT ${[...groupItems, ...aggItems].join(', ')} FROM ${relation}${where} GROUP BY ${groupItems.join(', ')}`;
+    // SQL-stage attributes upstream of the aggregate — a grid cell key `floor(lng / cell)`,
+    // say — must exist before GROUP BY can read them, so they get a subquery of their own.
+    // Without it the query grouped by a column that was never computed.
+    let from = relation;
+    if (preAggSelect.length > 0) {
+      const shadowed = preAggSelect
+        .flatMap((item) => componentColumns(item.name, item.width))
+        .filter((c) => analysis.sourceSchema.has(c));
+      const star = shadowed.length ? `* EXCLUDE (${shadowed.map(quoteIdent).join(', ')})` : '*';
+      const pre = preAggSelect.flatMap((item) => selectItems(item, rowBind));
+      from = `(SELECT ${star}, ${pre.join(', ')} FROM ${relation}) AS "pre"`;
+    }
+    const inner = `SELECT ${[...groupItems, ...aggItems].join(', ')} FROM ${from}${where} GROUP BY ${groupItems.join(', ')}`;
 
     for (const g of groupBy) {
       arrowAttributes.push({ name: g, width: 1, provenance: 'arrow', sourceColumns: [g] });
@@ -599,6 +617,20 @@ function emit(
     }
   }
 
+  // --- output order --------------------------------------------------------
+  if (analysis.layer && analysis.layer.orderBy.length > 0) {
+    const sqlNames = new Set([...analysis.sourceSchema.keys(), ...arrowAttributes.map((a) => a.name)]);
+    for (const c of analysis.layer.orderBy) {
+      if (!sqlNames.has(c)) {
+        throw new PlanError(
+          `Layer ${analysis.layer.id}: cannot order by '${c}'; only source columns and SQL-stage attributes are sortable`,
+        );
+      }
+    }
+    // On the outermost statement, so the order survives the aggregate wrapper.
+    sql += ` ORDER BY ${analysis.layer.orderBy.map(quoteIdent).join(', ')}`;
+  }
+
   // --- CPU stage declarations ---------------------------------------------
   const widthOfName = new Map<string, number>();
   for (const a of arrowAttributes) widthOfName.set(a.name, a.width);
@@ -619,22 +651,16 @@ function emit(
   const uniformParams = new Set<string>();
 
   if (gpuStage.length > 0) {
-    // Attributes anything outside the kernel needs: the render channels, the bin2d weight,
-    // and the discard mask. Everything else the kernel produces is a temporary — a wrangle
-    // local, typically — and lives in an SSA register rather than a storage buffer. Giving
-    // those a buffer would waste bandwidth and burn a binding slot against the per-stage
-    // limit for a value nothing outside the kernel ever reads.
-    const { position, color, size, opacity } = analysis.channels;
-    const external = new Set<string>([
-      position, color, size, opacity, analysis.conventions.mask,
-    ]);
-    if (analysis.bin2d?.weight) {
-      for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) external.add(c);
-    }
+    // Attributes anything outside the kernel needs (`externalAttributes`). Everything else the
+    // kernel produces is a temporary — a wrangle local, typically — and lives in an SSA
+    // register rather than a storage buffer. Giving those a buffer would waste bandwidth and
+    // burn a binding slot against the per-stage limit for a value nothing outside the kernel
+    // ever reads.
+    const kernelExternal = new Set(external);
     // A CPU-stage or SQL-stage attribute name reused later must keep its buffer too.
-    for (const a of [...arrowAttributes, ...cpuAttributes]) external.add(a.name);
+    for (const a of [...arrowAttributes, ...cpuAttributes]) kernelExternal.add(a.name);
 
-    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, external);
+    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, kernelExternal);
     kernels.push(kernel);
     for (const p of kernel.params) uniformParams.add(p);
   }
@@ -661,7 +687,19 @@ function emit(
   const attributes = [...arrowAttributes, ...cpuAttributes, ...derivedAttributes];
 
   // --- render bindings ----------------------------------------------------
-  if (analysis.channels.mode === 'points') {
+  if (analysis.layer) {
+    for (const b of analysis.layer.bindings) {
+      const decl = attributes.find((a) => a.name === b.attribute);
+      if (!decl) {
+        throw new PlanError(
+          `Layer ${analysis.layer.id}: channel '${b.channel}' reads '${b.attribute}', which the graph does not produce`,
+        );
+      }
+      if (b.type === 'vec' && decl.width < 2) {
+        throw new PlanError(`Layer ${analysis.layer.id}: '${b.channel}' needs 2+ components, '${b.attribute}' has ${decl.width}`);
+      }
+    }
+  } else if (analysis.channels.mode === 'points') {
     const posName = analysis.channels.position;
     const pos = attributes.find((a) => a.name === posName);
     if (!pos) throw new PlanError(`Render node needs attribute '${posName}' for position; none was produced`);
@@ -712,6 +750,7 @@ function emit(
     uniformParams: [...uniformParams],
     params: declaredParams,
     render: analysis.render,
+    layer: analysis.layer,
     channels: analysis.channels,
     conventions: analysis.conventions,
     ramp: analysis.ramp,

@@ -21,7 +21,7 @@
  */
 
 import type { Analysis, AnalyzedNode, Stage } from './analyze.js';
-import { PlanError } from './analyze.js';
+import { PlanError, externalAttributes } from './analyze.js';
 import {
   type CostConstants, CostAccumulator, type CostBreakdown,
   sqlScanMs, uploadMs, castMs, interleaveMs, kernelMs, cpuEvalMs, renderFrameMs, estimateChunks,
@@ -426,12 +426,8 @@ function countStorageBindings(
   if (gpuNodes.length === 0) return { reads: 0, writes: 0, ramp: false, total: 0 };
 
   // Must match `buildKernel`: a temporary nothing outside the kernel reads stays in a
-  // register and is never bound. Render channels and the mask are the external names.
-  const { position, color, size, opacity } = analysis.channels;
-  const external = new Set<string>([
-    position, color, size, opacity, analysis.conventions.mask,
-  ]);
-  if (analysis.bin2d?.weight) external.add(analysis.bin2d.weight);
+  // register and is never bound. Both read the same rule.
+  const external = externalAttributes(analysis);
 
   const written = new Set<string>();
   const registerOnly = new Set<string>();
