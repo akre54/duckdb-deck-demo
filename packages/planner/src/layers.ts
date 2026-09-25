@@ -91,10 +91,11 @@ export const LAYER_SPECS: Record<LayerKind, LayerKindSpec> = {
 /**
  * A layer prop value. Props are deck layer properties — `currentTime`, `opacity`,
  * `radiusScale` — that deck applies as uniforms, so changing one costs no query, no CPU pass
- * and no upload. A string of the form `{{name}}` reads a graph parameter; that is how a
- * timeline or a slider drives a prop, and why such a parameter routes as `prop`.
+ * and no upload. A string of the form `{{name}}` reads a graph parameter, alone or as an array
+ * element (a color is three); that is how a timeline or a slider drives a prop, and why such a
+ * parameter routes as `prop`.
  */
-export type LayerPropValue = number | string | boolean | number[];
+export type LayerPropValue = number | string | boolean | (number | string)[];
 
 /** The parameter a prop reads, if it is a `{{name}}` reference. */
 export function propParam(value: LayerPropValue): string | undefined {
@@ -103,15 +104,26 @@ export function propParam(value: LayerPropValue): string | undefined {
   return m?.[1];
 }
 
+/** Every parameter a prop reads, including array elements. */
+export function propParams(value: LayerPropValue): string[] {
+  const items = Array.isArray(value) ? value : [value];
+  return items.map((v) => propParam(v)).filter((p): p is string => p !== undefined);
+}
+
+export type ResolvedProp = number | string | boolean | (number | string)[];
+
 /** Resolve a layer's props against current parameter values. */
 export function resolveProps(
   props: Record<string, LayerPropValue> | undefined,
   params: Record<string, number | string>,
-): Record<string, number | string | boolean | number[]> {
-  const out: Record<string, number | string | boolean | number[]> = {};
+): Record<string, ResolvedProp> {
+  const one = (v: number | string | boolean) => {
+    const p = typeof v === 'string' ? propParam(v) : undefined;
+    return p !== undefined ? (params[p] ?? 0) : v;
+  };
+  const out: Record<string, ResolvedProp> = {};
   for (const [key, value] of Object.entries(props ?? {})) {
-    const p = propParam(value);
-    out[key] = p !== undefined ? (params[p] ?? 0) : value;
+    out[key] = Array.isArray(value) ? value.map((v) => one(v) as number | string) : one(value);
   }
   return out;
 }

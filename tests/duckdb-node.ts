@@ -50,6 +50,11 @@ export async function openNodeDuck(): Promise<NodeDuck> {
   );
   await db.instantiate();
   const conn = db.connect();
+  // Extensions (json, spatial) load from extensions.duckdb.org on first use. A test must not
+  // depend on the network, and with no network the load hangs rather than failing, so it is
+  // switched off: a test that needs JSON builds its rows with SQL instead.
+  conn.query('SET autoinstall_known_extensions = false');
+  conn.query('SET autoload_known_extensions = false');
   const prepared = new Map<string, ReturnType<BlockingConnection['prepare']>>();
   const counters = { executions: 0, prepares: 0, execs: 0 };
 

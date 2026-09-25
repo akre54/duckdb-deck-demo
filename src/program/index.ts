@@ -6,3 +6,6 @@
 export {
   MaterializingCatalog, type CatalogCounters, type CatalogOptions,
 } from './catalog.js';
+export {
+  queryLayer, evaluateLayer, keptRows, pick, type QueriedLayer, type LayerData,
+} from './execute.js';

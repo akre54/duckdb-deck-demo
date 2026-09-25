@@ -16,7 +16,7 @@ import {
   type Graph, type CoreNode, type RenderNode, type Bin2dNode, type StatsNode,
   type SourceNode, type RawNode, type ParamSpec, type RampName, type LayerNode, desugar,
 } from './types.js';
-import { LAYER_SPECS, propParam, type LayerKind, type ChannelType, type LayerPropValue } from './layers.js';
+import { LAYER_SPECS, propParams, type LayerKind, type ChannelType, type LayerPropValue } from './layers.js';
 import { type AttributeConventions, attributeConventions, isInternal } from './conventions.js';
 import { type FunctionRegistry, inlineFunctions } from './functions.js';
 
@@ -474,7 +474,7 @@ function resolveLayer(layer: LayerNode, conv: AttributeConventions, widths: Sche
     throw new PlanError(`Layer ${layer.id}: '${layer.kind}' draws paths, so it needs 'pathId'`);
   }
   const props = { ...(layer.props ?? {}) };
-  const propParams = [...new Set(Object.values(props).map(propParam).filter((p): p is string => !!p))];
+  const readParams = [...new Set(Object.values(props).flatMap(propParams))];
   return {
     id: layer.id,
     kind: layer.kind,
@@ -485,7 +485,7 @@ function resolveLayer(layer: LayerNode, conv: AttributeConventions, widths: Sche
       ? [layer.pathId!, ...(layer.orderBy ?? []).filter((c) => c !== layer.pathId)]
       : [...(layer.orderBy ?? [])],
     props,
-    propParams,
+    propParams: readParams,
   };
 }
 

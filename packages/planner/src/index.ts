@@ -48,7 +48,7 @@ export {
   type GenerateNode, type UnnestNode, type DeckNode, type RelationalNode, RELATIONAL_TYPES,
 } from './types.js';
 export {
-  LAYER_KINDS, LAYER_SPECS, propParam, resolveProps,
+  LAYER_KINDS, LAYER_SPECS, propParam, propParams, resolveProps, type ResolvedProp,
   type LayerKind, type LayerKindSpec, type ChannelSpec, type ChannelType, type LayerPropValue,
 } from './layers.js';
 export {
@@ -68,6 +68,27 @@ export {
   type ProgramPlan, type RelationPlan, type LayerPlan, type NodeInfo, type Route,
   type ParamRouteEntry, type Catalog, type CatalogEntry, type CompileOptions,
 } from './program.js';
+
+// --- editor documents, operators, parameters over time -------------------
+export {
+  cubicBezier, findTForX, bezierEasing, evaluateTrack, setKeyframe, keyframeAt, presetName,
+  EASING_PRESETS, LINEAR_HANDLES,
+  type Keyframe, type KeyframeValue, type Track, type Timeline, type BezierHandles, type InterpolationType,
+} from './keyframes.js';
+export {
+  flattenSubnets, applyBypass, resolveRef, networkPath, nodePath, nameOf, isExpr, isRef,
+  DocumentError, SUBNET, SUBNET_INPUT, SUBNET_OUTPUT,
+  type EditorDoc, type DocNode, type DocEdge, type ParamValue, type PromotedParam,
+} from './doc.js';
+export {
+  OPERATORS, OPERATOR_INDEX, operator, bindingOf, canConnect, paramPort, safeId,
+  type OpDef, type ParamDef, type ParamKind, type PortSpec, type PortType, type Category,
+  type LowerCtx, type LowerResult, type ScalarParams,
+} from './operators.js';
+export {
+  lowerDocument, parameterValues, slotKey, ScalarProgram,
+  type Lowered, type LoweredParam, type LowerOptions, type SlotValue, type Clock,
+} from './lower.js';
 
 // --- planning --------------------------------------------------------------
 export {
