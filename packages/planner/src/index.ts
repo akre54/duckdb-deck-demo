@@ -58,7 +58,7 @@ export {
 export {
   analyze, opCount, PlanError, externalAttributes,
   type Analysis, type AnalyzedNode, type Schema, type Stage, type RenderChannels,
-  type LayerAnalysis, type LayerBinding,
+  type LayerAnalysis, type LayerBinding, type ColumnType, type ColumnTypes,
 } from './analyze.js';
 export {
   optimize, stageOf,
@@ -97,7 +97,7 @@ export {
 
 // --- Arrow -> f32 and the CPU stage ---------------------------------------
 export {
-  readColumn, readVectorColumns, type Tier, type ColumnUpload,
+  readColumn, readVectorColumns, readStrings, readValues, runStarts, type Tier, type ColumnUpload,
 } from './arrow.js';
 export {
   evaluateStage, materialize, toUint8Color, type CpuAttributes,

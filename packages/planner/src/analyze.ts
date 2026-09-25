@@ -27,6 +27,14 @@ export class PlanError extends Error {}
 /** Column or attribute name -> component count. */
 export type Schema = Map<string, number>;
 
+/**
+ * What a relation column holds, beyond its width. `Schema` stays numeric-width-only so every
+ * existing caller keeps working; a caller with string columns passes these alongside it.
+ * `other` covers lists, structs and timestamps: selectable into a relation, never into a buffer.
+ */
+export type ColumnType = 'num' | 'str' | 'other';
+export type ColumnTypes = ReadonlyMap<string, ColumnType>;
+
 export interface AnalyzedNode {
   id: string;
   node: CoreNode;
@@ -102,6 +110,11 @@ export interface Analysis {
   render: RenderNode;
   /** Present when the output is a `layer` node. */
   layer?: LayerAnalysis;
+  /**
+   * String-valued columns and attributes. Anything that reads one is SQL-only, and emit
+   * selects them uncast.
+   */
+  strings: Set<string>;
   /** `render`'s channels, with the attribute conventions applied. */
   channels: RenderChannels;
   /** The naming vocabulary this analysis was produced under. */
@@ -172,6 +185,7 @@ export function analyze(
   graph: Graph,
   sourceSchema: Schema,
   conventionOverrides?: Partial<AttributeConventions>,
+  columnTypes?: ColumnTypes,
 ): Analysis {
   const conventions = attributeConventions(conventionOverrides);
   const { nodes, notes: sugarNotes, ramp, functions } = desugar(graph, conventions);
@@ -201,7 +215,21 @@ export function analyze(
   // --- topological order over the ancestry of the render node --------------
   const ordered = topoSort(nodes, byId, render, notes);
 
+  // String columns join the namespace as width-1 names so references resolve; `strings`
+  // is what keeps them out of every stage but SQL.
+  const strings = new Set<string>();
+  const fullSource: Schema = new Map(sourceSchema);
+  for (const [name, type] of columnTypes ?? []) {
+    if (type !== 'str') continue;
+    strings.add(name);
+    if (!fullSource.has(name)) fullSource.set(name, 1);
+  }
+  sourceSchema = fullSource;
   const schema: Schema = new Map(sourceSchema);
+  /** Restrict to SQL if the tree reads a string, and say why. */
+  const readsString = (e: Expr) => columnsOf(e).some((c) => strings.has(c));
+  const withStrings = (e: Expr, feasible: Set<Stage>): Set<Stage> =>
+    readsString(e) ? new Set([...feasible].filter((s) => s === 'sql')) : feasible;
   const order: AnalyzedNode[] = [];
   const statsNodes: StatsNode[] = [];
   let groupBy: string[] = [];
@@ -249,7 +277,7 @@ export function analyze(
       case 'filter': {
         const expr = parseOrThrow(node.predicate, node.id);
         requireColumns(expr, node.id);
-        const feasible = feasibleStages(expr);
+        const feasible = withStrings(expr, feasibleStages(expr));
         if (feasible.size === 0) {
           throw new PlanError(`Node ${node.id}: predicate is neither SQL- nor GPU-expressible`);
         }
@@ -304,7 +332,12 @@ export function analyze(
           throw new PlanError(`Node ${node.id}: attribute expressions cannot aggregate; use an 'aggregate' node`);
         }
         const width = widthOf(expr, (n) => schema.get(n) ?? 1);
-        const feasible = feasibleStages(expr);
+        const feasible = withStrings(expr, feasibleStages(expr));
+        if (feasible.size === 0) {
+          throw new PlanError(`Node ${node.id}: expression mixes strings with functions only the GPU has`);
+        }
+        if (isStringValued(expr, strings)) strings.add(node.name);
+        else strings.delete(node.name);
         order.push({
           id: node.id, node, kind: 'attribute', name: node.name, expr, width,
           ops: opCount(expr, width), feasible,
@@ -364,6 +397,7 @@ export function analyze(
     if (!sourceSchema.has(s.column) && !schema.has(s.column)) {
       throw new PlanError(`Stats node ${s.id}: unknown column '${s.column}'`);
     }
+    if (strings.has(s.column)) throw new PlanError(`Stats node ${s.id}: '${s.column}' is a string column`);
   }
 
   const layer = layerNode ? resolveLayer(layerNode, conventions, schema) : undefined;
@@ -372,6 +406,7 @@ export function analyze(
     source,
     render,
     layer,
+    strings,
     channels,
     conventions,
     functions,
@@ -550,6 +585,16 @@ function topoSort(
 
   if (out.length !== live.length) throw new PlanError('Cycle in graph: topological sort did not consume every node');
   return out;
+}
+
+/** True when the expression's value is a string: a literal, a string column, or a branch of them. */
+function isStringValued(e: Expr, strings: ReadonlySet<string>): boolean {
+  switch (e.kind) {
+    case 'str': return true;
+    case 'col': return strings.has(e.name);
+    case 'cond': return isStringValued(e.then, strings) || isStringValued(e.else, strings);
+    default: return false;
+  }
 }
 
 function paramsOfExpr(e: Expr): string[] {

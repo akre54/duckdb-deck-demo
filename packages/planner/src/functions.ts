@@ -129,6 +129,7 @@ function inline(e: Expr, reg: FunctionRegistry, stack: string[], depth: number):
   }
   switch (e.kind) {
     case 'num':
+    case 'str':
     case 'col':
     case 'param':
       return e;
@@ -194,6 +195,7 @@ function substitute(e: Expr, bound: ReadonlyMap<string, Expr>): Expr {
     case 'col':
       return bound.get(e.name) ?? e;
     case 'num':
+    case 'str':
     case 'param':
       return e;
     case 'unary':

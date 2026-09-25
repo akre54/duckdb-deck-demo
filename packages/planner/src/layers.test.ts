@@ -9,7 +9,7 @@ const schema: Schema = new Map([
   ['lng', 1], ['lat', 1], ['lng2', 1], ['lat2', 1], ['mag', 1], ['depth', 1], ['trip', 1], ['t', 1],
 ]);
 const source = { id: 'src', type: 'source', dataset: { ref: 'test', estimatedRows: 1000 } } as const;
-const webgl2 = { caps: targetCaps('deck-webgl2') };
+const webgl2 = { caps: targetCaps('deck-webgl2', undefined) };
 
 describe('regressions found while generalizing the output node', () => {
   it('groups by a computed attribute by computing it in a subquery first', () => {

@@ -22,19 +22,26 @@ export interface QueryTiming {
 /**
  * What the planner and runtime require of a SQL engine.
  *
- * `run` must support positional `?` parameters in bind order, because that is how a value
- * parameter is rebound without re-planning — see `backends/sql.ts`. An implementation that
- * ignores `binds` will silently break the cheap-reparameterization path.
+ * `run` must bind numbered `$1`-style placeholders from `binds` in order, because that is how
+ * a value parameter is rebound without re-planning — see `backends/sql.ts`. An implementation
+ * that ignores `binds` will silently break the cheap-reparameterization path.
  */
 export interface SqlEngine {
   /** Fire-and-forget DDL. */
   exec(sql: string): Promise<void>;
   /** Run a statement, preparing and caching it when it has parameters. Returns Arrow. */
-  run(sql: string, binds?: number[]): Promise<{ table: Table; timing: QueryTiming }>;
+  run(sql: string, binds?: (number | string)[]): Promise<{ table: Table; timing: QueryTiming }>;
   /** Column name -> engine type name, for a relation. */
   describe(relation: string): Promise<Map<string, string>>;
   /** Drop cached prepared statements, e.g. after DDL that invalidates them. */
   resetPrepared(): Promise<void>;
+  /**
+   * Drop the prepared statement for one SQL text, if cached. Optional so existing engines
+   * still conform; a caller that generates many distinct statements (one per memoized
+   * relation) needs it, or the cache grows without bound and holds statements over
+   * dropped tables.
+   */
+  release?(sql: string): Promise<void>;
 }
 
 /**

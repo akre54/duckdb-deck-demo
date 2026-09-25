@@ -20,7 +20,11 @@ import {
 export type RampName = 'viridis' | 'magma' | 'turbo' | 'cividis';
 
 export interface ParamSpec {
-  value: number;
+  /**
+   * A string value is only ever a SQL bind — `code == {{airport}}` — so a string parameter
+   * routes as `requery` or not at all; the optimizer never places its reader off SQL.
+   */
+  value: number | string;
   /**
    * `value` params rebind cheaply (uniform write / prepared-statement rebind).
    * `structural` params change the shape of the plan and force a recompile.

@@ -85,6 +85,10 @@ function emit(e: Expr, ctx: Ctx): string[] {
     case 'num':
       return [formatNumber(e.value)];
 
+    case 'str':
+      // Unreachable through the planner, which never places a string on the CPU stage.
+      throw new Error(`String literal '${e.value}' has no JS-stage form; strings are SQL-only`);
+
     case 'param':
       ctx.params.add(e.name);
       return [`p.${e.name}`];

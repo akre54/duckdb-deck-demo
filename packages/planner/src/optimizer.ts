@@ -360,9 +360,15 @@ function policyAssignment(analysis: Analysis, ctx: OptimizeContext, notes: strin
 
   switch (ctx.policy) {
     case 'gpu-first': {
-      // Everything on the GPU; a filter becomes a discard mask.
-      notes.push('policy gpu-first: no SQL stage, filters become discard masks');
-      return { sqlEnd: 0, cpuEnd: 0 };
+      // Everything on the GPU; a filter becomes a discard mask. Except what only SQL can run
+      // — an aggregate, anything reading a string — which forces the shortest SQL prefix that
+      // still contains it. Stages are ordered, so that prefix is everything up to the last one.
+      let sqlEnd = 0;
+      analysis.order.forEach((node, i) => { if (!node.feasible.has('gpu')) sqlEnd = i + 1; });
+      notes.push(sqlEnd === 0
+        ? 'policy gpu-first: no SQL stage, filters become discard masks'
+        : `policy gpu-first: ${sqlEnd} node(s) kept in SQL because the last of them has no GPU form`);
+      return { sqlEnd, cpuEnd: sqlEnd };
     }
 
     case 'sql-first': {

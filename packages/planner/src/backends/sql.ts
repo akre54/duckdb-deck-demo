@@ -89,6 +89,9 @@ function emit(e: Expr, ctx: Ctx): Val {
     case 'num':
       return { code: formatNumber(e.value), isBool: false };
 
+    case 'str':
+      return { code: `'${e.value.replace(/'/g, "''")}'`, isBool: false };
+
     case 'col':
       return { code: quoteIdent(e.name), isBool: false };
 

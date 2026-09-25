@@ -21,7 +21,7 @@ import {
 } from './types.js';
 import {
   analyze, PlanError, externalAttributes, type Analysis, type AnalyzedNode, type Schema, type Stage,
-  type RenderChannels, type LayerAnalysis,
+  type RenderChannels, type LayerAnalysis, type ColumnTypes,
 } from './analyze.js';
 import type { AttributeConventions } from './conventions.js';
 import {
@@ -46,6 +46,12 @@ export interface AttributeDecl {
   sourceColumns?: string[];
   /** True for wrangle locals, which the inspector hides. */
   internal?: boolean;
+  /**
+   * Absent for ordinary f32 attributes. `str` is a string column, selected uncast and read
+   * as JS strings. `raw` is a column selected in its native type — a path id, which must not
+   * be narrowed to f32, where ids above 2^24 would merge.
+   */
+  type?: 'str' | 'raw';
 }
 
 export interface KernelPlan {
@@ -169,6 +175,8 @@ export interface PlanOptions {
    * `Alpha`. Only meaningful when `plan` does its own `analyze`.
    */
   conventions?: Partial<AttributeConventions>;
+  /** Column types of the relation, so string columns can be read. See `ColumnTypes`. */
+  columnTypes?: ColumnTypes;
 }
 
 const WORKGROUP = 256;
@@ -195,7 +203,7 @@ export function plan(
   // and the optimizer says so in its notes.
   const policy: Policy = opts.policy ?? (opts.stats ? 'cost' : 'auto');
 
-  const analysis = analyze(graph, sourceSchema, opts.conventions);
+  const analysis = analyze(graph, sourceSchema, opts.conventions, opts.columnTypes);
   const result = optimize(analysis, {
     costs, caps, stats: opts.stats, params: opts.params ?? {}, policy,
   });
@@ -233,9 +241,12 @@ function rawSqlFor(raw: RawStage, name: string, nodeId: string): string {
 
 /** Select-list text for one item, compiled or spliced. */
 function selectItems(
-  item: { name: string; width: number; expr?: Expr; raw?: string },
+  item: { name: string; width: number; expr?: Expr; raw?: string; str?: boolean },
   bind: SqlParams,
 ): string[] {
+  // A string cannot reach a GPU buffer, so the f32 narrowing that every numeric item gets
+  // would turn it into NULL. It is selected as itself.
+  if (item.str && item.expr) return [`${toSql(item.expr, bind).code} AS ${quoteIdent(item.name)}`];
   if (item.raw !== undefined) {
     // Wrapped in parentheses and cast, so a raw expression behaves like a compiled one:
     // `a + b` cannot bind tighter than the alias, and a DECIMAL result cannot reach Arrow
@@ -373,7 +384,7 @@ function emit(
   // Expressions, not emitted text: placeholder numbering is per statement, so emission has
   // to wait until we know which statement each expression lands in.
   const whereExprs: Expr[] = [];
-  type SelectItem = { name: string; width: number; expr?: Expr; raw?: string };
+  type SelectItem = { name: string; width: number; expr?: Expr; raw?: string; str?: boolean };
   const preAggSelect: SelectItem[] = [];
   const postAggSelect: SelectItem[] = [];
   const cpuStage: StageNode[] = [];
@@ -434,7 +445,7 @@ function emit(
       case 'attribute': {
         if (stage === 'sql') {
           const bucket = aggregateInSql && i > aggregateIndex ? postAggSelect : preAggSelect;
-          bucket.push({ name: node.name!, width: node.width, expr: node.expr! });
+          bucket.push({ name: node.name!, width: node.width, expr: node.expr!, str: analysis.strings.has(node.name!) });
           assignments.push({
             nodeId: node.id, type: 'attribute', engine: 'sql',
             why: node.feasible.has('gpu')
@@ -519,6 +530,12 @@ function emit(
 
   // --- the row query -------------------------------------------------------
   const arrowAttributes: AttributeDecl[] = [];
+  const pathId = analysis.layer?.pathId;
+  /** Name plus its non-f32 type, if it has one. */
+  const typed = (name: string): { name: string; type?: 'str' | 'raw' } =>
+    analysis.strings.has(name) ? { name, type: 'str' }
+    : name === pathId ? { name, type: 'raw' }
+    : { name };
   // One numbering for the whole row query: SELECT list and WHERE clause together.
   const rowBind = new SqlParams();
   let sql: string;
@@ -560,7 +577,7 @@ function emit(
     const inner = `SELECT ${[...groupItems, ...aggItems].join(', ')} FROM ${from}${where} GROUP BY ${groupItems.join(', ')}`;
 
     for (const g of groupBy) {
-      arrowAttributes.push({ name: g, width: 1, provenance: 'arrow', sourceColumns: [g] });
+      arrowAttributes.push({ ...typed(g), width: 1, provenance: 'arrow', sourceColumns: [g] });
     }
     for (const a of aggs) {
       arrowAttributes.push({ name: a.name, width: 1, provenance: 'arrow', sourceColumns: [a.name] });
@@ -581,7 +598,7 @@ function emit(
     }
     for (const s of postAggSelect) {
       arrowAttributes.push({
-        name: s.name, width: s.width, provenance: 'arrow',
+        ...typed(s.name), width: s.width, provenance: 'arrow',
         sourceColumns: componentColumns(s.name, s.width),
       });
     }
@@ -591,18 +608,20 @@ function emit(
     const items = [
       // Cast in SQL: everything reaching a GPU buffer is f32, so narrowing here uses DuckDB's
       // vectorised executor instead of a JS loop, and sidesteps DECIMAL entirely.
-      ...passthrough.map((c) => `${castToFloat(quoteIdent(c))} AS ${quoteIdent(c)}`),
+      ...passthrough.map((c) => (typed(c).type
+        ? `${quoteIdent(c)} AS ${quoteIdent(c)}`
+        : `${castToFloat(quoteIdent(c))} AS ${quoteIdent(c)}`)),
       ...preAggSelect.flatMap((item) => selectItems(item, rowBind)),
     ];
     if (items.length === 0) items.push('1 AS "__unit"');
     sql = `SELECT ${items.join(', ')} FROM ${relation}${emitWhere(whereExprs, rowBind)}`;
 
     for (const c of passthrough) {
-      arrowAttributes.push({ name: c, width: 1, provenance: 'arrow', sourceColumns: [c] });
+      arrowAttributes.push({ ...typed(c), width: 1, provenance: 'arrow', sourceColumns: [c] });
     }
     for (const s of preAggSelect) {
       arrowAttributes.push({
-        name: s.name, width: s.width, provenance: 'arrow',
+        ...typed(s.name), width: s.width, provenance: 'arrow',
         sourceColumns: componentColumns(s.name, s.width),
       });
     }
@@ -693,6 +712,12 @@ function emit(
       if (!decl) {
         throw new PlanError(
           `Layer ${analysis.layer.id}: channel '${b.channel}' reads '${b.attribute}', which the graph does not produce`,
+        );
+      }
+      if ((b.type === 'str') !== (decl.type === 'str')) {
+        throw new PlanError(
+          `Layer ${analysis.layer.id}: channel '${b.channel}' takes ${b.type === 'str' ? 'a string' : 'a number'}, ` +
+          `but '${b.attribute}' is ${decl.type === 'str' ? 'a string' : 'numeric'}`,
         );
       }
       if (b.type === 'vec' && decl.width < 2) {

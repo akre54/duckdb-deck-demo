@@ -67,7 +67,7 @@ export class DuckDbEngine implements SqlEngine {
     await this.conn.query(sql);
   }
 
-  async run(sql: string, binds: number[] = []): Promise<{ table: Table; timing: QueryTiming }> {
+  async run(sql: string, binds: (number | string)[] = []): Promise<{ table: Table; timing: QueryTiming }> {
     const started = performance.now();
     let table: Table;
     if (binds.length === 0) {
@@ -92,6 +92,13 @@ export class DuckDbEngine implements SqlEngine {
       out.set(String(row.column_name), String(row.column_type));
     }
     return out;
+  }
+
+  async release(sql: string): Promise<void> {
+    const stmt = this.prepared.get(sql);
+    if (!stmt) return;
+    this.prepared.delete(sql);
+    await stmt.close();
   }
 
   async resetPrepared(): Promise<void> {
