@@ -23,6 +23,14 @@ describe('string literals', () => {
   });
 });
 
+describe('vectors below the top level', () => {
+  it('have no SQL form: SQL splits a vector only at the top', () => {
+    expect([...enginesFor(parseExpr('[a, b, 0.0]'))].sort()).toEqual(['gpu', 'sql']);
+    expect([...enginesFor(parseExpr('v > 0.5 ? [1.0, 0.0, 0.0] : [0.0, 0.0, 1.0]'))]).toEqual(['gpu']);
+    expect([...enginesFor(parseExpr('[a, b, 0.0] * 2.0'))]).toEqual(['gpu']);
+  });
+});
+
 describe('string columns through the planner', () => {
   const schema: Schema = new Map([['lng', 1], ['lat', 1], ['trip', 1]]);
   const types: ColumnTypes = new Map([['lng', 'num'], ['lat', 'num'], ['trip', 'num'], ['code', 'str'], ['name', 'str']]);

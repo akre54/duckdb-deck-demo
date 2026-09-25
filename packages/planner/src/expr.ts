@@ -420,6 +420,13 @@ export function enginesFor(e: Expr): Set<Engine> {
     if (n.kind === 'swizzle') engines.delete('sql');
     if (n.kind === 'str') engines.delete('gpu');
   });
+  // SQL splits a vector into per-component columns at the top level only (`toSqlColumns`),
+  // so a vector anywhere below it — `test ? [1, 0, 0] : [0, 0, 1]` — has no SQL form. Missed
+  // here, the optimizer placed such a node in SQL and emission failed.
+  const inner = e.kind === 'vec' ? e.components : [e];
+  if (inner.some((c) => { let found = false; walk(c, (n) => { if (n.kind === 'vec') found = true; }); return found; })) {
+    engines.delete('sql');
+  }
   return engines;
 }
 

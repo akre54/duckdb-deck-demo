@@ -200,15 +200,19 @@ describe('arrivals', () => {
     expect(program.errors).toEqual([]);
     const lp = program.layers.find((l) => l.id === 'trails')!;
     const d = await data(program, 'trails', values);
-    expect(d.rows).toBe(2 * 32);
-    expect([...d.starts!]).toEqual([0, 32]);
-    // Ordered by flight, then step; the last step is at the airport's end of the segment.
+    expect(d.rows).toBe(2 * 24);
+    expect([...d.starts!]).toEqual([0, 24]);
+    // Ordered by flight, then step. The trail covers the last 15% of the flight and ends at the
+    // airport end of the segment.
     const t = column(d, 't');
-    expect(t[0]).toBeCloseTo(100);
-    expect(t[31]).toBeCloseTo(3700);
+    expect(t[0]).toBeCloseTo(100 + 0.85 * 3600, 1);
+    expect(t[23]).toBeCloseTo(3700);
     const P = d.attributes.get('P')!;
     expect(P.width).toBe(3);
-    expect(P.data[31 * 3 + 1]).toBeCloseTo(51.45, 4);
+    expect(P.data[23 * 3 + 1]).toBeCloseTo(51.45, 4);
+    // Descending: first vertex at least 3 km up, last at the airport's reported altitude.
+    expect(P.data[2]).toBeGreaterThanOrEqual(3000);
+    expect(P.data[23 * 3 + 2]).toBeCloseTo(300, 0);
     // Steps are read by the relation and by the wrangle through ch().
     expect(program.routes.steps__count.map((x) => x.route).sort()).toEqual(expect.arrayContaining(['rematerialize']));
     expect(lp.plan.layer?.pathId).toBe('flight');
@@ -218,7 +222,7 @@ describe('arrivals', () => {
     const doc = structuredClone(arrivals);
     doc.nodes.find((n) => n.id === 'airport')!.params.text = 'CDG';
     const { program, values } = await compileDoc(doc);
-    expect((await data(program, 'trails', values)).rows).toBe(32);
+    expect((await data(program, 'trails', values)).rows).toBe(24);
   });
 });
 
