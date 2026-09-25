@@ -61,6 +61,8 @@ export interface SourceNode {
    * the very first plan has a finite cost to compare against.
    */
   dataset: { ref: string; estimatedRows?: number; [key: string]: unknown };
+  /** A file the program runtime reads directly. Takes the place of a registered provider. */
+  file?: FileSource;
 }
 
 /** Row filter. Pushed into the SQL WHERE clause whenever the predicate is SQL-expressible. */
@@ -253,6 +255,140 @@ export interface LayerNode {
   orderBy?: string[];
 }
 
+// ---------------------------------------------------------------------------
+// Relational nodes
+// ---------------------------------------------------------------------------
+//
+// Everything above is row-wise: a node sees one row set and adds or removes attributes. The
+// nodes below change the row set itself — combine two, reshape one, or bring one into being —
+// and so they are SQL-only by construction. `compileProgram` lowers each to a relation, which
+// is also the unit of memoization: a relation's hash covers its structure, its inputs' hashes
+// and the values of any parameter it reads.
+
+/** A relation read from a file DuckDB can open, or from SQL the host supplies. */
+export interface FileSource {
+  /** `csv`, `json` and `parquet` map to DuckDB's `read_*` functions. */
+  format: 'csv' | 'json' | 'parquet';
+  url: string;
+  /**
+   * Named options for the reader, rendered as DuckDB named parameters: a headerless CSV needs
+   * `{ header: false, names: [...] }`. Values are literals, never parameters — a reader's
+   * options decide what the relation *is*, so changing one is structural.
+   */
+  options?: Record<string, string | number | boolean | string[]>;
+}
+
+/** Relational join. `on` pairs a left column with a right one; `cross` takes no keys. */
+export interface JoinNode {
+  id: string;
+  type: 'join';
+  /** Left input. */
+  input: string;
+  right: string;
+  how?: 'inner' | 'left' | 'cross';
+  on?: [string, string][];
+  /**
+   * Prepended to every right-side column. Joining one table twice — routes to their origin
+   * and their destination airport — needs two different prefixes, and a name both sides
+   * share is an error rather than a silent shadow.
+   */
+  prefix?: string;
+}
+
+/** Rows of every input, matched by column name (`UNION ALL BY NAME`). */
+export interface UnionNode {
+  id: string;
+  type: 'union';
+  inputs: string[];
+  /** Drop duplicate rows. Off by default, because deduplication is a full sort. */
+  distinct?: boolean;
+  input?: string;
+}
+
+/**
+ * Row order plus an optional limit. Order is only guaranteed within this relation's own
+ * statement — a later join or filter may reorder — so it exists to make `limit` mean "top N".
+ * A layer that needs drawing order says so with its own `orderBy`.
+ */
+export interface SortNode {
+  id: string;
+  type: 'sort';
+  input: string;
+  /** Column names, each optionally followed by ` desc`. */
+  by: string[];
+  limit?: number;
+}
+
+export interface LimitNode {
+  id: string;
+  type: 'limit';
+  input: string;
+  count: number;
+  offset?: number;
+}
+
+/**
+ * Literal DuckDB SQL: the relational escape hatch, like Noodles' DuckDbOp. `{{input}}` (or
+ * `{{input0}}`, `{{input1}}`…) names an input relation; any other `{{name}}` is a parameter,
+ * inlined as a literal. Its output schema is whatever DuckDB says it is.
+ */
+export interface SqlNode {
+  id: string;
+  type: 'sql';
+  inputs?: string[];
+  input?: string;
+  query: string;
+}
+
+/** `count` rows with one column, `name`, holding 0..count-1. The seed of an interpolation. */
+export interface GenerateNode {
+  id: string;
+  type: 'generate';
+  count: number | string;
+  /** Defaults to `i`. */
+  name?: string;
+}
+
+/**
+ * List columns to rows. Every list in `lists` is unnested in lockstep, so a trip's `path` and
+ * `timestamps` stay paired. `split` names the components of a list-of-lists element
+ * (`path: ['lng', 'lat']`); `id` numbers the original rows and `index` the position within
+ * each, which together are exactly what a path layer groups and orders by.
+ */
+export interface UnnestNode {
+  id: string;
+  type: 'unnest';
+  input: string;
+  lists: string[];
+  /** Output name per list. Defaults to the list's own name. */
+  as?: Record<string, string>;
+  split?: Record<string, string[]>;
+  /** Name for the original row number. Defaults to `row`. */
+  rowId?: string;
+  /** Name for the 1-based position within the list. Defaults to `index`. */
+  index?: string;
+}
+
+/**
+ * The program's output: an ordered list of layers, bottom first, plus the view. View fields
+ * accept `{{param}}` references, which is how a keyframed camera reaches deck.
+ */
+export interface DeckNode {
+  id: string;
+  type: 'deck';
+  inputs: string[];
+  input?: string;
+  basemap?: string;
+  view?: Record<string, number | string>;
+}
+
+export type RelationalNode =
+  | JoinNode | UnionNode | SortNode | LimitNode | SqlNode | GenerateNode | UnnestNode;
+
+export const RELATIONAL_TYPES: ReadonlySet<string> = new Set([
+  'source', 'join', 'union', 'sort', 'limit', 'sql', 'generate', 'unnest',
+]);
+
 /**
  * Sugar -> N attribute nodes. A VEX-style multi-statement body, which is what makes the
  * pipeline programmable rather than a closed catalogue of operator types. See
@@ -317,7 +453,8 @@ export interface RawNode {
 
 export type GraphNode =
   | SourceNode | FilterNode | AggregateNode | StatsNode | AttributeNode | RawNode
-  | ScaleNode | ColorScaleNode | ProjectNode | WrangleNode | Bin2dNode | RenderNode | LayerNode;
+  | ScaleNode | ColorScaleNode | ProjectNode | WrangleNode | Bin2dNode | RenderNode | LayerNode
+  | RelationalNode | DeckNode;
 
 export interface Graph {
   name?: string;
@@ -509,6 +646,14 @@ export function desugar(
         );
         break;
       }
+
+      case 'join': case 'union': case 'sort': case 'limit': case 'sql': case 'generate':
+      case 'unnest': case 'deck':
+        // These change the row set, which a single plan cannot: it has one source and one
+        // statement. `compileProgram` splits a graph at them and plans each piece.
+        throw new Error(
+          `Node ${node.id}: '${node.type}' needs compileProgram; plan() takes one source and one output`,
+        );
 
       default:
         if (node.type === 'bin2d') ramps.add(node.ramp);

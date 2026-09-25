@@ -22,6 +22,10 @@
     "./deck": {
       "types": "./dist/deck/index.d.ts",
       "import": "./dist/deck/index.js"
+    },
+    "./program": {
+      "types": "./dist/program/index.d.ts",
+      "import": "./dist/program/index.js"
     }
   },
   "scripts": {

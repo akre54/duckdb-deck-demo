@@ -17,7 +17,7 @@ export {
 
 // --- backends --------------------------------------------------------------
 export {
-  toSql, toSqlColumns, quoteIdent, castToFloat, SqlParams, type SqlEmit,
+  toSql, toSqlColumns, quoteIdent, castToFloat, castToDouble, SqlParams, type SqlEmit,
 } from './backends/sql.js';
 export {
   toWgsl, wgslType, wgslParamMember, type Resolver, type WgslEmit,
@@ -44,6 +44,8 @@ export {
   type SourceNode, type FilterNode, type AggregateNode, type StatsNode, type StatOp,
   type AttributeNode, type ScaleNode, type ColorScaleNode, type ProjectNode,
   type WrangleNode, type Bin2dNode, type RenderNode, type RawNode, type LayerNode,
+  type FileSource, type JoinNode, type UnionNode, type SortNode, type LimitNode, type SqlNode,
+  type GenerateNode, type UnnestNode, type DeckNode, type RelationalNode, RELATIONAL_TYPES,
 } from './types.js';
 export {
   LAYER_KINDS, LAYER_SPECS, propParam, resolveProps,
@@ -53,6 +55,19 @@ export {
   parseWrangle, expandWrangle, localName, renameColumns, WrangleError,
   type WrangleStatement,
 } from './wrangle.js';
+
+// --- programs: many sources, relational nodes, many layers -----------------
+export { canonicalJson, hashOf } from './hash.js';
+export {
+  columnTypeOf, sqlLiteral, inlineParamsInText, exprError,
+  sourceSql, joinSql, unionSql, sortSql, limitSql, sqlNodeSql, generateSql, unnestSql, rowwiseSql,
+  type RelColumn, type RelVector, type RelShape,
+} from './relational.js';
+export {
+  compileProgram, inputsOf, resolveView,
+  type ProgramPlan, type RelationPlan, type LayerPlan, type NodeInfo, type Route,
+  type ParamRouteEntry, type Catalog, type CatalogEntry, type CompileOptions,
+} from './program.js';
 
 // --- planning --------------------------------------------------------------
 export {

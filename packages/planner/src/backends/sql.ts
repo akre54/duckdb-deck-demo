@@ -187,22 +187,33 @@ export function castToFloat(code: string): string {
   return `CAST(${code} AS FLOAT)`;
 }
 
+/**
+ * Wrap a SELECT item as DOUBLE. What a relation stores: a relation is read again by SQL, not
+ * by a buffer, so it keeps full precision — a haversine distance or an epoch timestamp
+ * narrowed to f32 there would lose metres and seconds before any consumer saw it. The
+ * DECIMAL problem `castToFloat` solves applies equally, so the cast is still required.
+ */
+export function castToDouble(code: string): string {
+  return `CAST(${code} AS DOUBLE)`;
+}
+
 export function toSqlColumns(
   e: Expr,
   baseAlias: string,
   params: SqlParams = new SqlParams(),
+  cast: (code: string) => string = castToFloat,
 ): { items: string[]; params: string[] } {
   const ctx: Ctx = { params };
   // Coerced to numeric: a selected column feeds an f32 attribute buffer, so a BOOLEAN result
   // would arrive as an Arrow bool vector that the upload path cannot read.
   if (e.kind === 'vec') {
     const items = e.components.map(
-      (c, i) => `${castToFloat(asNumber(emit(c, ctx)))} AS ${quoteIdent(`${baseAlias}_${i}`)}`,
+      (c, i) => `${cast(asNumber(emit(c, ctx)))} AS ${quoteIdent(`${baseAlias}_${i}`)}`,
     );
     return { items, params: params.order };
   }
   return {
-    items: [`${castToFloat(asNumber(emit(e, ctx)))} AS ${quoteIdent(baseAlias)}`],
+    items: [`${cast(asNumber(emit(e, ctx)))} AS ${quoteIdent(baseAlias)}`],
     params: params.order,
   };
 }
