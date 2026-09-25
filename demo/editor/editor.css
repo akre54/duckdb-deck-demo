@@ -50,7 +50,9 @@ code, .mono { font-family: var(--mono); }
   height: 100%;
   display: grid;
   grid-template-rows: 38px 1fr;
-  grid-template-columns: 1fr 360px;
+  /* minmax(0, …): a grid track otherwise grows to its content's min-content width, and a long
+     SQL string in the side pane pushed it over the network editor. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
   grid-template-areas: "top top" "work side";
 }
 
@@ -99,8 +101,8 @@ code, .mono { font-family: var(--mono); }
 .tabbody { position: relative; min-height: 0; overflow: hidden; }
 
 /* --- side: parameters ---------------------------------------------------- */
-.side { grid-area: side; border-left: 1px solid var(--line); background: var(--pane); display: flex; flex-direction: column; min-height: 0; }
-.params { overflow: auto; flex: 1; }
+.side { grid-area: side; border-left: 1px solid var(--line); background: var(--pane); display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; }
+.params { overflow-y: auto; overflow-x: hidden; flex: 1; min-width: 0; }
 .params .empty { padding: 20px 16px; color: var(--dim); line-height: 1.6; }
 .params .empty h3 { color: var(--ink); margin: 0 0 6px; font-size: 13px; }
 .params .empty kbd, kbd { font-family: var(--mono); font-size: 10.5px; padding: 0 4px; border: 1px solid var(--line-2); border-radius: 3px; background: var(--pane-2); }
@@ -167,7 +169,7 @@ code, .mono { font-family: var(--mono); }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-family: var(--mono); font-size: 11px; }
 .kv dt { color: var(--faint); }
 .kv dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
-pre.code { margin: 4px 0 0; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-size: 10.5px; line-height: 1.5; max-height: 220px; overflow: auto; white-space: pre-wrap; color: #b9c2d6; }
+pre.code { max-width: 100%; overflow-wrap: anywhere; margin: 4px 0 0; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 6px 8px; font-size: 10.5px; line-height: 1.5; max-height: 220px; overflow: auto; white-space: pre-wrap; color: #b9c2d6; }
 
 /* context menu */
 .menu { position: fixed; z-index: 50; background: var(--pane-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 4px; min-width: 190px; box-shadow: 0 10px 30px #000a; }

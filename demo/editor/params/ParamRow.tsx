@@ -131,6 +131,8 @@ function routeBadges(def: ParamDef, key: string, runtime: RuntimeView) {
 }
 
 function ExprCheck({ text }: { text: string }) {
+  // An empty channel is unbound, not malformed.
+  if (!text.trim()) return null;
   // ch() references are rewritten to parameters before the planner sees the text.
   const err = exprError(text.replace(/\bch\(\s*(['"]).*?\1\s*\)/g, '{{ref}}'));
   return err ? <div className="perr">{err}</div> : null;

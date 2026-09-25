@@ -358,6 +358,56 @@ What it does not cost is fusion. A raw GPU node is spliced into the same kernel 
 neighbours, because fusion follows the stage assignment and has no opinion about legibility.
 That was the surprise — the escape hatch is a placement constraint, not a pipeline barrier.
 
+## 11. A node editor compiles to the same IR, and the routes hold under interaction
+
+The question here was whether the planner could sit under a Noodles-style editor with forks,
+joins and animation, without a second IR. It can. The planner gained multiple sources,
+relational nodes, layer outputs and SQL-only strings. `compileProgram` cuts a graph into
+memoized relations and per-layer sub-graphs, and the per-layer piece is the unchanged
+`plan()`. An operator library and a document lowering sit above it, and the planner never
+sees an editor concept.
+
+Measured live in the editor (Chromium, this machine, the four example projects on their real
+public data):
+
+| change | what ran | cost |
+|---|---|---|
+| load the route network (7.7k airports, 67.7k routes, double join) | 5 relations materialized, 3 layer queries | 701 ms, mostly fetching |
+| drag the route-length slider 5 times | 5 CPU passes of one layer, **0 DuckDB executions** | — |
+| play the trips timeline, 60 frames (48k vertices + 1.5k columns) | 60 prop updates, **0 executions, 0 attribute rebuilds** | ~1.7 ms of work per frame |
+| un-bypass the time window, so the same clock filters the grid | 30 frames → 30 requeries of the grid layer only; trails still prop | 3.7 ms per requery |
+| collapse three nodes into a subnet | the lowered graph is byte-identical, **0 recompiles** | — |
+| key a parameter | its declared change rate goes from 2/s to the timeline's 30/s | a replan, once |
+
+Three things made this work, and each is a claim the tests check by counting executions
+(`tests/runtime.test.ts`) rather than by timing:
+
+- **Parameters are routed, not re-evaluated.** Each parameter's routes come from the plan
+  (`prop`, `uniform`, `cpu`, `requery`, `rematerialize`), and the runtime does only that much
+  work. The cost model still chooses: with 309 routes and a slider dragged at 4/s, it kept the
+  length filter on the CPU as a mask, because a requery per tick costs more.
+- **Relations are memoized by value.** A relation's hash includes the parameter values it
+  inlines. Changing the country re-runs the filter and the joins, the two file sources are
+  memo hits, and changing it back hits the table left from before.
+- **Binary data keeps its identity.** The deck adapter builds a layer's typed arrays once per
+  `LayerData`. A prop change hands deck the same object, so it re-uploads nothing.
+
+Executing, not compiling, found seven more bugs, five of them in code that predates the editor:
+
+1. GROUP BY on a SQL-computed attribute emitted a query over a column that was never selected.
+2. A channel bound straight to a source column was dropped by projection pushdown.
+3. `gpu-first` produced an illegal plan whenever a node could only run in SQL.
+4. A vector nested inside an expression (`c ? [1, 0, 0] : [0, 0, 1]`) was marked SQL-feasible
+   and failed at emission.
+5. `readColumn` on a string vector cast its UTF-8 bytes to floats, with no error.
+6. Collapsing into a subnet wired the outer edge to the subnet's own input.
+7. A relative reference stopped resolving once its node moved into a subnet. References are
+   now rebased on every move and rename, as Houdini does.
+
+The planner's node tests now run SQL for real, through duckdb-wasm's blocking Node build
+(`tests/duckdb-node.ts`). That is the "test by executing" rule applied to the half of the
+stack that previously could only be shown to compile outside a browser.
+
 ## Recommended order of work for noodles
 
 Ranked by payoff per unit of risk. The first three are independent of any renderer decision.
@@ -382,11 +432,11 @@ Stated plainly, because the numbers above are easy to over-read.
 - `requestAnimationFrame` throttles hard in a hidden tab — an 8 ms frame reports as 640 ms. The sweep uses a drained-queue submit loop for exactly this reason; the live footer readout is only trustworthy with the tab visible.
 - Camera framing between the two panes is approximate: `OrbitView`'s `zoom` is log2 pixels-per-world-unit, not our `distance`.
 - One color ramp per graph (one LUT is bound per kernel). Two `colorscale` nodes with different ramps is a legitimate use case and is rejected with an error.
-- One `aggregate` per graph. Multi-input DAGs, branching and dead-code elimination work; **relational joins do not** — multi-input means merging attribute namespaces over a shared row set.
+- One `aggregate` per `plan()`; a program lifts it to one per layer. Relational joins exist only in programs, are SQL-only, and are not costed: the optimizer prices each layer's tail, not the relations above it, so a `rematerialize` route is reported but never weighed against the alternatives.
 - **The optimizer is exact only within the family "stage boundaries in topological order".** For a linear chain that family is every legal plan. For a branching DAG it is not: an assignment that interleaves stages across independent branches is legal but unexplored. The topological order also fixes a particular tie-break, so a different (equally legal) order could yield a different boundary.
 - **Cardinality estimation assumes uniformity and independence.** The 0.5% accuracy above is a property of uniformly-generated synthetic data, not of the estimator. Skewed or correlated columns are where it will be wrong, and the explain pane exists to show that rather than hide it.
 - The cost model does not model: DuckDB's own parallelism or its choice of scan strategy, GPU occupancy or cache behavior, overdraw (a render term proportional to instances ignores that zoomed-out points overlap), or the possibility that a plan changes what is *visible* rather than only what it costs.
 - Change rates are declared in the graph, not measured from real interaction. A planner that watched actual slider traffic would need no `changeRate` field.
-- No strings, no picking, no transitions, no line or polygon marks. The MapLibre basemap (`src/deck/maplibre-pane.ts`) uses the WebGL2 attribute path only, so it has no GPU stage; the orbit view's geo is still a hand-rolled mercator.
+- Strings are SQL-only (no string functions in the op table yet). No picking, no transitions, no polygon marks. The MapLibre basemap (`src/deck/maplibre-pane.ts`) uses the WebGL2 attribute path only, so it has no GPU stage; the orbit view's geo is still a hand-rolled mercator.
 - Heatmap weights are quantized to 1/256 and accumulated as `u32`, because WebGPU has no float atomics. Weights below ~0.004 contribute nothing.
 - Single machine, single GPU, synthetic data. The 5M-row case allocates 206 MB of attribute buffers, which needed an explicit `maxStorageBufferBindingSize` request.

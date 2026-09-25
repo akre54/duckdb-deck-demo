@@ -10,11 +10,16 @@ engine runs each node. Read [README.md](README.md) for what it does and
 packages/planner/   @noodles.gl/planner — headless. Expression IR + three backends,
                     analyze/optimize/emit, statistics, cost model, target capabilities,
                     attribute conventions, source providers, wrangle parser, Arrow upload,
-                    CPU stage, test fixtures. Zero runtime dependencies.
+                    CPU stage, test fixtures. Programs: layers.ts, relational.ts,
+                    program.ts (compileProgram), hash.ts. Editor side: operators.ts,
+                    doc.ts, lower.ts, keyframes.ts. Zero runtime dependencies.
 src/webgpu/         device, attributes, kernels, camera, calibration, render passes, runtime
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
-src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes (see docs/deck-and-luma.md)
-demo/              the inspector app (not published)
+src/program/        ProgramRuntime, MaterializingCatalog (the memo), queryLayer/evaluateLayer
+src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, program-pane.ts
+                    (see docs/deck-and-luma.md)
+demo/               the inspector app (not published)
+demo/editor/        the node editor: React (the only React in the repo), examples/*.json
 tests/             boundary guard, budgets, benchmarks, browser/
 ```
 
@@ -25,11 +30,11 @@ and to its built `dist` when the root package compiles — that is why `tsconfig
 ## Commands
 
 ```bash
-npm test           # 612 node tests, ~0.6s
+npm test           # 680 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
 npm run test:gpu   # 66 browser tests, Chromium, real WebGPU + real DuckDB
 npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
-npm run dev        # the inspector demo on :5173
+npm run dev        # the inspector on :5173, the node editor at /editor/
 npm run bench      # throughput, reported not asserted
 ```
 
@@ -94,9 +99,43 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 - `requestAnimationFrame` throttles hard in a hidden tab, reporting an 8 ms frame as 640 ms. Frame
   timings need a drained submit loop (`timeFrames`).
 
+- **DuckDB-Wasm downloads extensions on first use**, JSON included (`read_json_auto`). In
+  the browser that just works. In a sandbox with no network it *hangs* rather than failing,
+  so `tests/duckdb-node.ts` turns autoload off and tests build JSON-shaped rows with SQL.
+- **A hidden browser pane throttles timers too, not just rAF.** A long `preview_eval` that
+  waits in a loop can time out against a healthy page. Drive the editor with short evals and
+  `window.store` (`store.set({ time })`) rather than the play button.
+- **`\bdocument\b` is a banned word in the planner** (the headless guard), and it matches a
+  module named `document.ts`. The editor-document module is `doc.ts` for that reason.
+- **React Flow in controlled mode reports selection through `onNodesChange`** (`select`
+  changes). `onSelectionChange` never fires if those are dropped.
+- **Moving or renaming a node must rebase references.** `ch('ctl/k')` is a path, and a path
+  from inside a subnet differs from one at the root. `rebaseReferences` in
+  `demo/editor/doc-ops.ts` does it; a new structural edit that moves nodes must call it too.
+- **A prop-only change must hand deck the same binary `data` object.** `DeckProgramPane`
+  caches by `LayerData` identity. Building a fresh object per frame turns a uniform write into
+  a full attribute upload.
+- **An expression is SQL-feasible only if its vectors are at the top level.** `enginesFor`
+  checks this; a new construct that nests a vector must keep that check true.
+
+## Programs and the editor
+
+- The IR is still `Graph`. `plan()` rejects relational nodes; `compileProgram` accepts them
+  and calls `plan()` per layer. Do not teach `plan()` about joins.
+- Operators are not IR nodes. Add behaviour as an operator whose `lower()` emits existing IR
+  nodes before reaching for a new IR node type.
+- A parameter's `bind` (`value` / `prop` / `structural`) is the interactivity contract. A
+  number that deck can apply as a layer prop should be `prop`; anything that changes what
+  the graph *is* should be `structural`.
+- Relations inline parameter values as `CAST(v AS DOUBLE)` literals and hash them. Layer
+  queries bind them. Do not add binds to relation SQL.
+- The keyframe math in `keyframes.ts` is ported from Noodles.gl (Apache-2.0). Keep the
+  attribution in its header.
+
 ## Scope
 
-Deliberately absent: relational joins, strings, picking, transitions, line and polygon marks,
-more than one aggregate or colour ramp per graph. Before adding one, check
+Deliberately absent: picking, transitions, polygon marks, string functions, costing of
+relations (a `rematerialize` route is reported, not priced), and more than one aggregate or
+colour ramp per *layer*. Before adding one, check
 [FINDINGS.md](FINDINGS.md) — "What this prototype does not prove" says what the numbers here do
 and do not support.
