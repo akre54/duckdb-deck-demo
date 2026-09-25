@@ -9,3 +9,6 @@ export {
 export {
   queryLayer, evaluateLayer, keptRows, pick, type QueriedLayer, type LayerData,
 } from './execute.js';
+export {
+  ProgramRuntime, type LayerState, type RuntimeCounters, type UpdateReport, type RuntimeOptions, type Preview,
+} from './runtime.js';
