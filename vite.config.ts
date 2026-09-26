@@ -1,4 +1,5 @@
 import { defineConfig } from 'vite';
+import react from '@vitejs/plugin-react';
 import { resolve } from 'node:path';
 
 /**
@@ -28,6 +29,8 @@ const base = process.env.VITE_BASE ?? '/';
 export default defineConfig({
   root: 'demo',
   base,
+  // React only for the node editor (demo/editor); the inspector stays framework-free.
+  plugins: [react()],
   resolve: { alias: plannerAliases },
   server: {
     // duckdb-wasm's threaded bundle wants SharedArrayBuffer. We select the mvp/eh bundle
@@ -42,5 +45,12 @@ export default defineConfig({
     exclude: ['@duckdb/duckdb-wasm'],
   },
   worker: { format: 'es' },
-  build: { outDir: '../dist-demo', emptyOutDir: true },
+  build: {
+    outDir: '../dist-demo',
+    emptyOutDir: true,
+    // Two pages: the planner inspector, and the node editor.
+    rollupOptions: {
+      input: { inspector: resolve('demo/index.html'), editor: resolve('demo/editor/index.html') },
+    },
+  },
 });

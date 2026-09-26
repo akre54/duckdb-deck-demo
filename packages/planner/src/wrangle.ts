@@ -171,6 +171,7 @@ export function renameColumns(e: Expr, rename: (name: string) => string): Expr {
       return next === e.name ? e : { kind: 'col', name: next };
     }
     case 'num':
+    case 'str':
     case 'param':
       return e;
     case 'unary':

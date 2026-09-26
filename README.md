@@ -5,8 +5,9 @@ scales and color scales compile to DuckDB SQL and WGSL compute, and a cost model
 which engine runs each node. Houdini-style named attributes (`P`, `Cd`, `pscale`).
 
 **Live demo:** <https://akre54.github.io/duckdb-deck-demo/>. This is the inspector app with
-the three example graphs described below. It is published from `main` by
-`.github/workflows/pages.yml`.
+the three example graphs described below. The node editor is at
+[`/editor/`](https://akre54.github.io/duckdb-deck-demo/editor/). Both are published from
+`main` by `.github/workflows/pages.yml`.
 
 ## How this fits with deck.gl and luma.gl
 
@@ -24,8 +25,8 @@ suggested next changes and open research.
 
 ```bash
 npm install
-npm run dev        # the inspector demo
-npm test           # 612 node tests
+npm run dev        # the inspector at /, the node editor at /editor/
+npm test           # 680 node tests, including real DuckDB through duckdb-wasm's Node build
 npm run test:gpu   # 66 browser tests, real WebGPU + real DuckDB
 ```
 
@@ -145,6 +146,40 @@ packages/planner/src/analyze.ts    topological order, feasible engines, widths, 
 packages/planner/src/optimizer.ts  price every legal plan, pick the cheapest
 packages/planner/src/planner.ts    emit SQL, WGSL and the CPU loop for the chosen plan
 ```
+
+### Programs: many sources, joins, many layers
+
+`plan()` compiles one pipeline: one source, row-wise nodes, one output. A node editor
+produces more than that: several files, joins between them, and one relation forking into
+three layers. `compileProgram` (`packages/planner/src/program.ts`) cuts such a graph into
+pieces `plan()` can take:
+
+- **Relations.** Every relational node becomes one SELECT (`relational.ts`). These are
+  `source`, `join`, `union`, `sort`, `limit`, `sql`, `generate` and `unnest`. So does any
+  row-wise node a relational node reads: a filter ahead of a join has to run in SQL.
+- **Layers.** Each `layer` node, together with the row-wise nodes between it and its
+  nearest relation, becomes a sub-graph for the unchanged `plan()`. So every layer still gets
+  its own cost-based SQL/CPU/GPU placement, and its own ramp and aggregate.
+
+A relation is also the unit of memoization. Its hash covers its structure with ids removed,
+its inputs' hashes, and the values of the parameters it inlines. Its table is
+`__m_<hash>`, so:
+
+- an unchanged relation is never recomputed;
+- dragging a slider back to a value already seen reuses a table that still exists;
+- renaming a node or collapsing it into a subnet recomputes nothing.
+
+Every parameter gets **routes**, reported per target:
+
+| route | what a change costs |
+|---|---|
+| `prop` | nothing: deck applies it as a uniform (`currentTime`, the camera, opacity) |
+| `uniform` / `cpu` | one layer's fused kernel or generated JS loop |
+| `requery` | one layer's prepared statement, rebound |
+| `rematerialize` | the relation that inlines it, then its readers |
+
+`ProgramRuntime` (`src/program/`) executes this against DuckDB and does exactly that much
+work per change. Prop changes apply synchronously, so an animation never waits on a query.
 
 ## The planner
 
@@ -306,17 +341,62 @@ The inspector exists so every claim the architecture makes can be checked on scr
 5. Compare `policy` values `auto`, `sql-first` and `gpu-first` against `cost` to measure the
    old rule-based placement against the cost model.
 
+## The node editor
+
+`npm run dev`, then open `/editor/`. It is a Noodles.gl-style network editor
+(React Flow) whose operators compile, through the planner, to DuckDB SQL and generated JS,
+and are drawn by deck.gl over MapLibre.
+
+- **Operators** come from a headless library (`packages/planner/src/operators.ts`). Each one
+  declares typed ports (table, layer, number), a parameter schema, and how each parameter
+  binds: `value`, `prop` or `structural`. Layer channels are expressions, and a bare column
+  name is a valid one. So `sqrt(mag) * 2` needs no extra node.
+- **The parameter pane** follows Houdini:
+  - it shows the selected node's parameters only, in folders;
+  - column menus are filled from what the compiled program says reaches the node's input;
+  - each parameter carries a route badge read from the plan;
+  - right-click a label for expressions (`T`, `F`, `ch('../ctl/value')`), copy parameter /
+    paste relative reference, keyframes, and promotion to the enclosing subnet;
+  - drag a label sideways to scrub the value.
+- **Structure**:
+  - <kbd>Tab</kbd> adds a node;
+  - right-click a wire to insert a node on it;
+  - bypass and display flags (<kbd>B</kbd>, <kbd>D</kbd>);
+  - <kbd>⇧C</kbd> collapses a selection into a subnet; double-click to enter it.
+    References are rewritten when nodes move or are renamed.
+- **Spreadsheet** (Houdini's geometry spreadsheet) reads the selected node's rows from its
+  memoized relation. **Plan** shows every relation, each layer's placement, and all routes.
+- **Timeline**: a dope sheet and a curve editor with bezier handles. The interpolation and
+  easing presets are ported from Noodles.gl's native timeline (Apache-2.0). A keyframed
+  parameter is declared to the planner at the timeline's frame rate, so animating a filter
+  threshold and animating the camera are priced differently.
+
+Four example projects rebuild the shapes of common Noodles and Joby projects on public data:
+
+| example | shape | data |
+|---|---|---|
+| USGS earthquakes | Noodles' *california-earthquakes*: filter, scale, color ramp, scatter | USGS live feed |
+| Airport route network | sites filtered to a country, routes joined twice, deduplicated, measured, arcs + markers + labels | OpenFlights |
+| Taxi trips + demand grid | one trips file unnested and forked: animated TripsLayer, and a SQL grid aggregate as columns | deck.gl example data |
+| Airport arrivals replay | flights cross-joined with a chosen airport, filtered to arrivals, expanded with Generate into 3D approach trails | OpenSky via deck.gl data, OpenFlights |
+
+Documents are JSON (`demo/editor/examples/*.json`); Save and Open round-trip them.
+
 ## Repository layout
 
 ```
 packages/planner/   @noodles.gl/planner: expression IR and backends, analyze/optimize/emit,
                     statistics, cost model, target capabilities, attribute conventions,
-                    source providers, wrangle parser, Arrow upload, CPU stage, fixtures
+                    source providers, wrangle parser, Arrow upload, CPU stage, fixtures;
+                    programs (relational lowering, compileProgram, hashing), layers,
+                    the operator library, editor documents, lowering, keyframes
 src/webgpu/         device, attributes, kernels, camera, calibration, passes, runtime
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
-src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes
+src/program/        ProgramRuntime, the memo catalog, per-layer query and CPU stage
+src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, and the program pane
 docs/               how the planner integrates with deck.gl and luma.gl
 demo/               the inspector app: main.ts, ui/, graphs/, data/ (not published)
+demo/editor/        the node editor: React Flow network, parameter pane, timeline, examples
 tests/              boundary guard, budgets, benchmarks, browser/
 ```
 
@@ -332,7 +412,7 @@ fails to compile instead of becoming a dependency a consumer has to install.
 ## Tests
 
 ```bash
-npm test          # 612 tests, node, about 0.6s
+npm test          # 680 tests, node
 npm run test:gpu  # 66 tests, Chromium, real WebGPU + real DuckDB
 npm run bench     # throughput, reported not asserted
 ```
@@ -391,11 +471,14 @@ catch an order-of-magnitude regression rather than a 20% one.
 
 ## Known limits
 
-- One aggregate and one color ramp per graph.
+- One aggregate and one color ramp per `plan()`. A program lifts this to one per layer.
 - A `raw` node's declared reads and writes are trusted, not checked against its code.
 - Raw SQL produces scalars only.
 - User functions cannot recurse and are inlined, so they name work rather than saving it.
-- No relational joins, strings, picking, transitions, or line and polygon marks.
+- Joins, unions and other relational nodes exist only in programs (`compileProgram`), and
+  are SQL-only. Strings are SQL-only too: a string literal or column pins its reader to SQL.
+- No picking, transitions or polygon marks. The program pane draws scatter, arc, path, trips,
+  column and text layers.
 - The optimizer is exact only for plans whose stage boundaries follow topological order.
   For a linear chain that is every legal plan. For a branching DAG it is not.
 - Cardinality estimation assumes uniformity and independence. The sub-1% accuracy on the

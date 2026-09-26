@@ -1,0 +1,14 @@
+/**
+ * The program runtime: executes a `compileProgram` plan against DuckDB and hands each layer's
+ * attributes to deck.gl. GPU-free — the target is deck's WebGL2 path — so it needs a SQL
+ * engine and nothing else.
+ */
+export {
+  MaterializingCatalog, type CatalogCounters, type CatalogOptions,
+} from './catalog.js';
+export {
+  queryLayer, evaluateLayer, keptRows, pick, type QueriedLayer, type LayerData,
+} from './execute.js';
+export {
+  ProgramRuntime, type LayerState, type RuntimeCounters, type UpdateReport, type RuntimeOptions, type Preview,
+} from './runtime.js';

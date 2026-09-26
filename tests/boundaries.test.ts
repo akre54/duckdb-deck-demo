@@ -263,6 +263,7 @@ describe('entry points', () => {
     for (const [files, dir, barrel] of [
       [PLANNER_LIB, `${PLANNER}/src`, `${PLANNER}/src/index.ts`],
       [LIB_FILES, 'src/webgpu', 'src/webgpu/index.ts'],
+      [LIB_FILES, 'src/program', 'src/program/index.ts'],
     ] as const) {
       const barrelSource = readFileSync(join(ROOT, barrel), 'utf8');
       const modules = files.filter(

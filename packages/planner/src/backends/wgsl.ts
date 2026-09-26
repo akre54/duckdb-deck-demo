@@ -76,6 +76,9 @@ function emit(e: Expr, ctx: Ctx): Val {
     case 'num':
       return { code: formatNumber(e.value), width: 1, isBool: false };
 
+    case 'str':
+      throw new Error(`String literal '${e.value}' has no WGSL form; strings are SQL-only`);
+
     case 'col': {
       ctx.columns.add(e.name);
       const r = ctx.resolve(e.name);

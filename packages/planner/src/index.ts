@@ -17,7 +17,7 @@ export {
 
 // --- backends --------------------------------------------------------------
 export {
-  toSql, toSqlColumns, quoteIdent, castToFloat, SqlParams, type SqlEmit,
+  toSql, toSqlColumns, quoteIdent, castToFloat, castToDouble, SqlParams, type SqlEmit,
 } from './backends/sql.js';
 export {
   toWgsl, wgslType, wgslParamMember, type Resolver, type WgslEmit,
@@ -43,17 +43,58 @@ export {
   type Graph, type GraphNode, type CoreNode, type ParamSpec, type RampName,
   type SourceNode, type FilterNode, type AggregateNode, type StatsNode, type StatOp,
   type AttributeNode, type ScaleNode, type ColorScaleNode, type ProjectNode,
-  type WrangleNode, type Bin2dNode, type RenderNode, type RawNode,
+  type WrangleNode, type Bin2dNode, type RenderNode, type RawNode, type LayerNode,
+  type FileSource, type JoinNode, type UnionNode, type SortNode, type LimitNode, type SqlNode,
+  type GenerateNode, type UnnestNode, type DeckNode, type RelationalNode, RELATIONAL_TYPES,
 } from './types.js';
+export {
+  LAYER_KINDS, LAYER_SPECS, propParam, propParams, resolveProps, type ResolvedProp,
+  type LayerKind, type LayerKindSpec, type ChannelSpec, type ChannelType, type LayerPropValue,
+} from './layers.js';
 export {
   parseWrangle, expandWrangle, localName, renameColumns, WrangleError,
   type WrangleStatement,
 } from './wrangle.js';
 
+// --- programs: many sources, relational nodes, many layers -----------------
+export { canonicalJson, hashOf } from './hash.js';
+export {
+  columnTypeOf, sqlLiteral, inlineParamsInText, exprError,
+  sourceSql, joinSql, unionSql, sortSql, limitSql, sqlNodeSql, generateSql, unnestSql, rowwiseSql,
+  type RelColumn, type RelVector, type RelShape,
+} from './relational.js';
+export {
+  compileProgram, inputsOf, resolveView,
+  type ProgramPlan, type RelationPlan, type LayerPlan, type NodeInfo, type Route,
+  type ParamRouteEntry, type Catalog, type CatalogEntry, type CompileOptions,
+} from './program.js';
+
+// --- editor documents, operators, parameters over time -------------------
+export {
+  cubicBezier, findTForX, bezierEasing, evaluateTrack, setKeyframe, keyframeAt, presetName,
+  EASING_PRESETS, LINEAR_HANDLES,
+  type Keyframe, type KeyframeValue, type Track, type Timeline, type BezierHandles, type InterpolationType,
+} from './keyframes.js';
+export {
+  flattenSubnets, applyBypass, resolveRef, networkPath, nodePath, nameOf, isExpr, isRef,
+  DocumentError, SUBNET, SUBNET_INPUT, SUBNET_OUTPUT,
+  type EditorDoc, type DocNode, type DocEdge, type ParamValue, type PromotedParam,
+} from './doc.js';
+export {
+  OPERATORS, OPERATOR_INDEX, operator, bindingOf, canConnect, paramPort, safeId,
+  type OpDef, type ParamDef, type ParamKind, type PortSpec, type PortType, type Category,
+  type LowerCtx, type LowerResult, type ScalarParams,
+} from './operators.js';
+export {
+  lowerDocument, parameterValues, slotKey, ScalarProgram,
+  type Lowered, type LoweredParam, type LowerOptions, type SlotValue, type Clock,
+} from './lower.js';
+
 // --- planning --------------------------------------------------------------
 export {
-  analyze, opCount, PlanError,
+  analyze, opCount, PlanError, externalAttributes,
   type Analysis, type AnalyzedNode, type Schema, type Stage, type RenderChannels,
+  type LayerAnalysis, type LayerBinding, type ColumnType, type ColumnTypes,
 } from './analyze.js';
 export {
   optimize, stageOf,
@@ -92,7 +133,7 @@ export {
 
 // --- Arrow -> f32 and the CPU stage ---------------------------------------
 export {
-  readColumn, readVectorColumns, type Tier, type ColumnUpload,
+  readColumn, readVectorColumns, readStrings, readValues, runStarts, type Tier, type ColumnUpload,
 } from './arrow.js';
 export {
   evaluateStage, materialize, toUint8Color, type CpuAttributes,

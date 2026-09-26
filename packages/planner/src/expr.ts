@@ -17,7 +17,7 @@
  *   mul     := unary (('*'|'/'|'%') unary)*
  *   unary   := ('-'|'!') unary | postfix
  *   postfix := primary ('.' swizzle)*
- *   primary := number | ident | '{{' param '}}' | ident '(' args ')'
+ *   primary := number | string | ident | '{{' param '}}' | ident '(' args ')'
  *            | '[' expr (',' expr)* ']' | '(' expr ')'
  */
 
@@ -27,6 +27,13 @@
 
 export type Expr =
   | { kind: 'num'; value: number }
+  /**
+   * A string literal, `'JFK'`. SQL-only: neither WGSL nor the generated JS loop has a string
+   * value, so a tree containing one is feasible in SQL and nowhere else. That is enough for
+   * what strings are for here — comparing a code, a name or a category in a filter — and it
+   * keeps the GPU and CPU stages numeric by construction.
+   */
+  | { kind: 'str'; value: string }
   | { kind: 'col'; name: string }
   | { kind: 'param'; name: string }
   | { kind: 'unary'; op: UnaryOp; operand: Expr }
@@ -146,6 +153,7 @@ const SQL_BINARY: Partial<Record<BinaryOp, string>> = {
 
 type Token =
   | { t: 'num'; v: number }
+  | { t: 'str'; v: string }
   | { t: 'ident'; v: string }
   | { t: 'param'; v: string }
   | { t: 'op'; v: string }
@@ -166,6 +174,23 @@ function tokenize(src: string): Token[] {
       const m = /^[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?/.exec(src.slice(i))!;
       out.push({ t: 'num', v: Number(m[0]) });
       i += m[0].length;
+      continue;
+    }
+
+    // SQL's quoting: single quotes, a doubled quote escapes one.
+    if (ch === "'") {
+      let j = i + 1;
+      let value = '';
+      for (;;) {
+        if (j >= src.length) throw new ExprError(`Unterminated string at ${i} in ${JSON.stringify(src)}`);
+        if (src[j] === "'") {
+          if (src[j + 1] === "'") { value += "'"; j += 2; continue; }
+          break;
+        }
+        value += src[j++];
+      }
+      out.push({ t: 'str', v: value });
+      i = j + 1;
       continue;
     }
 
@@ -276,6 +301,7 @@ export function parseExpr(src: string, scope?: ParseScope): Expr {
     const t = peek();
 
     if (t.t === 'num') { pos++; return { kind: 'num', value: t.v }; }
+    if (t.t === 'str') { pos++; return { kind: 'str', value: t.v }; }
 
     if (t.t === 'op' && t.v === '{{') {
       pos++;
@@ -392,7 +418,15 @@ export function enginesFor(e: Expr): Set<Engine> {
     // scalars. A vec-valued expression has to be split into per-component columns,
     // which the SQL backend does at the top level only (see backends/sql.ts).
     if (n.kind === 'swizzle') engines.delete('sql');
+    if (n.kind === 'str') engines.delete('gpu');
   });
+  // SQL splits a vector into per-component columns at the top level only (`toSqlColumns`),
+  // so a vector anywhere below it — `test ? [1, 0, 0] : [0, 0, 1]` — has no SQL form. Missed
+  // here, the optimizer placed such a node in SQL and emission failed.
+  const inner = e.kind === 'vec' ? e.components : [e];
+  if (inner.some((c) => { let found = false; walk(c, (n) => { if (n.kind === 'vec') found = true; }); return found; })) {
+    engines.delete('sql');
+  }
   return engines;
 }
 
@@ -415,6 +449,7 @@ const SWIZZLE_OK = /^[xyzw]+$|^[rgba]+$/;
 export function widthOf(e: Expr, env: WidthEnv): number {
   switch (e.kind) {
     case 'num':
+    case 'str':
     case 'param':
       return 1;
     case 'col':

@@ -14,8 +14,9 @@ import {
 } from './expr.js';
 import {
   type Graph, type CoreNode, type RenderNode, type Bin2dNode, type StatsNode,
-  type SourceNode, type RawNode, type ParamSpec, type RampName, desugar,
+  type SourceNode, type RawNode, type ParamSpec, type RampName, type LayerNode, desugar,
 } from './types.js';
+import { LAYER_SPECS, propParams, type LayerKind, type ChannelType, type LayerPropValue } from './layers.js';
 import { type AttributeConventions, attributeConventions, isInternal } from './conventions.js';
 import { type FunctionRegistry, inlineFunctions } from './functions.js';
 
@@ -25,6 +26,14 @@ export class PlanError extends Error {}
 
 /** Column or attribute name -> component count. */
 export type Schema = Map<string, number>;
+
+/**
+ * What a relation column holds, beyond its width. `Schema` stays numeric-width-only so every
+ * existing caller keeps working; a caller with string columns passes these alongside it.
+ * `other` covers lists, structs and timestamps: selectable into a relation, never into a buffer.
+ */
+export type ColumnType = 'num' | 'str' | 'other';
+export type ColumnTypes = ReadonlyMap<string, ColumnType>;
 
 export interface AnalyzedNode {
   id: string;
@@ -69,9 +78,43 @@ export interface RenderChannels {
   background?: [number, number, number];
 }
 
+/** One resolved layer channel: which attribute feeds it, and what kind of value it is. */
+export interface LayerBinding {
+  channel: string;
+  attribute: string;
+  type: ChannelType;
+  required: boolean;
+}
+
+/**
+ * A layer output with every channel resolved. Published once by `analyze`, like `channels`,
+ * so emit, the optimizer and the deck adapters agree on what the layer reads.
+ */
+export interface LayerAnalysis {
+  id: string;
+  kind: LayerKind;
+  bindings: LayerBinding[];
+  pathId?: string;
+  orderBy: string[];
+  props: Record<string, LayerPropValue>;
+  /** Parameters read by props. They route as `prop`: deck applies them, the plan never sees them. */
+  propParams: string[];
+}
+
 export interface Analysis {
   source: SourceNode;
+  /**
+   * The output node. For a layer output this is a points-mode render synthesized from it, so
+   * every consumer of `render` keeps working; the layer itself is in `layer`.
+   */
   render: RenderNode;
+  /** Present when the output is a `layer` node. */
+  layer?: LayerAnalysis;
+  /**
+   * String-valued columns and attributes. Anything that reads one is SQL-only, and emit
+   * selects them uncast.
+   */
+  strings: Set<string>;
   /** `render`'s channels, with the attribute conventions applied. */
   channels: RenderChannels;
   /** The naming vocabulary this analysis was produced under. */
@@ -142,6 +185,7 @@ export function analyze(
   graph: Graph,
   sourceSchema: Schema,
   conventionOverrides?: Partial<AttributeConventions>,
+  columnTypes?: ColumnTypes,
 ): Analysis {
   const conventions = attributeConventions(conventionOverrides);
   const { nodes, notes: sugarNotes, ramp, functions } = desugar(graph, conventions);
@@ -151,9 +195,13 @@ export function analyze(
   const source = nodes.find((n): n is SourceNode => n.type === 'source');
   if (!source) throw new PlanError('Graph has no source node');
 
-  const render = (graph.output ? byId.get(graph.output) : [...nodes].reverse().find((n) => n.type === 'render')) as
-    | RenderNode | undefined;
-  if (!render || render.type !== 'render') throw new PlanError('Graph has no render node');
+  const output = (graph.output ? byId.get(graph.output) : [...nodes].reverse().find((n) => n.type === 'render')) as
+    | RenderNode | LayerNode | undefined;
+  if (!output || (output.type !== 'render' && output.type !== 'layer')) {
+    throw new PlanError('Graph has no render node');
+  }
+  const layerNode = output.type === 'layer' ? output : undefined;
+  const render: RenderNode = output.type === 'render' ? output : layerAsRender(output, conventions);
 
   const channels: RenderChannels = {
     mode: render.mode,
@@ -167,7 +215,21 @@ export function analyze(
   // --- topological order over the ancestry of the render node --------------
   const ordered = topoSort(nodes, byId, render, notes);
 
+  // String columns join the namespace as width-1 names so references resolve; `strings`
+  // is what keeps them out of every stage but SQL.
+  const strings = new Set<string>();
+  const fullSource: Schema = new Map(sourceSchema);
+  for (const [name, type] of columnTypes ?? []) {
+    if (type !== 'str') continue;
+    strings.add(name);
+    if (!fullSource.has(name)) fullSource.set(name, 1);
+  }
+  sourceSchema = fullSource;
   const schema: Schema = new Map(sourceSchema);
+  /** Restrict to SQL if the tree reads a string, and say why. */
+  const readsString = (e: Expr) => columnsOf(e).some((c) => strings.has(c));
+  const withStrings = (e: Expr, feasible: Set<Stage>): Set<Stage> =>
+    readsString(e) ? new Set([...feasible].filter((s) => s === 'sql')) : feasible;
   const order: AnalyzedNode[] = [];
   const statsNodes: StatsNode[] = [];
   let groupBy: string[] = [];
@@ -205,6 +267,7 @@ export function analyze(
     switch (node.type) {
       case 'source':
       case 'render':
+      case 'layer':
         break;
 
       case 'stats':
@@ -214,7 +277,7 @@ export function analyze(
       case 'filter': {
         const expr = parseOrThrow(node.predicate, node.id);
         requireColumns(expr, node.id);
-        const feasible = feasibleStages(expr);
+        const feasible = withStrings(expr, feasibleStages(expr));
         if (feasible.size === 0) {
           throw new PlanError(`Node ${node.id}: predicate is neither SQL- nor GPU-expressible`);
         }
@@ -269,7 +332,12 @@ export function analyze(
           throw new PlanError(`Node ${node.id}: attribute expressions cannot aggregate; use an 'aggregate' node`);
         }
         const width = widthOf(expr, (n) => schema.get(n) ?? 1);
-        const feasible = feasibleStages(expr);
+        const feasible = withStrings(expr, feasibleStages(expr));
+        if (feasible.size === 0) {
+          throw new PlanError(`Node ${node.id}: expression mixes strings with functions only the GPU has`);
+        }
+        if (isStringValued(expr, strings)) strings.add(node.name);
+        else strings.delete(node.name);
         order.push({
           id: node.id, node, kind: 'attribute', name: node.name, expr, width,
           ops: opCount(expr, width), feasible,
@@ -329,11 +397,16 @@ export function analyze(
     if (!sourceSchema.has(s.column) && !schema.has(s.column)) {
       throw new PlanError(`Stats node ${s.id}: unknown column '${s.column}'`);
     }
+    if (strings.has(s.column)) throw new PlanError(`Stats node ${s.id}: '${s.column}' is a string column`);
   }
+
+  const layer = layerNode ? resolveLayer(layerNode, conventions, schema) : undefined;
 
   return {
     source,
     render,
+    layer,
+    strings,
     channels,
     conventions,
     functions,
@@ -351,6 +424,95 @@ export function analyze(
 }
 
 // ---------------------------------------------------------------------------
+// Layers
+// ---------------------------------------------------------------------------
+
+/**
+ * The points-mode render a layer stands in for. `position` is the layer's primary position so
+ * the existing position checks and the optimizer's external-name rule keep their meaning.
+ */
+function layerAsRender(layer: LayerNode, conv: AttributeConventions): RenderNode {
+  const ch = layer.channels ?? {};
+  return {
+    id: layer.id,
+    type: 'render',
+    input: layer.input,
+    inputs: layer.inputs,
+    mode: 'points',
+    position: ch.position ?? ch.sourcePosition ?? conv.position,
+    color: ch.color ?? ch.sourceColor ?? conv.color,
+    size: ch.radius ?? ch.size ?? ch.width ?? conv.size,
+    opacity: conv.opacity,
+  };
+}
+
+function resolveLayer(layer: LayerNode, conv: AttributeConventions, widths: Schema): LayerAnalysis {
+  const spec = LAYER_SPECS[layer.kind];
+  if (!spec) throw new PlanError(`Layer ${layer.id}: unknown kind '${layer.kind}'`);
+  const given = layer.channels ?? {};
+  for (const name of Object.keys(given)) {
+    if (!spec.channels.some((c) => c.name === name)) {
+      throw new PlanError(
+        `Layer ${layer.id}: '${layer.kind}' has no channel '${name}'. ` +
+        `Channels: ${spec.channels.map((c) => c.name).join(', ')}`,
+      );
+    }
+  }
+  const bindings: LayerBinding[] = [];
+  for (const c of spec.channels) {
+    const explicit = given[c.name];
+    // A fallback binds only when the attribute exists; an explicit binding must exist, and
+    // that is checked in emit, where string and source columns are known too.
+    const attribute = explicit ?? (c.fallback && widths.has(conv[c.fallback]) ? conv[c.fallback] : undefined);
+    if (attribute === undefined) {
+      if (c.required) throw new PlanError(`Layer ${layer.id}: '${layer.kind}' needs a '${c.name}' channel`);
+      continue;
+    }
+    bindings.push({ channel: c.name, attribute, type: c.type, required: !!c.required });
+  }
+  if (spec.vertices && !layer.pathId) {
+    throw new PlanError(`Layer ${layer.id}: '${layer.kind}' draws paths, so it needs 'pathId'`);
+  }
+  const props = { ...(layer.props ?? {}) };
+  const readParams = [...new Set(Object.values(props).flatMap(propParams))];
+  return {
+    id: layer.id,
+    kind: layer.kind,
+    bindings,
+    pathId: layer.pathId,
+    // Vertex order within a path is the whole point of a path, so the id always leads.
+    orderBy: spec.vertices
+      ? [layer.pathId!, ...(layer.orderBy ?? []).filter((c) => c !== layer.pathId)]
+      : [...(layer.orderBy ?? [])],
+    props,
+    propParams: readParams,
+  };
+}
+
+/**
+ * Attributes something outside the graph reads: the render channels, every layer binding, the
+ * discard mask and the bin2d weight.
+ *
+ * One rule, used by the optimizer to count kernel bindings, by emit to decide which kernel
+ * outputs need buffers, and by emit again for projection pushdown. It used to be written out
+ * in two places, and the copies disagreed about the bin2d weight — one added the expression
+ * text, the other its columns.
+ */
+export function externalAttributes(analysis: Analysis): Set<string> {
+  const { position, color, size, opacity } = analysis.channels;
+  const out = new Set<string>([position, color, size, opacity, analysis.conventions.mask]);
+  if (analysis.bin2d?.weight) {
+    for (const c of columnsOf(parseExpr(analysis.bin2d.weight))) out.add(c);
+  }
+  if (analysis.layer) {
+    for (const b of analysis.layer.bindings) out.add(b.attribute);
+    if (analysis.layer.pathId) out.add(analysis.layer.pathId);
+    for (const c of analysis.layer.orderBy) out.add(c);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 
 /**
  * Kahn's algorithm over the render node's ancestry.
@@ -363,7 +525,7 @@ export function analyze(
 function topoSort(
   nodes: CoreNode[],
   byId: Map<string, CoreNode>,
-  render: RenderNode,
+  render: { id: string },
   notes: string[],
 ): CoreNode[] {
   const declarationIndex = new Map(nodes.map((n, i) => [n.id, i]));
@@ -423,6 +585,16 @@ function topoSort(
 
   if (out.length !== live.length) throw new PlanError('Cycle in graph: topological sort did not consume every node');
   return out;
+}
+
+/** True when the expression's value is a string: a literal, a string column, or a branch of them. */
+function isStringValued(e: Expr, strings: ReadonlySet<string>): boolean {
+  switch (e.kind) {
+    case 'str': return true;
+    case 'col': return strings.has(e.name);
+    case 'cond': return isStringValued(e.then, strings) || isStringValued(e.else, strings);
+    default: return false;
+  }
 }
 
 function paramsOfExpr(e: Expr): string[] {

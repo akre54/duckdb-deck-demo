@@ -256,7 +256,8 @@ export class Runtime {
     // the 0.33 default and the cardinality estimate is meaningless.
     const seeded: Record<string, number> = { ...this.paramValues };
     for (const [name, spec] of Object.entries(graph.params ?? {})) {
-      if (seeded[name] === undefined) seeded[name] = spec.value;
+      // This runtime binds numbers only; a string parameter belongs to the program runtime.
+      if (seeded[name] === undefined && typeof spec.value === 'number') seeded[name] = spec.value;
     }
     this.paramValues = seeded;
 

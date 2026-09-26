@@ -47,6 +47,13 @@ export function readColumn(table: Table, name: string): ColumnUpload {
     );
   }
   const arrowType = String(vector.type);
+  // A string column's `values` is its UTF-8 byte buffer, so the cast loop below would read
+  // bytes as numbers and upload plausible-looking garbage with no error at all.
+  if (NON_NUMERIC.test(arrowType)) {
+    throw new Error(
+      `Column '${name}' is ${arrowType}, which has no f32 form. Read it with readStrings or readValues.`,
+    );
+  }
   const chunkCount = vector.data.length;
   const rows = table.numRows;
 
@@ -167,6 +174,54 @@ export function readVectorColumns(table: Table, names: string[]): ColumnUpload {
     arrowType: `interleaved(${parts.map((p) => p.arrowType).join(', ')})`,
     rows,
   };
+}
+
+const NON_NUMERIC = /Utf8|Binary|List|Struct|Map|Union/i;
+
+/** A string column as JS strings, nulls as ''. For text channels and labels. */
+export function readStrings(table: Table, name: string): string[] {
+  const vector = table.getChild(name) as Vector | null;
+  if (!vector) throw new Error(`Column '${name}' not present in query result`);
+  const out = new Array<string>(vector.length);
+  let i = 0;
+  // Iterating the vector walks every record batch; there are many (see the file header).
+  for (const v of vector) out[i++] = v == null ? '' : String(v);
+  return out;
+}
+
+/**
+ * A column's values in their native JS type — number, bigint or string — without narrowing.
+ * What a path id is read with, because an f32 id merges distinct paths above 2^24.
+ */
+export function readValues(table: Table, name: string): unknown[] {
+  const vector = table.getChild(name) as Vector | null;
+  if (!vector) throw new Error(`Column '${name}' not present in query result`);
+  const out = new Array<unknown>(vector.length);
+  let i = 0;
+  for (const v of vector) out[i++] = v;
+  return out;
+}
+
+/**
+ * Start index of every run of equal ids: deck's `startIndices` for path and trips layers.
+ *
+ * `keep` restricts to the rows that survived a discard mask, in which case indices are into
+ * the kept rows, so a dropped vertex re-segments its path rather than leaving a hole in the
+ * numbering. Rows must already be ordered by id — the planner emits `ORDER BY pathId` for
+ * vertex layers — or one path will come back as several.
+ */
+export function runStarts(ids: ArrayLike<unknown>, keep?: ArrayLike<number>): Uint32Array {
+  const n = keep ? keep.length : ids.length;
+  const starts: number[] = [];
+  let prev: unknown = Symbol('none');
+  for (let j = 0; j < n; j++) {
+    const id = ids[keep ? keep[j] : j];
+    if (id !== prev) {
+      starts.push(j);
+      prev = id;
+    }
+  }
+  return Uint32Array.from(starts);
 }
 
 function bitSet(bitmap: Uint8Array, index: number): boolean {
