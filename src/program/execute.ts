@@ -28,6 +28,8 @@ export interface LayerData {
   rows: number;
   attributes: Map<string, { data: Float32Array; width: number }>;
   strings: Map<string, string[]>;
+  /** Raw uint32/int columns like __rowid, preserved through compaction. */
+  raw?: Map<string, unknown[]>;
   /** Path starts, for vertex layers. */
   starts?: Uint32Array;
   evalMs: number;
@@ -102,12 +104,19 @@ export function evaluateLayer(
   const strings = new Map<string, string[]>();
   for (const [name, s] of queried.strings) strings.set(name, keep ? Array.from(keep, (i) => s[i]) : s);
 
+  // Compact raw arrays (rowid, pathId) using same pattern as strings
+  const raw = new Map<string, unknown[]>();
+  for (const [name, r] of queried.raw) {
+    raw.set(name, keep ? Array.from(keep, (i) => r[i]) : r);
+  }
+
   const pathId = plan.layer?.pathId;
   const ids = pathId ? queried.raw.get(pathId) : undefined;
   return {
     rows: keep ? keep.length : queried.rows,
     attributes,
     strings,
+    raw,
     starts: ids ? runStarts(ids, keep) : undefined,
     evalMs: evaluated.evalMs,
     code: evaluated.code,
