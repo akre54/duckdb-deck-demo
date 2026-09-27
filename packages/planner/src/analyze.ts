@@ -132,6 +132,8 @@ export interface Analysis {
   groupBy: string[];
   aggregateNames: string[];
   ramp?: RampName;
+  /** Column preserving source row identity, if requested via `preserveRowId`. */
+  rowIdColumn?: string;
   params: Record<string, ParamSpec>;
   notes: string[];
 }
@@ -226,6 +228,32 @@ export function analyze(
   }
   sourceSchema = fullSource;
   const schema: Schema = new Map(sourceSchema);
+
+  // Validate and register row ID column if requested
+  let rowIdColumn: string | undefined;
+  if (source.preserveRowId) {
+    if (typeof source.preserveRowId === 'string') {
+      rowIdColumn = source.preserveRowId;
+      if (!sourceSchema.has(rowIdColumn)) {
+        throw new PlanError(
+          `Source ${source.id}: preserveRowId='${rowIdColumn}' not found in schema. ` +
+          `Available: ${[...sourceSchema.keys()].join(', ')}`
+        );
+      }
+      if (strings.has(rowIdColumn)) {
+        throw new PlanError(
+          `Source ${source.id}: preserveRowId='${rowIdColumn}' is a string column. ` +
+          `Row ID must be numeric.`
+        );
+      }
+    } else {
+      // Use DuckDB's built-in ROWID
+      rowIdColumn = '__rowid';
+      sourceSchema.set(rowIdColumn, 1);
+      schema.set(rowIdColumn, 1);
+    }
+  }
+
   /** Restrict to SQL if the tree reads a string, and say why. */
   const readsString = (e: Expr) => columnsOf(e).some((c) => strings.has(c));
   const withStrings = (e: Expr, feasible: Set<Stage>): Set<Stage> =>
@@ -418,6 +446,7 @@ export function analyze(
     groupBy,
     aggregateNames,
     ramp,
+    rowIdColumn,
     params: { ...(graph.params ?? {}) },
     notes,
   };
@@ -508,6 +537,10 @@ export function externalAttributes(analysis: Analysis): Set<string> {
     for (const b of analysis.layer.bindings) out.add(b.attribute);
     if (analysis.layer.pathId) out.add(analysis.layer.pathId);
     for (const c of analysis.layer.orderBy) out.add(c);
+  }
+  // Row ID column must survive all transformations
+  if (analysis.rowIdColumn) {
+    out.add(analysis.rowIdColumn);
   }
   return out;
 }

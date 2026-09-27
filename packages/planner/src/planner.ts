@@ -535,6 +535,7 @@ function emit(
   const typed = (name: string): { name: string; type?: 'str' | 'raw' } =>
     analysis.strings.has(name) ? { name, type: 'str' }
     : name === pathId ? { name, type: 'raw' }
+    : name === analysis.rowIdColumn ? { name, type: 'raw' }
     : { name };
   // One numbering for the whole row query: SELECT list and WHERE clause together.
   const rowBind = new SqlParams();
@@ -605,7 +606,12 @@ function emit(
   } else {
     // Projection pushdown: only source columns something downstream reads.
     const passthrough = [...needed].filter((c) => analysis.sourceSchema.has(c)).sort();
+    // Select ROWID if requested and not already in passthrough
+    const rowidExpr = analysis.rowIdColumn === '__rowid'
+      ? 'CAST(ROWID AS INTEGER) AS "__rowid"'
+      : undefined;
     const items = [
+      ...(rowidExpr ? [rowidExpr] : []),
       // Cast in SQL: everything reaching a GPU buffer is f32, so narrowing here uses DuckDB's
       // vectorised executor instead of a JS loop, and sidesteps DECIMAL entirely.
       ...passthrough.map((c) => (typed(c).type
@@ -616,6 +622,15 @@ function emit(
     if (items.length === 0) items.push('1 AS "__unit"');
     sql = `SELECT ${items.join(', ')} FROM ${relation}${emitWhere(whereExprs, rowBind)}`;
 
+    if (rowidExpr) {
+      arrowAttributes.push({
+        name: '__rowid',
+        width: 1,
+        provenance: 'arrow',
+        type: 'raw',
+        sourceColumns: ['__rowid'],
+      });
+    }
     for (const c of passthrough) {
       arrowAttributes.push({ ...typed(c), width: 1, provenance: 'arrow', sourceColumns: [c] });
     }

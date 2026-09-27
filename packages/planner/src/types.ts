@@ -63,6 +63,13 @@ export interface SourceNode {
   dataset: { ref: string; estimatedRows?: number; [key: string]: unknown };
   /** A file the program runtime reads directly. Takes the place of a registered provider. */
   file?: FileSource;
+  /**
+   * Preserve source row identity through filtering and compaction.
+   * - `true`: use DuckDB ROWID (1-indexed int64, cast to uint32)
+   * - `string`: use named numeric column as key
+   * Generates `__rowid` attribute (or the named column) with `type: 'raw'`.
+   */
+  preserveRowId?: boolean | string;
 }
 
 /** Row filter. Pushed into the SQL WHERE clause whenever the predicate is SQL-expressible. */

@@ -14,7 +14,7 @@
 import type { Gpu } from './device.js';
 
 import { AttributeSet } from './attributes.js';
-import { readColumn, readVectorColumns, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, evaluateStage, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
+import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, evaluateStage, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
 import { Kernel } from './compute.js';
 import { OrbitCamera, VIEW_UNIFORM_SIZE } from './camera.js';
 import { PointsPass } from './passes/points.js';
@@ -62,6 +62,8 @@ export interface BuildResult {
   stats?: SourceStats;
   /** Milliseconds the statistics query itself cost. */
   statsCatalogMs: number;
+  /** Raw uint32/int columns like __rowid, for picking tests. */
+  raw?: Map<string, unknown[]>;
 }
 
 /** Does a stage node's expression reference this parameter? */
@@ -330,6 +332,15 @@ export class Runtime {
     this.attributes.prune(new Set(plan.attributes.map((a) => a.name)));
     const uploadMs = performance.now() - tUpload;
 
+    // --- read raw columns (rowid, pathId) for test assertions ----------------
+    const raw = new Map<string, unknown[]>();
+    for (const decl of plan.attributes) {
+      if (decl.provenance === 'arrow' && decl.type === 'raw') {
+        const values = readValues(table, decl.name);
+        raw.set(decl.name, values);
+      }
+    }
+
     // --- CPU stage, when the plan placed nodes there -------------------------
     const cpuStageMs = this.runCpuStage(plan);
 
@@ -413,6 +424,7 @@ export class Runtime {
       sourceColumns: this.schema.size,
       stats: this.sourceStats,
       statsCatalogMs: this.statsCatalogMs,
+      raw: raw.size > 0 ? raw : undefined,
     };
     this.current = result;
     return result;

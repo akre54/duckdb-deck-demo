@@ -220,3 +220,26 @@ SELECT
 FROM range(0, ${rows}) t(i);
 `);
 }
+
+/**
+ * Assert that two arrays are element-wise close within a tolerance.
+ * Handles NaN comparisons and provides detailed failure messages.
+ */
+export function closeTo(actual: number[], expected: number[], label: string, tolerance = 2e-3): void {
+  if (actual.length !== expected.length) {
+    throw new Error(`${label} length mismatch: got ${actual.length}, expected ${expected.length}`);
+  }
+  for (let i = 0; i < expected.length; i++) {
+    if (Number.isNaN(expected[i])) {
+      if (!Number.isNaN(actual[i])) {
+        throw new Error(`${label}[${i}]: expected NaN, got ${actual[i]}`);
+      }
+      continue;
+    }
+    const tol = Math.max(tolerance, Math.abs(expected[i]) * tolerance);
+    const diff = Math.abs(actual[i] - expected[i]);
+    if (diff >= tol) {
+      throw new Error(`${label}[${i}]: ${actual[i]} vs ${expected[i]} (diff: ${diff}, tol: ${tol})`);
+    }
+  }
+}
