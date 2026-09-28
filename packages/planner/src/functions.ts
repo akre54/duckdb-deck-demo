@@ -29,12 +29,24 @@ export interface FunctionDef {
   name: string;
   /** Parameter names. Inside `body` they appear as column references. */
   params: string[];
-  body: Expr;
+  /** Absent for a macro. */
+  body?: Expr;
+  /**
+   * A macro: builds the body from the (already inlined) argument trees, for a function whose
+   * shape depends on an argument's *value* and so cannot be one template. The geo prelude's
+   * constant geometries are the case: a polygon literal of n edges expands to n crossing tests.
+   * The result is inlined again, so it may call other functions in the registry. Only the
+   * prelude defines these; a graph cannot.
+   */
+  expand?: (args: readonly Expr[]) => Expr;
   /** Where it was declared, for error messages: a graph key or a wrangle line. */
   source: string;
 }
 
 export type FunctionRegistry = ReadonlyMap<string, FunctionDef>;
+
+/** A function written as a template, which is every function a graph or wrangle declares. */
+export type TemplateFunctionDef = FunctionDef & { body: Expr };
 
 /** Authored form, as it appears in graph JSON. */
 export interface FunctionSpec {
@@ -60,7 +72,7 @@ export function defineFunction(
   params: readonly string[],
   body: Expr,
   source: string,
-): FunctionDef {
+): TemplateFunctionDef {
   if (!NAME.test(name)) {
     throw new FunctionError(`${source}: '${name}' is not a valid function name`);
   }
@@ -188,9 +200,20 @@ function inline(e: Expr, reg: FunctionRegistry, stack: string[], depth: number):
         );
       }
 
+      if (def.expand) {
+        let expanded: Expr;
+        try {
+          expanded = def.expand(args);
+        } catch (err) {
+          if (err instanceof FunctionError) throw err;
+          throw new FunctionError(`${def.name}(): ${(err as Error).message}`);
+        }
+        return inline(expanded, reg, [...stack, def.name], depth + 1);
+      }
+
       const bound = new Map(def.params.map((p, i) => [p, args[i]] as const));
       // The body may itself call other user functions, so inline it under this call.
-      const body = inline(def.body, reg, [...stack, def.name], depth + 1);
+      const body = inline(def.body!, reg, [...stack, def.name], depth + 1);
       return substitute(body, bound);
     }
   }
@@ -245,7 +268,7 @@ export function parseFunctionDeclaration(
   text: string,
   source: string,
   scope?: ParseScope,
-): FunctionDef | undefined {
+): TemplateFunctionDef | undefined {
   const m = FN_DECL.exec(text);
   if (!m) return undefined;
   const [, name, paramList, bodySrc] = m;

@@ -349,3 +349,33 @@ describe('the geo prelude computes the same numbers on all three', () => {
     expectClose(wgsl, js, `${src} wgsl vs js`, floor);
   });
 });
+
+describe('constant geometries compute the same numbers on all three', () => {
+  // Points from the columns, spread over the polygon, its hole and outside:
+  // (−0.62, 2.68) in, (0.31, 2.2) hole, (0.08, −0.09) in, (2.48, 1.96) in, (0.03, −0.01) in,
+  // (−1.55, 2.31) out, (3.72, 1.0) out, (0.62, 2.84) above the hole. None is within f32 reach
+  // of an edge.
+  const P = '[c * 0.31, sin(a) * 2.0 + 1.0]';
+  const RING = "'POLYGON((-1 -0.5, 3 -0.5, 3 3, -1 3, -1 -0.5), (0 0.5, 1 0.5, 1 2.5, 0 2.5, 0 0.5))'";
+  const LINE = "'LINESTRING(-2 0, 0 1, 2 1.5, 4 0)'";
+
+  it.each([
+    `st_contains(${RING}, ${P})`,
+    `st_distance(${RING}, ${P})`,
+    `st_distance(${LINE}, ${P})`,
+    `st_distance('MULTIPOINT(0 0, 3 3)', ${P})`,
+    `st_dwithin(${P}, ${LINE}, 60000.0)`,
+    `st_x(along(${LINE}, a * 5.0))`,
+    `st_y(along(${LINE}, a * 5.0))`,
+  ])('%s', async (src) => {
+    expect([...enginesFor(parse(src))].sort(), `${src} engines`).toEqual(['gpu', 'sql']);
+    const js = viaJs(src);
+    expectClose(await viaSql(src), js, `${src} sql vs js`);
+    // f32: 1e-4 relative is ~10 m on these distances, and 1e-4° on a position.
+    expectClose(await viaWgsl(src), js, `${src} wgsl vs js`);
+  });
+
+  it('classifies the rows as expected', () => {
+    expect(viaJs(`st_contains(${RING}, ${P})`).map(Number)).toEqual([1, 0, 1, 1, 1, 0, 0, 1]);
+  });
+});

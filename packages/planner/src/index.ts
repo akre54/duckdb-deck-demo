@@ -43,10 +43,14 @@ export {
   type DerivedParam, type WithDerived,
 } from './hoist.js';
 
-// --- geospatial functions: a prelude of inlined point operations --------
+// --- geospatial functions: inlined point operations, expanded literal geometries --
 export {
-  GEO_PRELUDE, GEO_SPECS, EARTH_RADIUS_M, WEB_MERCATOR_RADIUS_M, WEB_MERCATOR_MAX_LAT,
+  GEO_PRELUDE, GEO_SPECS, GEO_MACROS, EARTH_RADIUS_M, WEB_MERCATOR_RADIUS_M, WEB_MERCATOR_MAX_LAT,
 } from './geo.js';
+export {
+  type Geometry, type Position, GeometryError, MAX_GEOMETRY_VERTICES, parseGeometry,
+  areaM2, lengthM, perimeterM, bboxOf, centroidOf, vertexMean,
+} from './geometry.js';
 
 // --- graph schema and sugar ------------------------------------------------
 export {

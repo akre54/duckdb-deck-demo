@@ -74,3 +74,51 @@ describe('geo prelude in DuckDB', () => {
     });
   });
 });
+
+/**
+ * Constant geometries, expanded: the same comparison over points around the literals, some on
+ * a vertex or an edge, where a backend that tested `<` for `<=` would split from the others.
+ */
+const MANHATTAN = 'POLYGON((-74.02 40.70, -73.93 40.70, -73.91 40.80, -73.97 40.88, -74.01 40.76, -74.02 40.70), ' +
+  '(-73.99 40.74, -73.96 40.74, -73.96 40.77, -73.99 40.77, -73.99 40.74))';
+const ROUTE = 'LINESTRING(-122.42 37.77, -122.40 37.79, -122.39 37.80, -122.27 37.80)';
+const PLACES = [
+  { lng: -73.95, lat: 40.75, km: 0 },
+  { lng: -73.975, lat: 40.755, km: 1.5 }, // in the hole
+  { lng: -73.93, lat: 40.70, km: 2.8 }, // on a vertex
+  { lng: -73.97, lat: 40.70, km: 4.2 }, // on the horizontal edge
+  { lng: -74.2, lat: 40.5, km: 14.7 },
+  { lng: -122.35, lat: 37.9, km: 9 },
+  { lng: -122.41, lat: 37.78, km: 30 },
+];
+const PLACE_COLS = ['lng', 'lat', 'km'] as const;
+const PLACE_VALUES = PLACES.map(
+  (r, i) => `(${i}, ${PLACE_COLS.map((c) => `CAST(${r[c]} AS DOUBLE)`).join(', ')})`,
+).join(', ');
+const GEOMETRY_CASES = [
+  `st_contains('${MANHATTAN}', [lng, lat])`,
+  `st_intersects([lng, lat], 'MULTIPOLYGON(((-74 40.6, -73.9 40.6, -73.95 40.8, -74 40.6)), ((-122.5 37.7, -122.3 37.7, -122.3 37.9, -122.5 37.9, -122.5 37.7)))')`,
+  `st_distance('${MANHATTAN}', [lng, lat])`,
+  `st_distance('${ROUTE}', [lng, lat])`,
+  `st_distance('MULTIPOINT(-73.97 40.78, -122.42 37.77)', [lng, lat])`,
+  `st_dwithin([lng, lat], '${ROUTE}', 5000.0)`,
+  `along('${ROUTE}', km)`,
+  `st_lineinterpolatepoint('${ROUTE}', km / 20.0)`,
+];
+
+describe('constant geometries in DuckDB', () => {
+  it.each(GEOMETRY_CASES)('%s agrees with the JS backend', async (src) => {
+    const e = resolve(src);
+    const { items } = toSqlColumns(e, e.kind === 'vec' ? 'v' : 'v_0', undefined, castToDouble);
+    const rows = await duck.rows(
+      `SELECT ${items.join(', ')} FROM (VALUES ${PLACE_VALUES}) t(i, ${PLACE_COLS.join(', ')}) ORDER BY i`,
+    );
+    PLACES.forEach((row, i) => {
+      js(e, row).forEach((w, c) => {
+        const got = Number(rows[i][`v_${c}`]);
+        expect(Math.abs(got - w), `${src.slice(0, 40)} row ${i} component ${c}: sql ${got}, js ${w}`)
+          .toBeLessThanOrEqual(1e-9 * Math.max(1, Math.abs(w)));
+      });
+    });
+  });
+});
