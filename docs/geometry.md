@@ -70,6 +70,15 @@ The resulting tree is an ordinary tree. `enginesFor` returns SQL, GPU and CPU, `
 prices it at about 30 operators per edge, and DuckDB needs no spatial extension. The cap is
 `MAX_GEOMETRY_VERTICES` (1024). A boundary that detailed belongs in case 3.
 
+In the editor, two operators wrap these functions:
+
+- **Region Filter** keeps rows inside a polygon, outside it, or within a distance of any
+  geometry. The distance is a value param, so dragging it rebinds and does not replan.
+- **Distance to Geometry** writes an attribute in metres or kilometres.
+
+Each takes the geometry as a structural `code` param. The geometry is parsed while lowering,
+so a bad ring or swapped axes shows as an error on the node itself.
+
 Semantics: edges are straight in lng/lat, as in PostGIS `geometry` and turf, so this is not
 `geography`. A point on an edge or vertex follows the crossing-number rule (half-open in y)
 on all three backends. `tests/geo.test.ts` checks them against each other at 1e-9, and
