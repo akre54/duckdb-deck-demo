@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeAll } from 'vitest';
-import { parseExpr, enginesFor, toSql, SqlParams, toWgsl, wgslParamMember, toJs } from '@noodles.gl/planner';
+import {
+  type Expr, parseExpr, enginesFor, toSql, SqlParams, toWgsl, wgslParamMember, toJs,
+  inlineFunctions, simplifyExpr, GEO_PRELUDE,
+} from '@noodles.gl/planner';
 import {
   gpuDevice, duck, readBuffer, storageBuffer, emptyStorageBuffer, expectNoGpuError,
 } from './harness.js';
@@ -84,10 +87,18 @@ ${INPUTS.a.map((_, i) => `  (${i}, ${INPUTS.a[i]}, ${INPUTS.b[i]}, ${INPUTS.c[i]
 // Executors
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse as `analyze` resolves an expression: with the geo prelude in scope, inlined, then
+ * simplified. For anything that calls no prelude function this is exactly `parseExpr`.
+ */
+function parse(src: string): Expr {
+  return simplifyExpr(inlineFunctions(parseExpr(src, { functions: GEO_PRELUDE }), GEO_PRELUDE));
+}
+
 /** Run the generated SQL in DuckDB and read the column back. */
 async function viaSql(src: string, params: Record<string, number> = {}): Promise<number[]> {
   const bind = new SqlParams();
-  const emitted = toSql(parseExpr(src), bind);
+  const emitted = toSql(parse(src), bind);
   const binds = bind.order.map((name) => params[name] ?? 0);
   const sql = await duck();
   // ::DOUBLE so the result is never a DECIMAL, which Arrow reports unscaled.
@@ -100,7 +111,7 @@ async function viaSql(src: string, params: Record<string, number> = {}): Promise
 
 /** Compile the expression into a compute kernel, dispatch it, and read the buffer back. */
 async function viaWgsl(src: string, params: Record<string, number> = {}): Promise<number[]> {
-  const emitted = toWgsl(parseExpr(src), (name) => ({ code: `b_${name}[i]`, width: 1 }));
+  const emitted = toWgsl(parse(src), (name) => ({ code: `b_${name}[i]`, width: 1 }));
   const paramList = emitted.params;
 
   const paramDecl = paramList.length
@@ -197,7 +208,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /** Run the generated JS. */
 function viaJs(src: string, params: Record<string, number> = {}): number[] {
-  const emitted = toJs(parseExpr(src), (name) => ({
+  const emitted = toJs(parse(src), (name) => ({
     width: 1, component: () => `cols.${name}[i]`,
   }));
   const fn = new Function(
@@ -207,8 +218,11 @@ function viaJs(src: string, params: Record<string, number> = {}): number[] {
   return fn(INPUTS, params, ROWS);
 }
 
-/** f32-scale comparison: relative for large values, absolute near zero. */
-function expectClose(actual: number[], expected: number[], label: string): void {
+/**
+ * f32-scale comparison: relative for large values, absolute near zero. `floor` is that
+ * absolute part, for a result whose f32 error does not shrink with its magnitude.
+ */
+function expectClose(actual: number[], expected: number[], label: string, floor = 1e-4): void {
   expect(actual, `${label} length`).toHaveLength(expected.length);
   for (let i = 0; i < expected.length; i++) {
     const e = expected[i];
@@ -217,7 +231,7 @@ function expectClose(actual: number[], expected: number[], label: string): void 
       expect(Number.isNaN(a), `${label}[${i}] should be NaN`).toBe(true);
       continue;
     }
-    const tolerance = Math.max(1e-4, Math.abs(e) * 1e-4);
+    const tolerance = Math.max(floor, Math.abs(e) * 1e-4);
     expect(Math.abs(a - e), `${label}[${i}]: got ${a}, want ${e}`).toBeLessThan(tolerance);
   }
 }
@@ -294,5 +308,44 @@ describe('divergences that are known and deliberate', () => {
     const { table } = await (await duck()).run('SELECT 1 / 2 AS naive');
     // Confirms the hazard is real, so the guard is not superstition.
     expect(Number((table.toArray() as { naive: number }[])[0].naive)).toBeCloseTo(0.5, 6);
+  });
+});
+
+describe('the geo prelude computes the same numbers on all three', () => {
+  // Points made from the three columns, so every row is a different pair and both signs of
+  // Δlat and Δlng occur: a = 0.001..100, b = 0.5..1000, c = -5..12. The old hand-written
+  // haversine squared with `pow(sin(Δ), 2.0)`, which WGSL leaves undefined for a negative
+  // base; half of these rows have one.
+  const A = '[c * 10.0, a * 0.8]';
+  const B = '[b * 0.17 - 80.0, c * 6.0]';
+
+  it.each([
+    `distance(${A}, ${B})`,
+    `st_distance_sphere(${A}, ${B}) / 1000.0`,
+    `st_dwithin(${A}, ${B}, 5000000.0)`,
+    `bearing(${A}, ${B})`,
+    `st_azimuth(${A}, ${B})`,
+    `st_x(destination(${A}, b, c * 30.0))`,
+    `st_y(destination(${A}, b, c * 30.0))`,
+    `st_x(midpoint(${A}, ${B}))`,
+    `st_y(midpoint(${A}, ${B}))`,
+    `st_y(to_mercator(${A})) / 1000.0`,
+    `mercator_y(a * 0.8)`,
+  ])('%s', async (src) => {
+    // EPSG:3857 y near the equator is `R * ln(1 + ε)`, and f32 cannot hold 1 + ε to better
+    // than R * 2^-23 ≈ 0.8 m: an absolute floor of a metre or two however small y is, found
+    // at lat 0.0008° where the GPU read 90.5 m against 89.1 m.
+    const floor = src.includes('to_mercator') ? 0.005 : 1e-4;
+    const engines = enginesFor(parse(src));
+    expect([...engines].sort(), `${src} engines`).toEqual(['gpu', 'sql']);
+
+    const js = viaJs(src);
+    const sql = await viaSql(src);
+    const wgsl = await viaWgsl(src);
+    expect(js.some(Number.isNaN), `${src} js NaN`).toBe(false);
+    expectClose(sql, js, `${src} sql vs js`);
+    // f32 on the GPU: 1e-4 relative is ~1 km on a 10,000 km distance and 0.02° on a bearing,
+    // which is the f32 floor for inputs this size, not slack.
+    expectClose(wgsl, js, `${src} wgsl vs js`, floor);
   });
 });

@@ -30,6 +30,7 @@ import {
 import { type CostConstants, DEFAULT_COSTS, type CostBreakdown } from './cost.js';
 import type { SourceStats } from './stats.js';
 import { type TargetCaps, targetCaps } from './target.js';
+import { type DerivedParam, withDerived } from './hoist.js';
 
 export { PlanError };
 export type { Schema, Stage, Policy, Assignment, Candidate };
@@ -142,6 +143,12 @@ export interface PhysicalPlan {
   attributes: AttributeDecl[];
   uniformParams: string[];
   params: Record<string, ParamSpec>;
+  /**
+   * Parameters computed from `params` rather than set: hoisted param-only subexpressions
+   * (`hoist.ts`). They appear in `sqlParams`, `uniformParams` and the stages' trees, never in
+   * `params`. Bind through `withDerived(plan, values)`; key routes by `sourceParams`.
+   */
+  derived: DerivedParam[];
   /** The render node as authored, for its id and mode. For a layer output, synthesized. */
   render: RenderNode;
   /** The layer output with its channels resolved, when the output is a `layer` node. */
@@ -204,8 +211,10 @@ export function plan(
   const policy: Policy = opts.policy ?? (opts.stats ? 'cost' : 'auto');
 
   const analysis = analyze(graph, sourceSchema, opts.conventions, opts.columnTypes);
+  // Derived values too: a hoisted threshold (`lat > {{a}} * 2`) is a bound value to the
+  // selectivity estimator, where the expression it replaced was not.
   const result = optimize(analysis, {
-    costs, caps, stats: opts.stats, params: opts.params ?? {}, policy,
+    costs, caps, stats: opts.stats, params: withDerived(analysis, opts.params ?? {}), policy,
   });
 
   return emit(analysis, result, { costs, caps, relation: opts.relation ?? DEFAULT_RELATION });
@@ -689,15 +698,16 @@ function emit(
   for (const p of statsParams) {
     if (!declaredParams[p]) declaredParams[p] = { value: 0, kind: 'value', label: p };
   }
+  const derivedNames = new Set(analysis.derived.map((d) => d.name));
   for (const p of [...rowBind.order, ...uniformParams]) {
-    if (!declaredParams[p]) {
+    if (!declaredParams[p] && !derivedNames.has(p)) {
       throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
     }
   }
   // CPU-stage params are neither SQL binds nor uniforms, but must still be declared.
   for (const s of cpuStage) {
     for (const p of paramsIn(s.expr!)) {
-      if (!declaredParams[p]) {
+      if (!declaredParams[p] && !derivedNames.has(p)) {
         throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
       }
     }
@@ -774,6 +784,7 @@ function emit(
     attributes,
     uniformParams: [...uniformParams],
     params: declaredParams,
+    derived: analysis.derived,
     render: analysis.render,
     layer: analysis.layer,
     channels: analysis.channels,

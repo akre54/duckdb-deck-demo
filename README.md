@@ -394,7 +394,7 @@ src/webgpu/         device, attributes, kernels, camera, calibration, passes, ru
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
 src/program/        ProgramRuntime, the memo catalog, per-layer query and CPU stage
 src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, and the program pane
-docs/               how the planner integrates with deck.gl and luma.gl
+docs/               how the planner integrates with deck.gl and luma.gl; the geometry tier
 demo/               the inspector app: main.ts, ui/, graphs/, data/ (not published)
 demo/editor/        the node editor: React Flow network, parameter pane, timeline, examples
 tests/              boundary guard, budgets, benchmarks, browser/

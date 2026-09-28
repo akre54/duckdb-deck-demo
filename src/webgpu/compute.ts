@@ -92,9 +92,11 @@ export class Kernel {
    */
   writeParams(values: Record<string, number>): void {
     this.paramScratch.fill(0);
+    // Only a *missing* value becomes 0. An infinity or NaN is written as itself, as the CPU
+    // stage passes it through: a hoisted `1 / {{x}}` at x = 0 must be what the unhoisted
+    // kernel computed, not 0.
     this.plan.params.forEach((name, i) => {
-      const v = values[name];
-      this.paramScratch[i] = Number.isFinite(v) ? v : 0;
+      this.paramScratch[i] = values[name] ?? 0;
     });
     this.device.queue.writeBuffer(this.paramBuffer, 0, gpuData(this.paramScratch));
   }

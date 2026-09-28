@@ -44,6 +44,12 @@ export interface FunctionSpec {
 
 export class FunctionError extends Error {}
 
+/**
+ * The `source` prefix of the geo prelude's definitions (`geo.ts`). It lives here rather than
+ * there because `geo.ts` builds its registry with this module, so the import only runs one way.
+ */
+export const GEO_SOURCE_PREFIX = 'geo.';
+
 /** Guard against a cycle that the call-stack check somehow misses. */
 const MAX_INLINE_DEPTH = 64;
 
@@ -82,9 +88,11 @@ export function defineFunction(
 export function buildRegistry(
   specs: Record<string, FunctionSpec> | undefined,
   into: Map<string, FunctionDef> = new Map(),
+  /** Where the specs came from, for error messages: a graph's `functions`, or the geo prelude. */
+  sourcePrefix = 'functions.',
 ): Map<string, FunctionDef> {
   for (const [name, spec] of Object.entries(specs ?? {})) {
-    const source = `functions.${name}`;
+    const source = `${sourcePrefix}${name}`;
     let body: Expr;
     try {
       // Declarations parse in the scope built so far, so a function may call one declared
@@ -101,6 +109,14 @@ export function buildRegistry(
 
 export function addFunction(into: Map<string, FunctionDef>, def: FunctionDef): void {
   const existing = into.get(def.name);
+  if (existing?.source.startsWith(GEO_SOURCE_PREFIX)) {
+    // Same reasoning as for `FUNCTIONS`: a graph that redefines `distance` would make the
+    // name mean different things in different graphs. Named separately because "already
+    // defined at geo.distance" reads like the user's own mistake.
+    throw new FunctionError(
+      `${def.source}: '${def.name}' is a built-in geo function (geo.ts) and cannot be redefined`,
+    );
+  }
   if (existing) {
     throw new FunctionError(
       `${def.source}: '${def.name}' is already defined at ${existing.source}`,

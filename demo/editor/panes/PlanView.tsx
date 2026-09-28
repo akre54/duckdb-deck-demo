@@ -1,5 +1,6 @@
 import { Fragment } from 'react';
 import { useEditor } from '../store.js';
+import { paramLabel } from '@noodles.gl/planner';
 
 /**
  * What the graph compiled to: every relation with its memo key and SQL, every layer with its
@@ -46,7 +47,7 @@ export function PlanView() {
           <h5>{l.id} <span className="k">{l.kind} layer · {l.plan.explain.method} · reads {l.relation}</span></h5>
           <dl className="kv">
             {l.plan.explain.placement.map((p) => <Fragment key={p.nodeId}><dt>{p.nodeId}</dt><dd>{p.stage} · {p.why}</dd></Fragment>)}
-            {l.plan.sqlParams.length > 0 && <><dt>binds</dt><dd>{l.plan.sqlParams.join(', ')}</dd></>}
+            {l.plan.sqlParams.length > 0 && <><dt>binds</dt><dd>{l.plan.sqlParams.map((p) => paramLabel(l.plan, p)).join(', ')}</dd></>}
           </dl>
           <pre className="code">{l.plan.sql}</pre>
         </div>

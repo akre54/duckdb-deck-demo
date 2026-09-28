@@ -9,6 +9,7 @@
  *   - counters proving a slider caused a uniform write and not a requery
  */
 
+import { sourceParams, paramLabel } from '@noodles.gl/planner';
 import type { BuildResult } from '../../src/webgpu/runtime.js';
 import type { Runtime } from '../../src/webgpu/runtime.js';
 import type { DeckMetrics } from '../../src/deck/webgl2-pane.js';
@@ -229,8 +230,9 @@ export class Inspector {
       <table>
         <thead><tr><th>param</th><th>route</th><th class="num">value</th></tr></thead>
         <tbody>${Object.keys(r.plan.params).map((p) => {
-          const route = r.plan.sqlParams.includes(p) ? 'requery'
-            : r.plan.uniformParams.includes(p) ? 'uniform'
+          // Hoisted values route under the parameters they are computed from.
+          const route = sourceParams(r.plan, r.plan.sqlParams).includes(p) ? 'requery'
+            : sourceParams(r.plan, r.plan.uniformParams).includes(p) ? 'uniform'
             : r.plan.params[p].kind === 'structural' ? 'rebuild' : 'unused';
           return `<tr><td>${escapeHtml(p)}</td><td><span class="tag ${route === 'requery' ? 'sql' : route === 'uniform' ? 'gpu' : 'scalar'}">${route}</span></td><td class="num">${r.plan.params[p].value}</td></tr>`;
         }).join('')}</tbody>
@@ -240,7 +242,7 @@ export class Inspector {
 
   private sqlHtml(r: BuildResult): string {
     const binds = r.plan.sqlParams.length
-      ? `<h2>bind order</h2><pre>${r.plan.sqlParams.map((p, i) => `$${i + 1}  ${p}`).join('\n')}</pre>`
+      ? `<h2>bind order</h2><pre>${r.plan.sqlParams.map((p, i) => `$${i + 1}  ${escapeHtml(paramLabel(r.plan, p))}`).join('\n')}</pre>`
       : '<h2>bind order</h2><pre>(no parameters — executed directly, not prepared)</pre>';
     const stats = r.plan.stats.length
       ? `<h2>stats queries</h2>${r.plan.stats.map((s) => `<pre>${escapeHtml(formatSql(s.sql))}</pre>`).join('')}`
@@ -260,7 +262,7 @@ export class Inspector {
       <h2>${escapeHtml(k.id)} — fused ${k.nodeIds.length} node${k.nodeIds.length === 1 ? '' : 's'}: ${k.nodeIds.map(escapeHtml).join(' → ')}</h2>
       <pre>reads   ${k.reads.join(', ') || '(none)'}
 writes  ${k.writes.join(', ')}
-params  ${k.params.join(', ') || '(none)'}
+params  ${k.params.map((p) => escapeHtml(paramLabel(r.plan, p))).join(', ') || '(none)'}
 ramp    ${k.usesRamp ? 'yes' : 'no'}</pre>
       <pre>${escapeHtml(k.code.trim())}</pre>`).join('');
   }

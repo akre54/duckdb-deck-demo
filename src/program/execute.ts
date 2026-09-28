@@ -10,7 +10,7 @@
 
 import {
   type LayerPlan, type SqlEngine, type ColumnUpload,
-  readColumn, readVectorColumns, readStrings, readValues, runStarts, evaluateStage,
+  readColumn, readVectorColumns, readStrings, readValues, runStarts, evaluateStage, withDerived,
 } from '@noodles.gl/planner';
 
 export interface QueriedLayer {
@@ -42,7 +42,8 @@ export async function queryLayer(
 ): Promise<QueriedLayer> {
   const started = performance.now();
   const plan = layer.plan;
-  const all: Record<string, number | string> = { ...values };
+  // Derived parameters read declared ones only, never a stats output, so once is enough.
+  const all: Record<string, number | string> = withDerived(plan, values);
   const stats: Record<string, number> = {};
   for (const s of plan.stats) {
     const { table } = await sql.run(s.sql, s.params.map((p) => bindValue(all, p)));

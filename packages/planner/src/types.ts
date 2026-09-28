@@ -16,6 +16,7 @@ import {
   type FunctionDef, type FunctionRegistry, type FunctionSpec,
   addFunction, buildRegistry,
 } from './functions.js';
+import { GEO_PRELUDE } from './geo.js';
 
 export type RampName = 'viridis' | 'magma' | 'turbo' | 'cividis';
 
@@ -530,8 +531,9 @@ export function desugar(
   conv: AttributeConventions = HOUDINI_CONVENTIONS,
 ): { nodes: CoreNode[]; notes: string[]; ramp?: RampName; functions: FunctionRegistry } {
   // Graph-level declarations first, then any hoisted out of wrangle bodies. Both land in one
-  // flat registry, so a redefinition is an error wherever it came from.
-  const functions = buildRegistry(graph.functions);
+  // flat registry, so a redefinition is an error wherever it came from. The geo prelude is
+  // the registry's starting point, which is what puts it in scope for every graph.
+  const functions = buildRegistry(graph.functions, new Map(GEO_PRELUDE));
   const out: CoreNode[] = [];
   const notes: string[] = [];
   // One LUT is bound per kernel, so this prototype supports one ramp per graph.
@@ -594,9 +596,9 @@ export function desugar(
         const z = node.z ?? '0.0';
         const expr = node.mode === 'mercator'
           // Web Mercator, normalized to [-0.5, 0.5] on both axes so the orbit camera
-          // starts with the whole world inside the near/far planes.
-          ? `[((${node.x}) / 360.0) * (${scale}), ` +
-            `(ln(tan(0.7853981634 + (${node.y}) * 0.008726646259971648)) / 6.283185307) * (${scale}), ` +
+          // starts with the whole world inside the near/far planes. The formulas are the geo
+          // prelude's, which inline to exactly the tree this sugar used to spell out.
+          ? `[(mercator_x(${node.x})) * (${scale}), (mercator_y(${node.y})) * (${scale}), ` +
             `(${z}) * (${scale})]`
           : `[(${node.x}) * (${scale}), (${node.y}) * (${scale}), (${z}) * (${scale})]`;
         out.push({ id: node.id, type: 'attribute', input: node.input, name: conv.position, expr });

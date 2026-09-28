@@ -533,8 +533,11 @@ export const OPERATORS: OpDef[] = [
     ],
     lower(ctx) {
       const [x1, y1, x2, y2] = ['lng1', 'lat1', 'lng2', 'lat2'].map((p) => `(${ctx.expr(p)})`);
-      const hav = `12742.0 * asin(sqrt(pow(sin((${y2} - ${y1}) * 0.00872664626), 2.0) + cos(${y1} * 0.01745329252) * cos(${y2} * 0.01745329252) * pow(sin((${x2} - ${x1}) * 0.00872664626), 2.0)))`;
-      return { nodes: [{ id: ctx.id, type: 'attribute', input: ctx.input('in'), name: ctx.str('name') || 'km', expr: hav }], outputs: { out: ctx.id } };
+      // The geo prelude's `distance` (geo.ts). This used to be spelled out here with
+      // `pow(sin(Δ), 2.0)`, which WGSL leaves undefined for a negative base — half of all
+      // point pairs — and with a 6371 km radius where turf and DuckDB use 6371.0088.
+      const km = `distance([${x1}, ${y1}], [${x2}, ${y2}])`;
+      return { nodes: [{ id: ctx.id, type: 'attribute', input: ctx.input('in'), name: ctx.str('name') || 'km', expr: km }], outputs: { out: ctx.id } };
     },
   },
 

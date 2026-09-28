@@ -413,6 +413,42 @@ describe('parameter routing on the real runtime', () => {
     rt.destroy();
   });
 
+  it('a hoisted uniform follows its source parameter', async () => {
+    // cos(radians({{lat0}})) is hoisted out of the inlined haversine into a derived uniform.
+    // Moving lat0 has to recompute it on the host and redraw with no requery.
+    const centred = (lat0: string): Graph => ({
+      params: { lng0: { value: -73.97, changeRate: 60 }, lat0: { value: 40.78, changeRate: 60 } },
+      nodes: [
+        { id: 'src', type: 'source', dataset: { ref: 'test', estimatedRows: ROWS } },
+        { id: 'd', type: 'attribute', input: 'src', name: 'km', expr: `distance([lng, lat], [{{lng0}}, ${lat0}])` },
+        { id: 'proj', type: 'project', input: 'd', mode: 'mercator', x: 'lng', y: 'lat' },
+        { id: 'out', type: 'render', input: 'proj', mode: 'points', position: 'P', size: 'km' },
+      ],
+    });
+    const hoisted = await newRuntime();
+    const built = await hoisted.build(centred('{{lat0}}'), 'gpu-first');
+    const [derived] = built.plan.derived;
+    expect(derived.sources).toEqual(['lat0']);
+    expect(built.plan.uniformParams).toContain(derived.name);
+    expect(Object.keys(hoisted.params())).not.toContain(derived.name);
+    expect(hoisted.classify('lat0')).toBe('uniform');
+
+    const requeries = hoisted.counters.requeries;
+    await hoisted.setParam('lat0', 48.86);
+    await settle(hoisted);
+    expect(hoisted.counters.requeries, 'no requery').toBe(requeries);
+
+    // The same centre as a literal, computed per row in f32.
+    const literal = await newRuntime();
+    await expectNoGpuError(gpu.device, async () => {
+      await literal.build(centred('48.86'), 'gpu-first');
+      await settle(literal);
+    });
+    closeTo(await attribute('km', hoisted), await attribute('km', literal), 'km', 1e-4);
+    hoisted.destroy();
+    literal.destroy();
+  });
+
   it('the numbered placeholders DuckDB receives actually execute', async () => {
     // The repeated-argument bug produced more placeholders than binds and failed here.
     const rt = await newRuntime();
