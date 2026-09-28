@@ -24,8 +24,10 @@ import type { Analysis, AnalyzedNode, Stage } from './analyze.js';
 import { PlanError, externalAttributes } from './analyze.js';
 import {
   type CostConstants, CostAccumulator, type CostBreakdown,
-  sqlScanMs, uploadMs, castMs, interleaveMs, kernelMs, cpuEvalMs, renderFrameMs, estimateChunks,
+  sqlScanMs, uploadMs, castMs, interleaveMs, kernelMs, cpuEvalMs, renderFrameMs, compactMs,
+  estimateChunks,
 } from './cost.js';
+import { compactable } from './expr.js';
 import { type SourceStats, estimateSelectivity, DEFAULT_SELECTIVITY } from './stats.js';
 import type { TargetCaps } from './target.js';
 
@@ -36,6 +38,16 @@ export interface Assignment {
   sqlEnd: number;
   /** Nodes [sqlEnd, cpuEnd) run on the CPU; [cpuEnd, n) on the GPU. */
   cpuEnd: number;
+  /**
+   * GPU-stage filters run on the target's compaction engine instead of writing a discard
+   * mask: rows are removed on the GPU and drawn with `drawIndirect`. Only offered when
+   * `caps.compaction` is set and every GPU-stage filter is `compactable`.
+   */
+  compact?: boolean;
+}
+
+export function sameAssignment(a: Assignment, b: Assignment): boolean {
+  return a.sqlEnd === b.sqlEnd && a.cpuEnd === b.cpuEnd && Boolean(a.compact) === Boolean(b.compact);
 }
 
 export interface Candidate {
@@ -87,10 +99,15 @@ export function optimize(analysis: Analysis, ctx: OptimizeContext): OptimizeResu
     notes.push('no source statistics available; fell back to the rule-based auto policy');
   }
 
+  // Compaction doubles the space only where it applies: a boundary pair with a compactable
+  // GPU-stage filter gets a second candidate, and every other pair keeps one. Still exact.
   const candidates: Candidate[] = [];
   for (let sqlEnd = 0; sqlEnd <= n; sqlEnd++) {
     for (let cpuEnd = sqlEnd; cpuEnd <= n; cpuEnd++) {
       candidates.push(evaluate(analysis, { sqlEnd, cpuEnd }, ctx));
+      if (ctx.caps.compaction && hasGpuFilter(analysis, cpuEnd)) {
+        candidates.push(evaluate(analysis, { sqlEnd, cpuEnd, compact: true }, ctx));
+      }
     }
   }
 
@@ -108,9 +125,7 @@ export function optimize(analysis: Analysis, ctx: OptimizeContext): OptimizeResu
     method = 'cost';
   } else {
     chosen = policyAssignment(analysis, ctx, notes);
-    const match = candidates.find(
-      (c) => c.assignment.sqlEnd === chosen.sqlEnd && c.assignment.cpuEnd === chosen.cpuEnd,
-    );
+    const match = candidates.find((c) => sameAssignment(c.assignment, chosen));
     if (!match?.legal) {
       throw new PlanError(
         `Policy '${ctx.policy}' produced an illegal plan (${label(chosen, n)}): ${match?.reason ?? 'unknown'}`,
@@ -119,9 +134,7 @@ export function optimize(analysis: Analysis, ctx: OptimizeContext): OptimizeResu
     method = 'policy';
   }
 
-  const chosenCandidate = candidates.find(
-    (c) => c.assignment.sqlEnd === chosen.sqlEnd && c.assignment.cpuEnd === chosen.cpuEnd,
-  )!;
+  const chosenCandidate = candidates.find((c) => sameAssignment(c.assignment, chosen))!;
 
   const estimatedSelectivity = analysis.order
     .filter((node) => node.kind === 'filter')
@@ -186,6 +199,11 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
         label: text,
       };
     }
+  }
+
+  if (assignment.compact) {
+    const why = compactionBlocker(analysis, assignment);
+    if (why) return { assignment, legal: false, reason: why, label: text };
   }
 
   // --- cardinality --------------------------------------------------------
@@ -264,8 +282,27 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
   }
 
   // --- GPU stage ----------------------------------------------------------
-  const gpuOps = sum(analysis.order.slice(assignment.cpuEnd).map((node) => node.ops));
+  // A compacted filter leaves the kernel: the compaction engine evaluates it instead.
+  const gpuNodes = analysis.order.slice(assignment.cpuEnd);
+  const kernelNodes = assignment.compact ? gpuNodes.filter((node) => node.kind !== 'filter') : gpuNodes;
+  const gpuOps = sum(kernelNodes.map((node) => node.ops));
   if (gpuOps > 0) acc.addBuild('gpu kernel', kernelMs(costs, sqlRows, gpuOps));
+
+  // Rows that survive every filter placed after SQL. A mask draws all of them anyway; a
+  // compaction draws only these.
+  let drawnRows = sqlRows;
+  if (assignment.compact) {
+    let gpuSelectivity = 1;
+    for (const node of gpuNodes) {
+      if (node.kind !== 'filter') continue;
+      gpuSelectivity *= stats ? estimateSelectivity(node.expr!, stats, ctx.params) : DEFAULT_SELECTIVITY;
+    }
+    drawnRows = Math.max(1, Math.round(sqlRows * gpuSelectivity));
+    acc.addBuild('gpu compaction compile', costs.compactCompileMs);
+    acc.addBuild('gpu compaction', compactMs(costs, sqlRows));
+    // The engine's selection mask and compacted ids, one u32 each per row.
+    acc.addGpuBytes(sqlRows * 8);
+  }
   for (let i = assignment.cpuEnd; i < n; i++) {
     const node = analysis.order[i];
     if (node.kind !== 'attribute') continue;
@@ -304,25 +341,36 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
   // Suffix costs: what re-running from a given stage would cost.
   const castElements = passthrough.length * sqlRows;
   const totalBytes = gpuBytes;
+  // Anything upstream of a compaction invalidates it. A requery also changes the row count,
+  // which the engine's outputs are sized to, so it recompiles.
+  const recompact = assignment.compact ? compactMs(costs, sqlRows) : 0;
   const suffix = {
     sql: sqlScanMs(costs, sourceRows, scannedColumns, sqlOps)
       + castMs(costs, castElements)
       + uploadMs(costs, totalBytes, chunks)
       + cpuEvalMs(costs, sqlRows, cpuOps)
-      + kernelMs(costs, sqlRows, gpuOps),
+      + kernelMs(costs, sqlRows, gpuOps)
+      + (assignment.compact ? costs.compactCompileMs + recompact : 0),
     cpu: cpuEvalMs(costs, sqlRows, cpuOps)
       + uploadMs(costs, totalBytes, 1)
-      + kernelMs(costs, sqlRows, gpuOps),
-    gpu: costs.uniformWriteMs + (gpuOps > 0 ? kernelMs(costs, sqlRows, gpuOps) : 0),
+      + kernelMs(costs, sqlRows, gpuOps)
+      + recompact,
+    gpu: costs.uniformWriteMs + (gpuOps > 0 ? kernelMs(costs, sqlRows, gpuOps) : 0) + recompact,
   };
+  /**
+   * A parameter only a compacted filter reads re-runs the compaction and nothing else: the
+   * kernel's outputs do not depend on it. This is the route that makes compaction cheap to
+   * drag — cheaper than the mask, which re-runs the whole fused kernel.
+   */
+  const compactOnly = costs.uniformWriteMs + recompact;
 
   // Drawing is a recurring cost, and the number of instances is what a filter's placement
   // decides. A discard mask keeps every row and re-rasterizes it every frame; a SQL filter
   // removes it once. Omitting this term made masked plans look cheaper than filtered ones.
   const frames = costs.horizonSec * costs.frameRateHz;
   acc.addInteract(
-    `render ${sqlRows.toLocaleString()} instances x ${frames.toFixed(0)} frames`,
-    frames * renderFrameMs(costs, sqlRows),
+    `render ${drawnRows.toLocaleString()} instances x ${frames.toFixed(0)} frames`,
+    frames * renderFrameMs(costs, drawnRows),
   );
 
   for (const [name, spec] of Object.entries(analysis.params)) {
@@ -337,7 +385,11 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
       earliest = earliest === undefined ? stage : earlier(earliest, stage);
     }
     if (!earliest) continue;
-    acc.addInteract(`rebind ${name} (${earliest}, ${rate}/s)`, rate * costs.horizonSec * suffix[earliest]);
+    const onlyCompacted = assignment.compact && earliest === 'gpu'
+      && !kernelNodes.some((node) => node.params.includes(name));
+    const route = onlyCompacted ? 'compaction' : earliest;
+    const ms = onlyCompacted ? compactOnly : suffix[earliest];
+    acc.addInteract(`rebind ${name} (${route}, ${rate}/s)`, rate * costs.horizonSec * ms);
   }
 
   return {
@@ -406,6 +458,42 @@ function policyAssignment(analysis: Analysis, ctx: OptimizeContext, notes: strin
 }
 
 // ---------------------------------------------------------------------------
+// Compaction
+// ---------------------------------------------------------------------------
+
+function hasGpuFilter(analysis: Analysis, cpuEnd: number): boolean {
+  return analysis.order.slice(cpuEnd).some((node) => node.kind === 'filter');
+}
+
+/**
+ * Why this assignment cannot compact, or `undefined` if it can. Legality, not cost: each of
+ * these would produce a plan the runtime cannot execute.
+ */
+function compactionBlocker(analysis: Analysis, assignment: Assignment): string | undefined {
+  // Only the point pass has an indexed draw. A heatmap bins every row it is given, and a
+  // layer hands buffers to deck, which draws them itself.
+  if (analysis.render.mode !== 'points' || analysis.layer) {
+    return 'GPU compaction feeds an indexed point draw; this output is not a point pass';
+  }
+  const order = analysis.order;
+  for (let i = assignment.sqlEnd; i < assignment.cpuEnd; i++) {
+    if (order[i].kind === 'filter') {
+      return `'${order[i].id}' is a CPU-stage filter; its mask would have to be compacted too`;
+    }
+  }
+  const widths = new Map<string, number>();
+  for (const node of order) if (node.kind === 'attribute' && node.name) widths.set(node.name, node.width);
+  for (let i = assignment.cpuEnd; i < order.length; i++) {
+    const node = order[i];
+    if (node.kind !== 'filter') continue;
+    if (!compactable(node.expr!)) {
+      return `'${node.id}' uses an operation the compaction engine lacks (functions, %, vectors, conditionals)`;
+    }
+    const wide = node.reads.find((r) => (widths.get(r) ?? 1) !== 1);
+    if (wide) return `'${node.id}' reads vector attribute '${wide}'; compaction reads scalars`;
+  }
+  return undefined;
+}
 
 function changeRate(spec: { changeRate?: number; kind?: 'value' | 'structural' }): number {
   if (spec.changeRate !== undefined) return Math.max(0, spec.changeRate);
@@ -428,12 +516,19 @@ function countStorageBindings(
   analysis: Analysis,
   assignment: Assignment,
 ): { reads: number; writes: number; ramp: boolean; total: number } {
-  const gpuNodes = analysis.order.slice(assignment.cpuEnd);
+  const allGpu = analysis.order.slice(assignment.cpuEnd);
+  // A compacted filter is not in the kernel. What it reads, though, has to be in a buffer
+  // the compaction engine can see, so those names count as external.
+  const gpuNodes = assignment.compact ? allGpu.filter((node) => node.kind !== 'filter') : allGpu;
   if (gpuNodes.length === 0) return { reads: 0, writes: 0, ramp: false, total: 0 };
 
   // Must match `buildKernel`: a temporary nothing outside the kernel reads stays in a
   // register and is never bound. Both read the same rule.
   const external = externalAttributes(analysis);
+  if (assignment.compact) {
+    for (const node of allGpu) if (node.kind === 'filter') for (const r of node.reads) external.add(r);
+    external.delete(analysis.conventions.mask);
+  }
 
   const written = new Set<string>();
   const registerOnly = new Set<string>();
@@ -506,6 +601,7 @@ function label(a: Assignment, n: number): string {
   const parts = [`sql[0,${a.sqlEnd})`];
   if (a.cpuEnd > a.sqlEnd) parts.push(`cpu[${a.sqlEnd},${a.cpuEnd})`);
   if (n > a.cpuEnd) parts.push(`gpu[${a.cpuEnd},${n})`);
+  if (a.compact) parts.push('+compact');
   return parts.join(' ');
 }
 

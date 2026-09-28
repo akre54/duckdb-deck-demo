@@ -25,7 +25,7 @@ import {
 } from './analyze.js';
 import type { AttributeConventions } from './conventions.js';
 import {
-  optimize, stageOf, type Assignment, type Candidate, type Policy, type OptimizeResult,
+  optimize, stageOf, sameAssignment, type Assignment, type Candidate, type Policy, type OptimizeResult,
 } from './optimizer.js';
 import { type CostConstants, DEFAULT_COSTS, type CostBreakdown } from './cost.js';
 import type { SourceStats } from './stats.js';
@@ -158,6 +158,18 @@ export interface PhysicalPlan {
   assignments: { nodeId: string; type: string; engine: 'sql' | 'cpu' | 'gpu' | 'scalar' | 'render' | 'source'; why: string }[];
   notes: string[];
   maskAttribute?: string;
+  /**
+   * Present when the plan compacts on the GPU (`Assignment.compact`): the conjunction of the
+   * GPU-stage filters, for the target's compaction engine to evaluate after the kernel. The
+   * renderer draws the compacted ids indirectly; no mask attribute exists for these filters.
+   */
+  compaction?: {
+    predicate: Expr;
+    /** Attributes the predicate reads. Each has a buffer, and each is a scalar. */
+    reads: string[];
+    /** Parameters it reads. A change to one of these alone re-runs only the compaction. */
+    params: string[];
+  };
   explain: Explain;
 }
 
@@ -399,6 +411,8 @@ function emit(
 
   /** Mask expression accumulated per non-SQL stage. */
   const maskExpr: Partial<Record<'cpu' | 'gpu', Expr>> = {};
+  /** GPU-stage predicate the compaction engine evaluates, when the assignment compacts. */
+  let compactExpr: Expr | undefined;
 
   for (let i = 0; i < n; i++) {
     const node = order[i];
@@ -411,6 +425,14 @@ function emit(
           assignments.push({
             nodeId: node.id, type: 'filter', engine: 'sql',
             why: `WHERE clause; removes rows (est. ${pct(selectivityOf(chosen, node.id))} kept)`,
+          });
+        } else if (stage === 'gpu' && assignment.compact) {
+          compactExpr = compactExpr
+            ? { kind: 'binary', op: '&&', left: compactExpr, right: node.expr! }
+            : node.expr!;
+          assignments.push({
+            nodeId: node.id, type: 'filter', engine: 'gpu',
+            why: `GPU compaction; rows removed on the GPU and drawn indirectly (est. ${pct(selectivityOf(chosen, node.id))} kept), no requery`,
           });
         } else {
           // Outside SQL a predicate cannot remove rows, so it becomes a discard mask and
@@ -553,6 +575,10 @@ function emit(
   // must be selected even when no stage reads it. A channel bound straight to a source column
   // (`size: 'mag'`) used to be dropped here, and the runtime then skipped the binding silently.
   const external = externalAttributes(analysis);
+  // The compaction engine reads its inputs from buffers after the kernel, so they are external
+  // to it, and any source column among them must be selected even if no kernel node reads it.
+  const compactReads = compactExpr ? columnsOf(compactExpr) : [];
+  for (const r of compactReads) external.add(r);
   for (const name of external) if (analysis.sourceSchema.has(name)) needed.add(name);
 
   if (aggregateInSql && aggregateNode?.aggs && aggregateNode.groupBy) {
@@ -713,9 +739,9 @@ function emit(
       throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
     }
   }
-  // CPU-stage params are neither SQL binds nor uniforms, but must still be declared.
-  for (const s of cpuStage) {
-    for (const p of paramsIn(s.expr!)) {
+  // CPU-stage and compaction params are neither SQL binds nor uniforms, but must still be declared.
+  for (const expr of [...cpuStage.map((s) => s.expr!), ...(compactExpr ? [compactExpr] : [])]) {
+    for (const p of paramsIn(expr)) {
       if (!declaredParams[p]) {
         throw new PlanError(`Parameter '${p}' is referenced but not declared in graph.params`);
       }
@@ -774,9 +800,7 @@ function emit(
     why: assignments.find((a) => a.nodeId === node.id)?.why ?? '',
   }));
 
-  const chosenCandidate = chosen.candidates.find(
-    (c) => c.assignment.sqlEnd === assignment.sqlEnd && c.assignment.cpuEnd === assignment.cpuEnd,
-  );
+  const chosenCandidate = chosen.candidates.find((c) => sameAssignment(c.assignment, assignment));
 
   assignments.push({
     nodeId: analysis.render.id, type: 'render', engine: 'render',
@@ -802,6 +826,9 @@ function emit(
     assignments,
     notes,
     maskAttribute,
+    compaction: compactExpr
+      ? { predicate: compactExpr, reads: compactReads, params: paramsIn(compactExpr) }
+      : undefined,
     explain: {
       method: chosen.method,
       chosen: assignment,

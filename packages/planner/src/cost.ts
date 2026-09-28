@@ -52,6 +52,15 @@ export interface CostConstants {
    * 99k-instance filtered one.
    */
   renderPerInstanceMs: number;
+  /** Fixed cost of one GPU compaction pass: predicate, scan and count, as encoded. */
+  compactFixedMs: number;
+  /** Marginal cost of compacting one row. */
+  compactPerRowMs: number;
+  /**
+   * One-time cost of compiling a compaction for a row count. Paid at build and again after
+   * a requery, because the engine's outputs are sized to the rows.
+   */
+  compactCompileMs: number;
   /** Frames per second assumed when amortizing render cost. */
   frameRateHz: number;
   /** How far ahead to amortize parameter changes and rendering. */
@@ -76,6 +85,11 @@ export const DEFAULT_COSTS: CostConstants = {
   uniformWriteMs: 0.01,
   renderFixedMs: 0.05,
   renderPerInstanceMs: 6.3e-6,
+  // luma.gl GPU Dataframe on Apple Metal-3 (FINDINGS §12): 0.33 ms at 100k rows and 1.58 ms at
+  // 4M, filter only, drained. Compile is the warm figure; the first one is ~5x that.
+  compactFixedMs: 0.3,
+  compactPerRowMs: 3.1e-7,
+  compactCompileMs: 25,
   frameRateHz: 60,
   horizonSec: 4,
 };
@@ -173,6 +187,10 @@ export function kernelMs(c: CostConstants, rows: number, ops: number): number {
 
 export function cpuEvalMs(c: CostConstants, rows: number, ops: number): number {
   return rows * ops * c.cpuPerRowPerOpMs;
+}
+
+export function compactMs(c: CostConstants, rows: number): number {
+  return c.compactFixedMs + rows * c.compactPerRowMs;
 }
 
 /** One frame of drawing `instances` points. */

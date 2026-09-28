@@ -2,6 +2,8 @@
 
 export interface Gpu {
   device: GPUDevice;
+  /** Kept so a library that wraps the device (luma's `WebGPUDevice`) can report adapter info. */
+  adapter: GPUAdapter;
   context: GPUCanvasContext;
   format: GPUTextureFormat;
   canvas: HTMLCanvasElement;
@@ -75,5 +77,5 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<Gpu> {
     return { width, height, depth: depth.createView() };
   };
 
-  return { device, context, format, canvas, sync };
+  return { device, adapter, context, format, canvas, sync };
 }

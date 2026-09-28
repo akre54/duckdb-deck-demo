@@ -8,6 +8,7 @@
 export { initGpu, GpuUnavailable, type Gpu } from './device.js';
 export { AttributeSet, align4, type GpuAttribute } from './attributes.js';
 export { Kernel } from './compute.js';
+export type { Compactor, CompactorFactory, CompactorInput } from './compaction.js';
 export {
   OrbitCamera, perspective, lookAt, multiply, VIEW_UNIFORM_SIZE, type OrbitState,
 } from './camera.js';
@@ -19,5 +20,5 @@ export {
 export { Bin2dPass, WEIGHT_FIXED_POINT, type Bin2dBindings } from './passes/bin2d.js';
 export {
   Runtime,
-  type BuildResult, type BuildTimings, type AttributeReport,
+  type BuildResult, type BuildTimings, type AttributeReport, type ParamRoute,
 } from './runtime.js';

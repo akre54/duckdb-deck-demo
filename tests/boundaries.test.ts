@@ -202,14 +202,15 @@ describe('layer boundaries', () => {
     expect(violations).toEqual([]);
   });
 
-  it('only the duckdb entry imports duckdb-wasm, and only deck imports deck.gl/luma', () => {
+  it('only the duckdb entry imports duckdb-wasm, and only deck and luma import deck.gl/luma', () => {
     const offenders: Record<string, string[]> = {};
     for (const file of [...LIB_FILES, ...PLANNER_FILES]) {
       for (const specifier of importsOf(file)) {
         const misplaced =
           (specifier.startsWith('@duckdb/') && !file.startsWith('src/duckdb/')) ||
-          ((specifier.startsWith('@deck.gl/') || specifier.startsWith('@luma.gl/')) &&
-            !file.startsWith('src/deck/'));
+          (specifier.startsWith('@deck.gl/') && !file.startsWith('src/deck/')) ||
+          (specifier.startsWith('@luma.gl/') &&
+            !file.startsWith('src/deck/') && !file.startsWith('src/luma/'));
         if (misplaced) (offenders[file] ??= []).push(specifier);
       }
     }
@@ -264,6 +265,7 @@ describe('entry points', () => {
       [PLANNER_LIB, `${PLANNER}/src`, `${PLANNER}/src/index.ts`],
       [LIB_FILES, 'src/webgpu', 'src/webgpu/index.ts'],
       [LIB_FILES, 'src/program', 'src/program/index.ts'],
+      [LIB_FILES, 'src/luma', 'src/luma/index.ts'],
     ] as const) {
       const barrelSource = readFileSync(join(ROOT, barrel), 'utf8');
       const modules = files.filter(
