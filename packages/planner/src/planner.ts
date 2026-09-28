@@ -605,11 +605,15 @@ function emit(
     }
   } else {
     // Projection pushdown: only source columns something downstream reads.
-    const passthrough = [...needed].filter((c) => analysis.sourceSchema.has(c)).sort();
-    // Select ROWID if requested and not already in passthrough
+    // `__rowid` is in the analysed schema so expressions can name it, but the relation has no
+    // such column: it is DuckDB's ROWID pseudo-column, selected by `rowidExpr` below. Letting it
+    // through as a passthrough emitted `"__rowid" AS "__rowid"`, which DuckDB rejects.
     const rowidExpr = analysis.rowIdColumn === '__rowid'
       ? 'CAST(ROWID AS INTEGER) AS "__rowid"'
       : undefined;
+    const passthrough = [...needed]
+      .filter((c) => analysis.sourceSchema.has(c) && !(rowidExpr && c === '__rowid'))
+      .sort();
     const items = [
       ...(rowidExpr ? [rowidExpr] : []),
       // Cast in SQL: everything reaching a GPU buffer is f32, so narrowing here uses DuckDB's

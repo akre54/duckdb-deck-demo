@@ -238,7 +238,8 @@ export function closeTo(actual: number[], expected: number[], label: string, tol
     }
     const tol = Math.max(tolerance, Math.abs(expected[i]) * tolerance);
     const diff = Math.abs(actual[i] - expected[i]);
-    if (diff >= tol) {
+    // Tolerance 0 means exact: `diff >= 0` is always true and failed identical values.
+    if (tolerance === 0 ? diff !== 0 : diff >= tol) {
       throw new Error(`${label}[${i}]: ${actual[i]} vs ${expected[i]} (diff: ${diff}, tol: ${tol})`);
     }
   }
