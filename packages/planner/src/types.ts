@@ -65,7 +65,7 @@ export interface SourceNode {
   file?: FileSource;
   /**
    * Preserve source row identity through filtering and compaction.
-   * - `true`: use DuckDB ROWID (1-indexed int64, cast to uint32)
+   * - `true`: use DuckDB ROWID (0-based row position of a table, int64 cast to INTEGER)
    * - `string`: use named numeric column as key
    * Generates `__rowid` attribute (or the named column) with `type: 'raw'`.
    */

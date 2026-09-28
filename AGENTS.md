@@ -15,6 +15,9 @@ packages/planner/   @noodles.gl/planner — headless. Expression IR + three back
                     doc.ts, lower.ts, keyframes.ts. Zero runtime dependencies.
 src/webgpu/         device, attributes, kernels, camera, calibration, render passes, runtime
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
+src/luma/           LumaFilter + lumaCompactor: luma.gl's GPU Dataframe as the runtime's
+                    compaction engine (FINDINGS §12). The only entry besides deck that
+                    imports luma
 src/program/        ProgramRuntime, MaterializingCatalog (the memo), queryLayer/evaluateLayer
 src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, program-pane.ts
                     (see docs/deck-and-luma.md)
@@ -36,6 +39,7 @@ npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
 npm run dev        # the inspector on :5173, the node editor at /editor/
 npm run bench      # throughput, reported not asserted
+npm run perf:gpu   # engine race: sql / gpu-mask / cost / luma / js, writes tests/browser/__perf__
 ```
 
 Run `npm test` and `npm run typecheck` on every change. Run `npm run test:gpu` for anything
@@ -115,6 +119,9 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 - **A prop-only change must hand deck the same binary `data` object.** `DeckProgramPane`
   caches by `LayerData` identity. Building a fresh object per frame turns a uniform write into
   a full attribute upload.
+- **Give luma's GPU Dataframe packed buffers, not DuckDB's record batches.** It dispatches
+  and compacts per batch, so 2048-row chunks turn a 1.6 ms filter into 90 ms at 4M rows and
+  yield one id list per batch. Pack first (the chunked upload tier does), then wrap.
 - **An expression is SQL-feasible only if its vectors are at the top level.** `enginesFor`
   checks this; a new construct that nests a vector must keep that check true.
 
@@ -131,6 +138,10 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
   queries bind them. Do not add binds to relation SQL.
 - The keyframe math in `keyframes.ts` is ported from Noodles.gl (Apache-2.0). Keep the
   attribution in its header.
+
+- **Compaction is a capability, not a luma dependency.** The planner knows `compactable()` and
+  `TargetCaps.compaction`; only `src/luma` knows luma. `toLumaExpr` must accept exactly what
+  `compactable` accepts — a browser test holds them together. Widen one, widen both.
 
 ## Scope
 

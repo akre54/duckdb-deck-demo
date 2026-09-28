@@ -10,7 +10,7 @@
 
 // --- expression IR ---------------------------------------------------------
 export {
-  parseExpr, walk, columnsOf, paramsOf, enginesFor, isAggregate, widthOf,
+  parseExpr, walk, columnsOf, paramsOf, enginesFor, compactable, isAggregate, widthOf,
   FUNCTIONS, ExprError,
   type Expr, type UnaryOp, type BinaryOp, type Engine, type FnSpec, type WidthEnv,
 } from './expr.js';
@@ -97,7 +97,7 @@ export {
   type LayerAnalysis, type LayerBinding, type ColumnType, type ColumnTypes,
 } from './analyze.js';
 export {
-  optimize, stageOf,
+  optimize, stageOf, sameAssignment,
   type Policy, type Assignment, type Candidate, type OptimizeContext, type OptimizeResult,
 } from './optimizer.js';
 export {
@@ -109,7 +109,7 @@ export {
 // --- cost model and statistics --------------------------------------------
 export {
   DEFAULT_COSTS, CostAccumulator, emptyBreakdown,
-  sqlScanMs, uploadMs, castMs, interleaveMs, kernelMs, cpuEvalMs, renderFrameMs,
+  sqlScanMs, uploadMs, castMs, interleaveMs, kernelMs, cpuEvalMs, renderFrameMs, compactMs,
   estimateChunks, DUCKDB_BATCH_ROWS,
   type CostConstants, type CostBreakdown, type CostTerm,
 } from './cost.js';
@@ -121,7 +121,7 @@ export {
 
 // --- targets ---------------------------------------------------------------
 export {
-  targetCaps, TARGET_IDS, type TargetId, type TargetCaps, type DeviceLimits,
+  targetCaps, withCompaction, TARGET_IDS, type TargetId, type TargetCaps, type DeviceLimits,
 } from './target.js';
 
 // --- data sources ----------------------------------------------------------

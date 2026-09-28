@@ -26,6 +26,10 @@
     "./program": {
       "types": "./dist/program/index.d.ts",
       "import": "./dist/program/index.js"
+    },
+    "./luma": {
+      "types": "./dist/luma/index.d.ts",
+      "import": "./dist/luma/index.js"
     }
   },
   "scripts": {
@@ -38,7 +42,8 @@
     "test:gpu": "vitest run --config vitest.browser.config.ts",
     "bench": "vitest bench --run --config vitest.config.ts",
     "bench:gpu": "vitest bench --run --config vitest.browser.config.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "perf:gpu": "VITE_PERF=1 vitest run --config vitest.browser.config.ts tests/browser/engines.browser.test.ts"
   },
   "dependencies": {
     "@noodles.gl/planner": "*"
@@ -50,6 +55,8 @@
     "@deck.gl/mapbox": "^9.4.0",
     "@duckdb/duckdb-wasm": "^1.29.0",
     "@luma.gl/core": "^9.4.0",
+    "@luma.gl/experimental": "^9.4.2",
+    "@luma.gl/gpgpu": "^9.4.2",
     "@luma.gl/webgpu": "^9.4.0"
   },
   "peerDependenciesMeta": {
@@ -71,6 +78,12 @@
     "@luma.gl/core": {
       "optional": true
     },
+    "@luma.gl/experimental": {
+      "optional": true
+    },
+    "@luma.gl/gpgpu": {
+      "optional": true
+    },
     "@luma.gl/webgpu": {
       "optional": true
     }
@@ -81,6 +94,8 @@
     "@deck.gl/layers": "^9.4.0",
     "@deck.gl/mapbox": "^9.4.0",
     "@duckdb/duckdb-wasm": "^1.29.0",
+    "@luma.gl/experimental": "^9.4.2",
+    "@luma.gl/gpgpu": "^9.4.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.7.0",

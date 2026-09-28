@@ -33,6 +33,16 @@ export interface TargetCaps {
    * optimizer rejects candidates that exceed it rather than pricing them.
    */
   maxStorageBuffersPerStage: number;
+  /**
+   * A GPU stream-compaction engine is available: a filter in the `compactable` subset can
+   * remove rows on the GPU and hand the renderer a compacted id list plus a GPU-resident
+   * count for `drawIndirect`. Without it a GPU-stage filter can only be a discard mask.
+   *
+   * No built-in target has it. It depends on the host supplying an engine (the runtime's
+   * `compactor` option, which `src/luma` fills with luma.gl's GPU Dataframe), so the host
+   * turns it on — see `withCompaction`.
+   */
+  compaction: boolean;
   /** Shown in the EXPLAIN pane when a capability, not a cost, forced a placement. */
   note: string;
 }
@@ -76,6 +86,7 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
         appOwnedBuffers: true,
         gpuBudgetBytes: budget,
         maxStorageBuffersPerStage: storageBuffers,
+        compaction: false,
         note: 'compute + app-owned buffers',
       };
     case 'deck-webgpu':
@@ -90,6 +101,7 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
         // WebGPU defaults or pointed at ours. 8 is a real constraint for this target, and
         // the optimizer has to plan within it.
         maxStorageBuffersPerStage: WEBGPU_DEFAULT_STORAGE_BUFFERS,
+        compaction: false,
         note: 'luma webgpuAdapter: compute + app-owned buffers, but capped at WebGPU default limits',
       };
     case 'deck-webgl2':
@@ -100,9 +112,19 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
         appOwnedBuffers: true,
         gpuBudgetBytes: budget,
         maxStorageBuffersPerStage: storageBuffers,
+        compaction: false,
         note: 'no compute shaders on WebGL2, so the GPU stage is unavailable',
       };
   }
+}
+
+/**
+ * The same target with a compaction engine attached. Meaningless without compute, so a
+ * target lacking it is returned unchanged.
+ */
+export function withCompaction(caps: TargetCaps): TargetCaps {
+  if (!caps.compute) return caps;
+  return { ...caps, compaction: true, note: `${caps.note}; GPU compaction available` };
 }
 
 export const TARGET_IDS: TargetId[] = ['webgpu-native', 'deck-webgpu', 'deck-webgl2'];

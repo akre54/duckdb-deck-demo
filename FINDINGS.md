@@ -408,6 +408,99 @@ The planner's node tests now run SQL for real, through duckdb-wasm's blocking No
 (`tests/duckdb-node.ts`). That is the "test by executing" rule applied to the half of the
 stack that previously could only be shown to compile outside a browser.
 
+## 12. luma.gl's GPU Dataframe beats our discard mask, as a filter engine only
+
+luma 9.4.2 ships `@luma.gl/experimental/gpu-dataframe`: a WebGPU executor that compiles a
+predicate into a command graph producing a selection mask, the **compacted** ids of the
+selected rows, and a per-batch selected count, all on the GPU. §4's complaint was that a GPU
+filter here cannot remove rows. luma's compaction can. So `src/luma/` runs luma's filter over
+our own attribute buffers, and `PointsPass` gained an indexed `drawIndirect`: instance `k` draws
+row `ids[k]`, and luma's count is copied into the draw arguments on the GPU. Nothing is read back.
+
+`npm run perf:gpu` (`tests/browser/engines.browser.test.ts`) runs one workload, `v > {{cut}}`
+feeding a point layer, through six engines on one device and one DuckDB table. It checks every
+engine's selected count against a CPU count before timing anything. *update* is one slider tick
+to drained pixels. *frame* is the steady state after it. Apple Metal-3, median of 9, 1 px points.
+Full table in `tests/browser/__perf__/engines.md`.
+
+| 4M rows | sel | update ms | frame ms | drawn |
+|---|---:|---:|---:|---:|
+| sql (requery + upload) | 0.05 | 31.6 | 0.31 | 200k |
+| gpu-mask (uniform + kernel) | 0.05 | 6.17 | 5.30 | 4M |
+| cost (chose sql) | 0.05 | 27.7 | 0.30 | 200k |
+| **luma** (compact + drawIndirect) | 0.05 | **1.80** | **0.30** | 200k |
+| js loop (deck-style) | 0.05 | 6.55 | 0.44 | 200k |
+| gpu-mask | 0.5 | 6.80 | 5.40 | 4M |
+| **luma** | 0.5 | **5.02** | **2.94** | 2M |
+| gpu-mask | 0.9 | 7.48 | 5.51 | 4M |
+| luma | 0.9 | 7.84 | 5.18 | 3.6M |
+
+**It wins wherever the filter removes rows, and ties where it does not.** At 5% selectivity luma
+updates 15× faster than the plan our optimizer actually chose, SQL, and it draws as cheaply. It
+draws 18× cheaper than the discard mask. At 90% it ties the mask, since both draw about the
+same number of rows. Compaction is a strict improvement for a slider-driven filter. The
+cost-based choice the planner makes today (requery when selective, mask when not) is the best of
+two engines that are both beaten by a third.
+
+**The indirect, indexed draw costs nothing measurable.** luma and sql draw the same K rows in
+the same frame time (0.30 vs 0.31 ms at 200k), so reading row ids through one extra storage
+buffer is free here.
+
+**Batch topology dominates luma's cost.** luma preserves record batches: one dispatch per
+batch and one id list per batch. Handing it DuckDB's 2048-row chunks as-is (the `luma-batched`
+row, same memory, sliced views) costs 90 ms per filter at 4M rows instead of 1.6 ms, and 2.4 s to
+compile instead of 27 ms. Per-batch ids would also need one draw call per batch. So luma only works
+here on top of §2's chunked upload, which packs DuckDB's batches into one buffer. Arrow-shaped
+input and GPU-shaped input are different things, and the packing is where they meet.
+
+**What it cannot do is most of what our kernels do.** luma's expression language is `+ - * /`,
+comparisons, `and`/`or`/`not` and null tests. There is no `%`, no functions, no vectors and no
+conditionals. `toLumaExpr` returning `null` is the capability test, like `enginesFor`. So luma is
+a filter engine beside our kernels, not a replacement for them. In the planner's terms it is a
+fourth placement for `filter` nodes only.
+
+### 12a. Compaction as a planned placement
+
+It is now wired in, without the planner learning luma's name. Here is how the pieces fit:
+
+- **Capability.** `TargetCaps.compaction` is the capability, and `compactable(expr)` is the rule
+  for which predicates qualify. `Assignment.compact` is a third field on a candidate, and it
+  exists only where a GPU-stage filter does. The search is still exhaustive.
+- **Legality.** A compacting candidate is illegal unless its output is a point pass (the only
+  indexed draw). It also needs no CPU-stage filter, a compactable predicate and scalar inputs.
+- **Pricing.** Compile once, then one compaction pass per rebind. Rendering is priced at the
+  estimated survivors instead of all rows. A parameter only the compacted filter reads gets its
+  own cheapest route, `compact`: the kernel's outputs do not depend on it, so it does not re-run.
+- **Runtime.** It takes a `compactor` factory (`src/webgpu/compaction.ts`), and `src/luma`
+  supplies `lumaCompactor`. The kernel submits first, then the compaction, then a draw whose
+  `instanceCount` is copied from the GPU-resident count.
+
+Same sweep, the planner choosing freely (`cost+luma`) against the plan it chose before (`cost`):
+
+| rows | sel | cost: update / frame ms | cost+luma: update / frame ms | cost+luma chose |
+|---:|---:|---:|---:|---|
+| 100k | 0.9 | 0.56 / 0.27 | 0.45 / 0.19 | mask (compaction not worth its compile) |
+| 1M | 0.05 | 7.79 / 0.10 | **0.79** / 0.09 | compact |
+| 4M | 0.05 | 28.8 / 0.32 | **2.27** / 0.32 | compact |
+| 4M | 0.5 | 7.15 / 5.79 | **5.45 / 3.24** | compact |
+| 4M | 0.9 | 8.15 / 6.01 | 8.47 / 5.68 | compact (a wash) |
+
+The planned path lands within about 10% of hand-driven luma at every size. The cost model's
+luma constants come from one machine (`DEFAULT_COSTS.compact*`). They are not calibrated at boot
+the way the kernel constants are. That is the next thing to fix before trusting the 90% cases.
+
+Three smaller results from wiring it up:
+
+- **luma can wrap a device it did not create.** `luma.attachDevice` throws in 9.4 (§5a), but
+  `new WebGPUDevice(props, gpuDevice, adapter, adapter.info)` is exported and works. A luma
+  `Buffer` also takes an existing `GPUBuffer` as `handle`. That is how luma runs on our device,
+  with our raised limits, over our buffers, with no copy.
+- **luma 9.4 can raise its own limits.** `featureLevel: 'max'` makes the WebGPU adapter request
+  every adapter limit. The "no `requiredLimits`" half of §5a #3 has a 9.4 answer. Only
+  `attach()` is still missing, and it still throws in `10.0.0-alpha.2`.
+- **luma's first compile costs 100–150 ms cold**, then 5–30 ms. It is a build-time cost, like
+  pipeline creation, and is not paid per slider tick.
+
 ## Recommended order of work for noodles
 
 Ranked by payoff per unit of risk. The first three are independent of any renderer decision.

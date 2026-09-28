@@ -430,6 +430,47 @@ export function enginesFor(e: Expr): Set<Engine> {
   return engines;
 }
 
+/**
+ * Whether a predicate is in the subset a GPU stream-compaction engine can evaluate: numeric
+ * columns, literals and parameters, `+ - * /`, comparisons, `&& || !`. No `%`, no function
+ * calls, no vectors, swizzles, conditionals or strings — the closed expression language of
+ * luma.gl's GPU Dataframe, which is the engine this capability was written against.
+ *
+ * The root must be boolean. That is a type question the IR does not otherwise ask, so it is
+ * answered here by shape: a comparison, a logical connective, or a negation of one.
+ *
+ * `toLumaExpr` in `src/luma` is a second implementation of the same rule; a browser test
+ * asserts the two agree.
+ */
+export function compactable(e: Expr): boolean {
+  return kindOf(e) === 'bool';
+
+  function kindOf(n: Expr): 'num' | 'bool' | null {
+    switch (n.kind) {
+      case 'num':
+      case 'col':
+      case 'param':
+        return 'num';
+      case 'unary': {
+        const inner = kindOf(n.operand);
+        if (n.op === '-' && inner === 'num') return 'num';
+        if (n.op === '!' && inner === 'bool') return 'bool';
+        return null;
+      }
+      case 'binary': {
+        const l = kindOf(n.left);
+        const r = kindOf(n.right);
+        if (n.op === '&&' || n.op === '||') return l === 'bool' && r === 'bool' ? 'bool' : null;
+        if (l !== 'num' || r !== 'num') return null;
+        if (n.op === '%') return null;
+        return ['+', '-', '*', '/'].includes(n.op) ? 'num' : 'bool';
+      }
+      default:
+        return null;
+    }
+  }
+}
+
 export function isAggregate(e: Expr): boolean {
   let agg = false;
   walk(e, (n) => {

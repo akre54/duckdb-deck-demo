@@ -14,7 +14,7 @@
 import type { Gpu } from './device.js';
 
 import { AttributeSet } from './attributes.js';
-import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, evaluateStage, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
+import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, withCompaction, evaluateStage, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
 import { Kernel } from './compute.js';
 import { OrbitCamera, VIEW_UNIFORM_SIZE } from './camera.js';
 import { PointsPass } from './passes/points.js';
@@ -23,6 +23,7 @@ import {
   SourceRegistry, type SourceProvider, type SqlEngine,
 } from '@noodles.gl/planner';
 import { gpuData } from './gpu-compat.js';
+import type { Compactor, CompactorFactory } from './compaction.js';
 import { calibrate, type CalibrationReport } from './calibrate.js';
 
 export interface BuildTimings {
@@ -83,6 +84,9 @@ function exprUsesParam(node: { expr: unknown }, name: string): boolean {
 const NUMERIC_DUCKDB_TYPES =
   /^(TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|FLOAT|DOUBLE|REAL|DECIMAL)/i;
 
+/** How a parameter change is serviced, cheapest last. See `Runtime.classify`. */
+export type ParamRoute = 'rebuild' | 'requery' | 'cpu' | 'uniform' | 'compact' | 'unused';
+
 export class Runtime {
   readonly camera = new OrbitCamera();
   readonly attributes: AttributeSet;
@@ -92,6 +96,12 @@ export class Runtime {
   private kernels: Kernel[] = [];
   private pointsPass?: PointsPass;
   private binPass?: Bin2dPass;
+  /** The plan's GPU compaction, when it has one. Rebuilt whenever the row count changes. */
+  private compactor?: Compactor;
+  /** `drawIndirect` arguments; the compactor's count is copied into `instanceCount`. */
+  private indirectArgs?: GPUBuffer;
+  /** Set when the compaction must re-run before the next draw. */
+  private compactDirty = false;
 
   private current?: BuildResult;
   private graph?: Graph;
@@ -144,15 +154,25 @@ export class Runtime {
     requeries: 0,
     rebuilds: 0,
     frames: 0,
+    /** Compaction passes run: parameter changes, and every kernel re-run feeding one. */
+    compactions: 0,
   };
 
   /** Rolling GPU-submit-to-submit frame time, milliseconds. */
   frameMs = 0;
   private lastFrameStamp = 0;
 
-  constructor(private readonly gpu: Gpu, private readonly duck: SqlEngine) {
+  /**
+   * `compactor` supplies a GPU compaction engine. With one, the planner may remove rows on the
+   * GPU instead of writing a discard mask (`TargetCaps.compaction`); without one it never will.
+   */
+  constructor(
+    private readonly gpu: Gpu,
+    private readonly duck: SqlEngine,
+    private readonly options: { compactor?: CompactorFactory } = {},
+  ) {
     this.attributes = new AttributeSet(gpu.device);
-    this.target = targetCaps('webgpu-native', gpu.device);
+    this.target = this.caps('webgpu-native');
     this.viewBuffer = gpu.device.createBuffer({
       label: 'view',
       size: VIEW_UNIFORM_SIZE,
@@ -172,7 +192,12 @@ export class Runtime {
   }
 
   setTarget(id: TargetId): void {
-    this.target = targetCaps(id, this.gpu.device);
+    this.target = this.caps(id);
+  }
+
+  private caps(id: TargetId): TargetCaps {
+    const caps = targetCaps(id, this.gpu.device);
+    return this.options.compactor ? withCompaction(caps) : caps;
   }
 
   // -------------------------------------------------------------------------
@@ -370,6 +395,8 @@ export class Runtime {
     const { position } = plan.channels;
     this.attributes.get(position); // fail here, with the attribute list, not in the pass
 
+    if (plan.compaction) this.rebuildCompactor(plan);
+
     if (plan.channels.mode === 'points') {
       this.pointsPass = new PointsPass(
         this.gpu.device,
@@ -383,6 +410,7 @@ export class Runtime {
           mask,
         },
         this.viewBuffer,
+        this.compactor?.indices,
       );
       this.pointsPass.setStyle(1, 1, 0.5, 64);
     } else if (plan.bin2d) {
@@ -428,6 +456,44 @@ export class Runtime {
     };
     this.current = result;
     return result;
+  }
+
+  /**
+   * Compile the plan's compaction over the current attribute buffers.
+   *
+   * The engine's outputs are sized to the row count and it holds the buffers it was given, so
+   * this runs after every build and every requery — the optimizer prices that recompile into
+   * a SQL-stage rebind. Zero rows compiles nothing and draws nothing.
+   */
+  private rebuildCompactor(plan: PhysicalPlan): void {
+    this.compactor?.destroy();
+    this.compactor = undefined;
+    if (!plan.compaction || this.rows === 0) return;
+    const factory = this.options.compactor;
+    if (!factory) {
+      throw new PlanError('plan uses GPU compaction but this runtime was built without a compactor');
+    }
+    const columns: Record<string, GPUBuffer> = {};
+    for (const name of plan.compaction.reads) columns[name] = this.attributes.get(name).buffer;
+    this.compactor = factory({
+      device: this.gpu.device,
+      adapter: this.gpu.adapter,
+      columns,
+      rows: this.rows,
+      predicate: plan.compaction.predicate,
+      params: this.paramValues,
+    });
+    if (!this.indirectArgs) {
+      this.indirectArgs = this.gpu.device.createBuffer({
+        label: 'points:indirect',
+        size: 16,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+      });
+      // [vertexCount, instanceCount, firstVertex, firstInstance]; the count arrives per run.
+      this.gpu.device.queue.writeBuffer(this.indirectArgs, 0, new Uint32Array([6, 0, 0, 0]));
+    }
+    this.pointsPass?.setIndices(this.compactor.indices);
+    this.compactDirty = true;
   }
 
   /**
@@ -497,13 +563,15 @@ export class Runtime {
    * forces a requery, so it wins even if the parameter also appears in a kernel. The
    * routes are exactly the terms the optimizer amortized when it chose the placement.
    */
-  classify(name: string): 'uniform' | 'cpu' | 'requery' | 'rebuild' | 'unused' {
+  classify(name: string): ParamRoute {
     const plan = this.current?.plan;
     if (!plan) return 'unused';
     if (plan.params[name]?.kind === 'structural') return 'rebuild';
     if (plan.sqlParams.includes(name)) return 'requery';
     if (plan.cpuStage.some((s) => s.expr && exprUsesParam({ expr: s.expr }, name))) return 'cpu';
     if (plan.uniformParams.includes(name)) return 'uniform';
+    // Cheapest of all: only the compaction reads it, so the kernel's outputs stand.
+    if (plan.compaction?.params.includes(name)) return 'compact';
     return 'unused';
   }
 
@@ -514,7 +582,7 @@ export class Runtime {
   async setParam(
     name: string,
     value: number,
-  ): Promise<'uniform' | 'cpu' | 'requery' | 'rebuild' | 'unused'> {
+  ): Promise<ParamRoute> {
     this.paramValues[name] = value;
     const route = this.classify(name);
     switch (route) {
@@ -535,6 +603,9 @@ export class Runtime {
         }
         break;
       }
+      case 'compact':
+        this.compactDirty = true;
+        break;
       case 'requery':
         this.counters.requeries++;
         await this.requery();
@@ -588,6 +659,8 @@ export class Runtime {
     // length and has to be recomputed before the kernel or the renderer reads it.
     this.runCpuStage(plan);
     if (this.current) this.current.rows = this.rows;
+    // New row count, possibly new buffers: the compaction compiled for the old ones is stale.
+    if (plan.compaction) this.rebuildCompactor(plan);
     this.kernelsDirty = true;
   }
 
@@ -610,14 +683,27 @@ export class Runtime {
       this.counters.uniformWrites++;
     }
 
-    const encoder = device.createCommandEncoder({ label: 'frame' });
+    let encoder = device.createCommandEncoder({ label: 'frame' });
 
-    if (this.kernelsDirty && this.rows > 0) {
+    const ranKernels = this.kernelsDirty && this.rows > 0;
+    if (ranKernels) {
       for (const k of this.kernels) {
         k.dispatch(encoder, this.attributes, this.rows, WORKGROUP);
         this.counters.kernelDispatches++;
       }
       this.kernelsDirty = false;
+    }
+
+    // The compaction reads what the kernel wrote and submits on its own, so the kernel work
+    // is submitted first and the draw goes in a second command buffer after it. Queue order
+    // is the only synchronization needed; the count never visits the CPU.
+    if (this.compactor && (ranKernels || this.compactDirty)) {
+      device.queue.submit([encoder.finish()]);
+      this.compactor.run(this.paramValues);
+      this.counters.compactions++;
+      this.compactDirty = false;
+      encoder = device.createCommandEncoder({ label: 'frame:draw' });
+      encoder.copyBufferToBuffer(this.compactor.count, 0, this.indirectArgs!, 4, 4);
     }
 
     // The heatmap re-bins every frame because the bins are screen-space: moving the
@@ -642,7 +728,8 @@ export class Runtime {
     });
 
     if (this.binPass) this.binPass.draw(pass);
-    else if (this.pointsPass && this.rows > 0) this.pointsPass.draw(pass, this.rows);
+    else if (this.pointsPass && this.compactor) this.pointsPass.drawIndirect(pass, this.indirectArgs!);
+    else if (this.pointsPass && this.rows > 0 && !this.current.plan.compaction) this.pointsPass.draw(pass, this.rows);
 
     pass.end();
     device.queue.submit([encoder.finish()]);
@@ -654,6 +741,23 @@ export class Runtime {
     }
     this.lastFrameStamp = now;
     this.counters.frames++;
+  }
+
+  /**
+   * How many rows the last compaction kept. A diagnostic readback for tests and the
+   * inspector — the draw path never reads it — so it waits for the GPU.
+   */
+  async compactedCount(): Promise<number | undefined> {
+    if (!this.compactor) return undefined;
+    const staging = this.gpu.device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.gpu.device.createCommandEncoder();
+    encoder.copyBufferToBuffer(this.compactor.count, 0, staging, 0, 4);
+    this.gpu.device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    const n = new Uint32Array(staging.getMappedRange().slice(0))[0];
+    staging.unmap();
+    staging.destroy();
+    return n;
   }
 
   /** Force the kernels to re-run on the next frame. */
@@ -697,11 +801,14 @@ export class Runtime {
     this.pointsPass = undefined;
     this.binPass?.destroy();
     this.binPass = undefined;
+    this.compactor?.destroy();
+    this.compactor = undefined;
   }
 
   destroy(): void {
     this.disposePipelines();
     this.rampBuffer?.destroy();
+    this.indirectArgs?.destroy();
     this.viewBuffer.destroy();
     this.attributes.destroy();
   }

@@ -1,0 +1,658 @@
+{
+  "date": "2026-09-28T16:51:51.214Z",
+  "adapter": {
+    "vendor": "apple",
+    "architecture": "metal-3",
+    "description": ""
+  },
+  "results": [
+    {
+      "engine": "sql",
+      "rows": 100000,
+      "selectivity": 0.9,
+      "drawn": 89980,
+      "buildMs": 20.385000228881836,
+      "updateMs": 5.954999923706055,
+      "frameMs": 0.3478333314259847,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 100000,
+      "selectivity": 0.9,
+      "drawn": 100000,
+      "buildMs": 2.625,
+      "updateMs": 0.5749998092651367,
+      "frameMs": 0.24866666793823242,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 100000,
+      "selectivity": 0.9,
+      "drawn": 100000,
+      "buildMs": 2.4250001907348633,
+      "updateMs": 0.559999942779541,
+      "frameMs": 0.27200001080830893,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 100000,
+      "selectivity": 0.9,
+      "drawn": 100000,
+      "buildMs": 2.4700002670288086,
+      "updateMs": 0.44500017166137695,
+      "frameMs": 0.18833333651224773,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "luma",
+      "rows": 100000,
+      "selectivity": 0.9,
+      "drawn": 89980,
+      "buildMs": 10.070000171661377,
+      "updateMs": 0.8600001335144043,
+      "frameMs": 0.6846666653951009,
+      "filterMs": 0.5199999809265137,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 100000,
+      "selectivity": 0.9,
+      "drawn": null,
+      "buildMs": 71.70499992370605,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 3.015000343322754,
+      "note": "49 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 100000,
+      "selectivity": 0.9,
+      "drawn": 89980,
+      "buildMs": 2.614999771118164,
+      "updateMs": 1.179999828338623,
+      "frameMs": 0.1588333288828532,
+      "filterMs": 0.6700000762939453
+    },
+    {
+      "engine": "sql",
+      "rows": 100000,
+      "selectivity": 0.5,
+      "drawn": 50254,
+      "buildMs": 3.2149996757507324,
+      "updateMs": 3.75,
+      "frameMs": 0.11516666412353516,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 100000,
+      "selectivity": 0.5,
+      "drawn": 100000,
+      "buildMs": 2.3650002479553223,
+      "updateMs": 0.46000003814697266,
+      "frameMs": 0.17916666666666667,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 100000,
+      "selectivity": 0.5,
+      "drawn": 100000,
+      "buildMs": 2.0500001907348633,
+      "updateMs": 0.49499988555908203,
+      "frameMs": 0.2,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 100000,
+      "selectivity": 0.5,
+      "drawn": 50254,
+      "buildMs": 3.869999885559082,
+      "updateMs": 0.6400003433227539,
+      "frameMs": 0.10333333015441895,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 100000,
+      "selectivity": 0.5,
+      "drawn": 50254,
+      "buildMs": 4.275000095367432,
+      "updateMs": 0.565000057220459,
+      "frameMs": 0.11750000317891439,
+      "filterMs": 0.41499996185302734,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 100000,
+      "selectivity": 0.5,
+      "drawn": null,
+      "buildMs": 45.80999994277954,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 3.0199999809265137,
+      "note": "49 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 100000,
+      "selectivity": 0.5,
+      "drawn": 50254,
+      "buildMs": 3.3700003623962402,
+      "updateMs": 1.2100000381469727,
+      "frameMs": 0.12483332951863607,
+      "filterMs": 0.755000114440918
+    },
+    {
+      "engine": "sql",
+      "rows": 100000,
+      "selectivity": 0.05,
+      "drawn": 5027,
+      "buildMs": 1.885000228881836,
+      "updateMs": 2.174999713897705,
+      "frameMs": 0.055666669209798174,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 100000,
+      "selectivity": 0.05,
+      "drawn": 100000,
+      "buildMs": 2.309999942779541,
+      "updateMs": 0.7100000381469727,
+      "frameMs": 0.3681666692097982,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 100000,
+      "selectivity": 0.05,
+      "drawn": 100000,
+      "buildMs": 2.0550003051757812,
+      "updateMs": 0.6350002288818359,
+      "frameMs": 0.31733333269755043,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 100000,
+      "selectivity": 0.05,
+      "drawn": 5027,
+      "buildMs": 3.6599998474121094,
+      "updateMs": 0.4250001907348633,
+      "frameMs": 0.07116665840148925,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 100000,
+      "selectivity": 0.05,
+      "drawn": 5027,
+      "buildMs": 3.5300002098083496,
+      "updateMs": 0.48999977111816406,
+      "frameMs": 0.06266667048136393,
+      "filterMs": 0.4049997329711914,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 100000,
+      "selectivity": 0.05,
+      "drawn": null,
+      "buildMs": 45.234999656677246,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 4.590000152587891,
+      "note": "49 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 100000,
+      "selectivity": 0.05,
+      "drawn": 5027,
+      "buildMs": 1.755000114440918,
+      "updateMs": 0.4049997329711914,
+      "frameMs": 0.05449999173482259,
+      "filterMs": 0.1399998664855957
+    },
+    {
+      "engine": "sql",
+      "rows": 1000000,
+      "selectivity": 0.9,
+      "drawn": 899979,
+      "buildMs": 22.02999973297119,
+      "updateMs": 25.329999923706055,
+      "frameMs": 1.5141666571299235,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 1000000,
+      "selectivity": 0.9,
+      "drawn": 1000000,
+      "buildMs": 13.230000019073486,
+      "updateMs": 2.179999828338623,
+      "frameMs": 1.4709999879201254,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 1000000,
+      "selectivity": 0.9,
+      "drawn": 1000000,
+      "buildMs": 13.054999828338623,
+      "updateMs": 2.195000171661377,
+      "frameMs": 1.447166665395101,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 1000000,
+      "selectivity": 0.9,
+      "drawn": 899979,
+      "buildMs": 18.710000038146973,
+      "updateMs": 2.3299999237060547,
+      "frameMs": 1.3823333422342936,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 1000000,
+      "selectivity": 0.9,
+      "drawn": 899979,
+      "buildMs": 10.809999942779541,
+      "updateMs": 2.3249998092651367,
+      "frameMs": 1.3859999974568684,
+      "filterMs": 0.6349997520446777,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 1000000,
+      "selectivity": 0.9,
+      "drawn": null,
+      "buildMs": 545.3949999809265,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 24.960000038146973,
+      "note": "489 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 1000000,
+      "selectivity": 0.9,
+      "drawn": 899979,
+      "buildMs": 13.699999809265137,
+      "updateMs": 8.320000171661377,
+      "frameMs": 1.4266666571299236,
+      "filterMs": 3.8400001525878906
+    },
+    {
+      "engine": "sql",
+      "rows": 1000000,
+      "selectivity": 0.5,
+      "drawn": 500527,
+      "buildMs": 17.44499969482422,
+      "updateMs": 20.079999923706055,
+      "frameMs": 0.7204999923706055,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 1000000,
+      "selectivity": 0.5,
+      "drawn": 1000000,
+      "buildMs": 13.274999618530273,
+      "updateMs": 2.049999713897705,
+      "frameMs": 1.443666664759318,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 1000000,
+      "selectivity": 0.5,
+      "drawn": 1000000,
+      "buildMs": 12.070000171661377,
+      "updateMs": 2.0399999618530273,
+      "frameMs": 1.425,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 1000000,
+      "selectivity": 0.5,
+      "drawn": 500527,
+      "buildMs": 13.920000076293945,
+      "updateMs": 1.575000286102295,
+      "frameMs": 0.756000010172526,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 1000000,
+      "selectivity": 0.5,
+      "drawn": 500527,
+      "buildMs": 9,
+      "updateMs": 1.559999942779541,
+      "frameMs": 0.7413333415985107,
+      "filterMs": 0.5999999046325684,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 1000000,
+      "selectivity": 0.5,
+      "drawn": null,
+      "buildMs": 437.8550000190735,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 25.22499990463257,
+      "note": "489 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 1000000,
+      "selectivity": 0.5,
+      "drawn": 500527,
+      "buildMs": 13.694999694824219,
+      "updateMs": 9.03499984741211,
+      "frameMs": 0.846999994913737,
+      "filterMs": 5.934999942779541
+    },
+    {
+      "engine": "sql",
+      "rows": 1000000,
+      "selectivity": 0.05,
+      "drawn": 50026,
+      "buildMs": 8.65500020980835,
+      "updateMs": 8.989999771118164,
+      "frameMs": 0.10133333206176758,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 1000000,
+      "selectivity": 0.05,
+      "drawn": 1000000,
+      "buildMs": 12.174999713897705,
+      "updateMs": 1.8899998664855957,
+      "frameMs": 1.3856666723887126,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 1000000,
+      "selectivity": 0.05,
+      "drawn": 50026,
+      "buildMs": 7.34499979019165,
+      "updateMs": 7.789999961853027,
+      "frameMs": 0.1043333371480306,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 1000000,
+      "selectivity": 0.05,
+      "drawn": 50026,
+      "buildMs": 15.634999752044678,
+      "updateMs": 0.7899999618530273,
+      "frameMs": 0.09450000127156576,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 1000000,
+      "selectivity": 0.05,
+      "drawn": 50026,
+      "buildMs": 8.289999961853027,
+      "updateMs": 0.6999998092651367,
+      "frameMs": 0.1059999942779541,
+      "filterMs": 0.5999999046325684,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 1000000,
+      "selectivity": 0.05,
+      "drawn": null,
+      "buildMs": 422.9800000190735,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 24.269999980926514,
+      "note": "489 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 1000000,
+      "selectivity": 0.05,
+      "drawn": 50026,
+      "buildMs": 6.925000190734863,
+      "updateMs": 1.804999828338623,
+      "frameMs": 0.12966667811075847,
+      "filterMs": 1.2799997329711914
+    },
+    {
+      "engine": "sql",
+      "rows": 4000000,
+      "selectivity": 0.9,
+      "drawn": 3600904,
+      "buildMs": 72.30499982833862,
+      "updateMs": 85.56500005722046,
+      "frameMs": 5.484333340326945,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 4000000,
+      "selectivity": 0.9,
+      "drawn": 4000000,
+      "buildMs": 51.125,
+      "updateMs": 8.595000267028809,
+      "frameMs": 5.7300000031789144,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 4000000,
+      "selectivity": 0.9,
+      "drawn": 4000000,
+      "buildMs": 46.80000019073486,
+      "updateMs": 8.149999618530273,
+      "frameMs": 6.010333331425985,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 4000000,
+      "selectivity": 0.9,
+      "drawn": 3600904,
+      "buildMs": 46.18499994277954,
+      "updateMs": 8.46500015258789,
+      "frameMs": 5.679166666666666,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 4000000,
+      "selectivity": 0.9,
+      "drawn": 3600904,
+      "buildMs": 38.920000076293945,
+      "updateMs": 8.224999904632568,
+      "frameMs": 5.836333338419596,
+      "filterMs": 1.6449999809265137,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 4000000,
+      "selectivity": 0.9,
+      "drawn": null,
+      "buildMs": 2478.284999847412,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 90.09999990463257,
+      "note": "1954 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 4000000,
+      "selectivity": 0.9,
+      "drawn": 3600904,
+      "buildMs": 75.78000020980835,
+      "updateMs": 27.735000133514404,
+      "frameMs": 5.456500005722046,
+      "filterMs": 15.329999923706055
+    },
+    {
+      "engine": "sql",
+      "rows": 4000000,
+      "selectivity": 0.5,
+      "drawn": 2002004,
+      "buildMs": 67.625,
+      "updateMs": 76.57000017166138,
+      "frameMs": 3.120999987920125,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 4000000,
+      "selectivity": 0.5,
+      "drawn": 4000000,
+      "buildMs": 44.94000005722046,
+      "updateMs": 7.174999713897705,
+      "frameMs": 5.692500003178915,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 4000000,
+      "selectivity": 0.5,
+      "drawn": 4000000,
+      "buildMs": 44.64500045776367,
+      "updateMs": 7.150000095367432,
+      "frameMs": 5.791999991734823,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 4000000,
+      "selectivity": 0.5,
+      "drawn": 2002004,
+      "buildMs": 47.67500019073486,
+      "updateMs": 5.445000171661377,
+      "frameMs": 3.2359999974568683,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 4000000,
+      "selectivity": 0.5,
+      "drawn": 2002004,
+      "buildMs": 25.21500015258789,
+      "updateMs": 5.110000133514404,
+      "frameMs": 3.2406666755676268,
+      "filterMs": 1.6599998474121094,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 4000000,
+      "selectivity": 0.5,
+      "drawn": null,
+      "buildMs": 2258.039999961853,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 89.125,
+      "note": "1954 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 4000000,
+      "selectivity": 0.5,
+      "drawn": 2002004,
+      "buildMs": 89.68000030517578,
+      "updateMs": 32.269999980926514,
+      "frameMs": 2.980833339691162,
+      "filterMs": 23.800000190734863
+    },
+    {
+      "engine": "sql",
+      "rows": 4000000,
+      "selectivity": 0.05,
+      "drawn": 200312,
+      "buildMs": 31.49500036239624,
+      "updateMs": 32.11500024795532,
+      "frameMs": 0.3230000019073486,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "gpu-mask",
+      "rows": 4000000,
+      "selectivity": 0.05,
+      "drawn": 4000000,
+      "buildMs": 48.110000133514404,
+      "updateMs": 6.414999961853027,
+      "frameMs": 5.471999994913737,
+      "note": "filter in gpu, route=uniform, mask"
+    },
+    {
+      "engine": "cost",
+      "rows": 4000000,
+      "selectivity": 0.05,
+      "drawn": 200312,
+      "buildMs": 26.31500005722046,
+      "updateMs": 28.820000171661377,
+      "frameMs": 0.3230000019073486,
+      "note": "filter in sql, route=requery"
+    },
+    {
+      "engine": "cost+luma",
+      "rows": 4000000,
+      "selectivity": 0.05,
+      "drawn": 200312,
+      "buildMs": 48.83500003814697,
+      "updateMs": 2.2749996185302734,
+      "frameMs": 0.32383333841959633,
+      "note": "filter in gpu, route=compact, compacted"
+    },
+    {
+      "engine": "luma",
+      "rows": 4000000,
+      "selectivity": 0.05,
+      "drawn": 200312,
+      "buildMs": 33.65500020980835,
+      "updateMs": 2.0399999618530273,
+      "frameMs": 0.31149999300638836,
+      "filterMs": 1.9050002098083496,
+      "note": "1 batch"
+    },
+    {
+      "engine": "luma-batched",
+      "rows": 4000000,
+      "selectivity": 0.05,
+      "drawn": null,
+      "buildMs": 2216.5099997520447,
+      "updateMs": null,
+      "frameMs": null,
+      "filterMs": 90.5750002861023,
+      "note": "1954 batches"
+    },
+    {
+      "engine": "js",
+      "rows": 4000000,
+      "selectivity": 0.05,
+      "drawn": 200312,
+      "buildMs": 38.94499969482422,
+      "updateMs": 6.675000190734863,
+      "frameMs": 0.543666664759318,
+      "filterMs": 5.095000267028809
+    }
+  ]
+}

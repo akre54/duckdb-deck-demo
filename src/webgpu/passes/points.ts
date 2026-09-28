@@ -22,6 +22,12 @@ export interface PointsBindings {
   size?: GpuAttribute;
   opacity?: GpuAttribute;
   mask?: GpuAttribute;
+  /**
+   * Draw a compacted id list instead of every row: instance `k` reads row `ids[k]`. The ids
+   * are u32 and come from outside the attribute set (a GPU compaction such as luma's
+   * dataframe filter), so they are a flag here and a buffer on the pass.
+   */
+  indexed?: boolean;
 }
 
 /**
@@ -63,6 +69,8 @@ export function pointsShader(b: PointsBindings): string {
   if (b.opacity) decls.push(`@group(0) @binding(${opaSlot}) var<storage, read> b_opa: array<f32>;`);
   const mskSlot = b.mask ? slot++ : -1;
   if (b.mask) decls.push(`@group(0) @binding(${mskSlot}) var<storage, read> b_msk: array<f32>;`);
+  const idxSlot = b.indexed ? slot++ : -1;
+  if (b.indexed) decls.push(`@group(0) @binding(${idxSlot}) var<storage, read> b_idx: array<u32>;`);
 
   const readColor = b.color ? loadVec('b_col', b.color.width, 3) : 'vec3<f32>(0.55, 0.78, 0.95)';
   const readSize = b.size ? 'b_siz[i * SIZEW + 0u]'.replace('SIZEW', `${b.size.width}u`) : '1.0';
@@ -98,7 +106,7 @@ const CORNERS = array<vec2<f32>, 6>(
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut {
   var out: VsOut;
-  let i = ii;
+  let i = ${b.indexed ? 'b_idx[ii]' : 'ii'};
   let corner = CORNERS[vi];
   out.local = corner;
 
@@ -154,6 +162,7 @@ export class PointsPass {
     private readonly attrs: AttributeSet,
     channels: PointsChannels,
     private readonly viewBuffer: GPUBuffer,
+    private indices?: GPUBuffer,
   ) {
     this.order = [channels.position, channels.color, channels.size, channels.opacity, channels.mask];
     const bindings: PointsBindings = {
@@ -162,6 +171,7 @@ export class PointsPass {
       size: channels.size ? attrs.get(channels.size) : undefined,
       opacity: channels.opacity ? attrs.get(channels.opacity) : undefined,
       mask: channels.mask ? attrs.get(channels.mask) : undefined,
+      indexed: Boolean(indices),
     };
     const code = pointsShader(bindings);
     const module = device.createShaderModule({ label: 'points', code });
@@ -197,6 +207,13 @@ export class PointsPass {
     );
   }
 
+  /** Point an indexed pass at a new id buffer. The pass must have been built indexed. */
+  setIndices(indices: GPUBuffer): void {
+    if (!this.indices) throw new Error('PointsPass was built without an index buffer');
+    this.indices = indices;
+    this.bindGroup = undefined;
+  }
+
   private resolveBindGroup(): GPUBindGroup {
     const used = this.order.filter((n): n is string => Boolean(n));
     const key = this.attrs.bindingKey(used);
@@ -210,6 +227,7 @@ export class PointsPass {
     for (const name of used) {
       entries.push({ binding: slot++, resource: { buffer: this.attrs.get(name).buffer } });
     }
+    if (this.indices) entries.push({ binding: slot++, resource: { buffer: this.indices } });
     this.bindGroup = this.device.createBindGroup({
       label: 'points:bg',
       layout: this.pipeline.getBindGroupLayout(0),
@@ -223,6 +241,17 @@ export class PointsPass {
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.resolveBindGroup());
     pass.draw(6, instances);
+  }
+
+  /**
+   * Draw with the instance count read from `args` on the GPU: `[6, count, 0, 0]` as u32. With
+   * an indexed pass this is the whole point — a GPU compaction writes the count and the CPU
+   * never learns it.
+   */
+  drawIndirect(pass: GPURenderPassEncoder, args: GPUBuffer): void {
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, this.resolveBindGroup());
+    pass.drawIndirect(args, 0);
   }
 
   destroy(): void {
