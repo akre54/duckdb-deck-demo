@@ -10,7 +10,7 @@
 
 // --- expression IR ---------------------------------------------------------
 export {
-  parseExpr, walk, columnsOf, paramsOf, enginesFor, isAggregate, widthOf,
+  parseExpr, walk, columnsOf, paramsOf, simplifyExpr, enginesFor, isAggregate, widthOf,
   FUNCTIONS, ExprError,
   type Expr, type UnaryOp, type BinaryOp, type Engine, type FnSpec, type WidthEnv,
 } from './expr.js';
@@ -33,9 +33,24 @@ export {
 // --- user-defined functions ------------------------------------------------
 export {
   buildRegistry, defineFunction, addFunction, inlineFunctions,
-  parseFunctionDeclaration, FunctionError,
+  parseFunctionDeclaration, FunctionError, GEO_SOURCE_PREFIX,
   type FunctionDef, type FunctionSpec, type FunctionRegistry,
 } from './functions.js';
+
+// --- hoisting: param-only subexpressions as derived parameters -------------
+export {
+  HOIST_PREFIX, hoistParams, derivedValues, withDerived, sourceParams, paramLabel,
+  type DerivedParam, type WithDerived,
+} from './hoist.js';
+
+// --- geospatial functions: inlined point operations, expanded literal geometries --
+export {
+  GEO_PRELUDE, GEO_SPECS, GEO_MACROS, EARTH_RADIUS_M, WEB_MERCATOR_RADIUS_M, WEB_MERCATOR_MAX_LAT,
+} from './geo.js';
+export {
+  type Geometry, type Position, GeometryError, MAX_GEOMETRY_VERTICES, parseGeometry,
+  areaM2, lengthM, perimeterM, bboxOf, centroidOf, vertexMean,
+} from './geometry.js';
 
 // --- graph schema and sugar ------------------------------------------------
 export {
@@ -93,7 +108,7 @@ export {
 // --- planning --------------------------------------------------------------
 export {
   analyze, opCount, PlanError, externalAttributes,
-  type Analysis, type AnalyzedNode, type Schema, type Stage, type RenderChannels,
+  type Analysis, type AnalyzedNode, type AnalyzeOptions, type Schema, type Stage, type RenderChannels,
   type LayerAnalysis, type LayerBinding, type ColumnType, type ColumnTypes,
 } from './analyze.js';
 export {

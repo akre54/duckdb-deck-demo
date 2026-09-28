@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import {
   lowerDocument, parameterValues, compileProgram, targetCaps, flattenSubnets, resolveRef,
   evaluateTrack, bezierEasing, EASING_PRESETS,
-  type EditorDoc, type ProgramPlan, type Lowered,
+  type EditorDoc, type ProgramPlan, type Lowered, type ParamValue,
 } from '@noodles.gl/planner';
 import { MaterializingCatalog } from '../src/program/catalog.js';
 import { queryLayer, evaluateLayer, type LayerData } from '../src/program/execute.js';
@@ -223,6 +223,73 @@ describe('arrivals', () => {
     doc.nodes.find((n) => n.id === 'airport')!.params.text = 'CDG';
     const { program, values } = await compileDoc(doc);
     expect((await data(program, 'trails', values)).rows).toBe(24);
+  });
+});
+
+describe('geometry operators', () => {
+  // Around the Region Filter's default polygon (lower Manhattan): three inside, one 843 m east
+  // of it, one 1264 m west, one 1686 m east.
+  const POINTS = `SELECT * FROM (VALUES (-74.0, 40.73), (-73.98, 40.75), (-73.99, 40.72),
+    (-73.96, 40.73), (-74.03, 40.73), (-73.95, 40.73)) AS t(lng, lat)`;
+  const doc = (region: Record<string, ParamValue>, distance?: Record<string, ParamValue>): EditorDoc => ({
+    version: 1, name: 'geometry',
+    nodes: [
+      { id: 'pts', op: 'sql', x: 0, y: 0, params: { query: POINTS } },
+      { id: 'area', op: 'region', x: 0, y: 0, params: region },
+      { id: 'dist', op: 'geo-distance', x: 0, y: 0, params: distance ?? {} },
+      { id: 'pos', op: 'position', x: 0, y: 0, params: {} },
+      { id: 'dots', op: 'scatter', x: 0, y: 0, params: { position: 'P', radius: 'dist' } },
+      { id: 'map', op: 'deck', x: 0, y: 0, params: {} },
+    ],
+    edges: [['pts', 'area'], ['area', 'dist'], ['dist', 'pos'], ['pos', 'dots']]
+      .map(([source, target], i) => ({ id: `e${i}`, source, sourcePort: 'out', target, targetPort: 'in' }))
+      .concat([{ id: 'e9', source: 'dots', sourcePort: 'out', target: 'map', targetPort: 'layers' }]),
+  });
+  const rows = async (d: EditorDoc) => {
+    const { lowered, program, values } = await compileDoc(d);
+    expect(lowered.errors).toEqual([]);
+    expect(program.errors).toEqual([]);
+    return data(program, 'dots', values);
+  };
+
+  it('keeps rows inside, outside and near the polygon', async () => {
+    expect((await rows(doc({ mode: 'inside' }))).rows).toBe(3);
+    expect((await rows(doc({ mode: 'outside' }))).rows).toBe(3);
+    expect((await rows(doc({ mode: 'near', metres: 1000 }))).rows).toBe(4);
+    expect((await rows(doc({ mode: 'near', metres: 1500 }))).rows).toBe(5);
+  });
+
+  it('binds the distance as a value, so dragging it never replans', async () => {
+    const { lowered, program } = await compileDoc(doc({ mode: 'near', metres: 1000 }));
+    expect(lowered.graph.params!.area__metres.value).toBe(1000);
+    expect(program.routes.area__metres.map((r) => r.target)).toEqual(['dots']);
+    expect(program.routes.area__metres.some((r) => r.route === 'rematerialize')).toBe(false);
+  });
+
+  it('measures the distance to the polygon, zero inside', async () => {
+    const polygon = 'POLYGON((-74.02 40.70, -73.97 40.71, -73.97 40.76, -74.01 40.76, -74.02 40.70))';
+    const d = await rows(doc({ mode: 'near', metres: 5000 }, { geometry: polygon, units: 'km' }));
+    const km = column(d, 'dist').sort((a, b) => a - b);
+    expect(km.slice(0, 3)).toEqual([0, 0, 0]);
+    expect(km[3]).toBeCloseTo(0.843, 2);
+    expect(km[5]).toBeCloseTo(1.686, 2);
+  });
+
+  it('reports a bad geometry on the node', () => {
+    // lat/lng order: San Francisco's longitude read as a latitude. (New York's, −74, is a
+    // valid latitude, which is why the check alone cannot catch every swap.)
+    const bad = lowerDocument(doc({ mode: 'inside', geometry: 'POLYGON((37.7 -122.5, 37.8 -122.5, 37.8 -122.4, 37.7 -122.5))' }));
+    expect(bad.errors).toContainEqual(expect.objectContaining({ nodeId: 'area', message: expect.stringMatching(/latitude -122.5/) }));
+    const line = lowerDocument(doc({ mode: 'inside', geometry: 'LINESTRING(0 0, 1 1)' }));
+    expect(line.errors).toContainEqual(expect.objectContaining({ nodeId: 'area', message: expect.stringMatching(/needs a polygon, got a LineString/) }));
+  });
+
+  it('escapes quotes in GeoJSON properties', async () => {
+    const feature = JSON.stringify({
+      type: 'Feature', properties: { name: "Hell's Kitchen" },
+      geometry: { type: 'Polygon', coordinates: [[[-74.02, 40.70], [-73.97, 40.71], [-73.97, 40.76], [-74.01, 40.76], [-74.02, 40.70]]] },
+    });
+    expect((await rows(doc({ mode: 'inside', geometry: feature }))).rows).toBe(3);
   });
 });
 

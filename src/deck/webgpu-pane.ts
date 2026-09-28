@@ -25,7 +25,7 @@ import { ScatterplotLayer } from '@deck.gl/layers';
 import { luma, Buffer as LumaBuffer, type Device, type ComputePipeline } from '@luma.gl/core';
 import { webgpuAdapter } from '@luma.gl/webgpu';
 
-import { WORKGROUP, materialize, buildRampLut, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
+import { WORKGROUP, materialize, buildRampLut, withDerived, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
 import type { OrbitCamera } from '../webgpu/camera.js';
 
 export interface DeckWebgpuStatus {
@@ -319,8 +319,9 @@ export class DeckWebgpuPane {
     const pipeline = this.pipeline!;
 
     // Uniforms, matching the layout `buildKernel` generated.
+    const bound = withDerived(plan, params);
     const paramData = new Float32Array(Math.max(4, kernel.params.length));
-    kernel.params.forEach((p, i) => { paramData[i] = Number.isFinite(params[p]) ? params[p] : 0; });
+    kernel.params.forEach((p, i) => { paramData[i] = bound[p] ?? 0; });
     const paramBuffer = this.ensureUniform(device, 'params', paramData);
     const rowInfoBuffer = this.ensureUniform(device, 'rowInfo', new Uint32Array([rows, 0, 0, 0]));
 

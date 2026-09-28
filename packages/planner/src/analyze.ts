@@ -10,7 +10,7 @@
  */
 
 import {
-  type Expr, parseExpr, columnsOf, enginesFor, isAggregate, widthOf,
+  type Expr, parseExpr, columnsOf, enginesFor, isAggregate, simplifyExpr, widthOf,
 } from './expr.js';
 import {
   type Graph, type CoreNode, type RenderNode, type Bin2dNode, type StatsNode,
@@ -19,6 +19,7 @@ import {
 import { LAYER_SPECS, propParams, type LayerKind, type ChannelType, type LayerPropValue } from './layers.js';
 import { type AttributeConventions, attributeConventions, isInternal } from './conventions.js';
 import { type FunctionRegistry, inlineFunctions } from './functions.js';
+import { type DerivedParam, HOIST_PREFIX, hoistParams } from './hoist.js';
 
 export type Stage = 'sql' | 'cpu' | 'gpu';
 
@@ -57,7 +58,10 @@ export interface AnalyzedNode {
   internal: boolean;
   /** Attributes this node reads. */
   reads: string[];
-  /** Parameters this node reads. */
+  /**
+   * Parameters this node reads, by their declared names. A hoisted subtree is still counted
+   * under its sources, so a rebind is charged to the node the value lands in.
+   */
   params: string[];
 }
 
@@ -133,7 +137,20 @@ export interface Analysis {
   aggregateNames: string[];
   ramp?: RampName;
   params: Record<string, ParamSpec>;
+  /**
+   * Param-only subexpressions lifted out of the trees above (`hoist.ts`). The trees read them
+   * as `{{__hoist_…}}`; every consumer binds them through `withDerived`.
+   */
+  derived: DerivedParam[];
   notes: string[];
+}
+
+export interface AnalyzeOptions {
+  /**
+   * Lift param-only subexpressions into derived parameters. Default true. Off where
+   * parameters are inlined as literals instead of bound, which DuckDB folds itself.
+   */
+  hoist?: boolean;
 }
 
 /**
@@ -186,8 +203,20 @@ export function analyze(
   sourceSchema: Schema,
   conventionOverrides?: Partial<AttributeConventions>,
   columnTypes?: ColumnTypes,
+  options: AnalyzeOptions = {},
 ): Analysis {
   const conventions = attributeConventions(conventionOverrides);
+  const declared = graph.params ?? {};
+  for (const name of Object.keys(declared)) {
+    if (name.startsWith(HOIST_PREFIX)) {
+      throw new PlanError(`Parameter '${name}': the '${HOIST_PREFIX}' prefix is reserved for hoisted subexpressions`);
+    }
+  }
+  const derived = new Map<string, DerivedParam>();
+  const isNumericParam = (name: string) => typeof declared[name]?.value === 'number';
+  /** After `params` is read off the tree, so a node keeps its source names. */
+  const hoist = (e: Expr): Expr =>
+    options.hoist === false ? e : hoistParams(e, isNumericParam, derived);
   const { nodes, notes: sugarNotes, ramp, functions } = desugar(graph, conventions);
   const notes = [...sugarNotes];
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -237,16 +266,17 @@ export function analyze(
   let sawAggregate = false;
 
   /**
-   * Parse if needed, then inline user functions.
+   * Parse if needed, inline user functions, then simplify the swizzles inlining exposes.
    *
    * Every expression in the graph goes through here, which is what makes functions free: by
    * the time anything else looks at a tree, the calls are gone. Wrangle statements arrive
-   * already parsed, so the `Expr` branch matters as much as the string one.
+   * already parsed, so the `Expr` branch matters as much as the string one. The simplify has
+   * to follow the inline: `st_x([lng, lat])` only becomes `[lng, lat].x` once inlined.
    */
   const resolve = (src: string | Expr, nodeId: string): Expr => {
     try {
       const tree = typeof src === 'string' ? parseExpr(src, { functions }) : src;
-      return inlineFunctions(tree, functions);
+      return simplifyExpr(inlineFunctions(tree, functions));
     } catch (err) {
       throw new PlanError(`Node ${nodeId}: ${(err as Error).message}`);
     }
@@ -275,8 +305,9 @@ export function analyze(
         break;
 
       case 'filter': {
-        const expr = parseOrThrow(node.predicate, node.id);
-        requireColumns(expr, node.id);
+        const resolved = parseOrThrow(node.predicate, node.id);
+        requireColumns(resolved, node.id);
+        const expr = hoist(resolved);
         const feasible = withStrings(expr, feasibleStages(expr));
         if (feasible.size === 0) {
           throw new PlanError(`Node ${node.id}: predicate is neither SQL- nor GPU-expressible`);
@@ -284,7 +315,7 @@ export function analyze(
         order.push({
           id: node.id, node, kind: 'filter', expr, width: 1,
           ops: opCount(expr, 1), feasible, internal: false,
-          reads: columnsOf(expr), params: paramsOfExpr(expr),
+          reads: columnsOf(expr), params: paramsOfExpr(resolved),
         });
         break;
       }
@@ -300,7 +331,7 @@ export function analyze(
           if (!isAggregate(expr)) {
             throw new PlanError(`Node ${node.id}: agg '${a.name}' (${a.expr}) is not an aggregate expression`);
           }
-          return { name: a.name, expr };
+          return { name: a.name, expr: hoist(expr), resolved: expr };
         });
         for (const g of node.groupBy) {
           if (!schema.has(g)) throw new PlanError(`Node ${node.id}: unknown groupBy column '${g}'`);
@@ -314,35 +345,37 @@ export function analyze(
         for (const name of aggregateNames) schema.set(name, 1);
 
         order.push({
-          id: node.id, node, kind: 'aggregate', width: 1, aggs, groupBy: node.groupBy,
+          id: node.id, node, kind: 'aggregate', width: 1,
+          aggs: aggs.map(({ name, expr }) => ({ name, expr })), groupBy: node.groupBy,
           ops: aggs.reduce((s, a) => s + opCount(a.expr, 1), 0),
           // Aggregates collapse rows; there is no per-invocation GPU or CPU analogue.
           feasible: new Set<Stage>(['sql']),
           internal: false,
           reads: aggs.flatMap((a) => columnsOf(a.expr)),
-          params: aggs.flatMap((a) => paramsOfExpr(a.expr)),
+          params: aggs.flatMap((a) => paramsOfExpr(a.resolved)),
         });
         break;
       }
 
       case 'attribute': {
-        const expr = resolve(node.expr, node.id);
-        requireColumns(expr, node.id);
-        if (isAggregate(expr)) {
+        const resolved = resolve(node.expr, node.id);
+        requireColumns(resolved, node.id);
+        if (isAggregate(resolved)) {
           throw new PlanError(`Node ${node.id}: attribute expressions cannot aggregate; use an 'aggregate' node`);
         }
-        const width = widthOf(expr, (n) => schema.get(n) ?? 1);
+        const width = widthOf(resolved, (n) => schema.get(n) ?? 1);
+        const expr = hoist(resolved);
         const feasible = withStrings(expr, feasibleStages(expr));
         if (feasible.size === 0) {
           throw new PlanError(`Node ${node.id}: expression mixes strings with functions only the GPU has`);
         }
-        if (isStringValued(expr, strings)) strings.add(node.name);
+        if (isStringValued(resolved, strings)) strings.add(node.name);
         else strings.delete(node.name);
         order.push({
           id: node.id, node, kind: 'attribute', name: node.name, expr, width,
           ops: opCount(expr, width), feasible,
           internal: isInternal(node.name, conventions),
-          reads: columnsOf(expr), params: paramsOfExpr(expr),
+          reads: columnsOf(expr), params: paramsOfExpr(resolved),
         });
         schema.set(node.name, width);
         break;
@@ -418,7 +451,8 @@ export function analyze(
     groupBy,
     aggregateNames,
     ramp,
-    params: { ...(graph.params ?? {}) },
+    params: { ...declared },
+    derived: [...derived.values()],
     notes,
   };
 }

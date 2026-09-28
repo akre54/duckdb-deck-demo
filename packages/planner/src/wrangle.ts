@@ -2,7 +2,7 @@
  * The wrangle node: a VEX-style multi-statement body, which is what makes the pipeline
  * programmable rather than a fixed catalogue of operator types.
  *
- *     @P      = [mercatorX(lng), mercatorY(lat), elevation * {{exag}}];
+ *     @P      = [mercator_x(lng), mercator_y(lat), elevation * {{exag}}];
  *     var t   = fit(ln(pop), {{lo}}, {{hi}}, 0, 1);
  *     @Cd     = ramp(t);
  *     @pscale = sqrt(pop) * {{k}};
@@ -25,6 +25,7 @@
 
 import { parseExpr, type Expr } from './expr.js';
 import { type FunctionDef, parseFunctionDeclaration } from './functions.js';
+import { GEO_PRELUDE } from './geo.js';
 
 export interface WrangleStatement {
   /** Attribute, local or function name as written, without the `@`. */
@@ -59,12 +60,14 @@ export function parseWrangle(
    * Functions already visible to this body — the graph-level ones. Declarations found here are
    * added to a private copy, so a later statement can call an earlier declaration without this
    * function mutating its caller's registry; hoisting into the real one is `desugar`'s job.
+   * Omitted, the scope is the geo prelude, so a body checked on its own (the inspector's live
+   * preview) accepts what the same body inside a graph would.
    */
   functions?: ReadonlyMap<string, FunctionDef>,
 ): WrangleStatement[] {
   const stripped = stripComments(body);
   const out: WrangleStatement[] = [];
-  const scope = new Map<string, FunctionDef>(functions ?? []);
+  const scope = new Map<string, FunctionDef>(functions ?? GEO_PRELUDE);
 
   let line = 1;
   let buffer = '';
