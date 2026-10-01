@@ -1,18 +1,19 @@
 {
-  "date": "2026-10-01T16:37:51.900Z",
+  "date": "2026-10-01T17:26:24.375Z",
   "adapter": {
     "vendor": "apple",
     "architecture": "metal-3",
     "description": ""
   },
+  "subgroups": true,
   "results": [
     {
       "engine": "duckdb",
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 16.010000228881836,
-      "updateMs": 2.2649998664855957,
+      "buildMs": 41.84499979019165,
+      "updateMs": 6.519999980926514,
       "meanError": 0
     },
     {
@@ -20,28 +21,57 @@
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 40.13000011444092,
-      "meanError": 0.0000021792023506009577,
+      "buildMs": 62.394999980926514,
+      "meanError": 0.000002382933262421593,
       "note": "means differ run to run",
-      "updateMs": 6.15500020980835
+      "updateMs": 6.635000228881836
     },
     {
       "engine": "luma+readback",
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 40.13000011444092,
-      "meanError": 0.0000021792023506009577,
+      "buildMs": 62.394999980926514,
+      "meanError": 0.000002382933262421593,
       "note": "means differ run to run",
-      "updateMs": 5.585000038146973
+      "updateMs": 6.244999885559082
     },
     {
       "engine": "luma count-only",
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 3.3550000190734863,
-      "updateMs": 0.440000057220459,
+      "buildMs": 6.289999961853027,
+      "updateMs": 0.815000057220459,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 100000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 393.73499965667725,
+      "meanError": 0.000001980333553961603,
+      "note": "means differ run to run",
+      "updateMs": 2.0999999046325684
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 100000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 393.73499965667725,
+      "meanError": 0.000001980333553961603,
+      "note": "means differ run to run",
+      "updateMs": 2.0799999237060547
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 100000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 7.900000095367432,
+      "updateMs": 0.7950000762939453,
       "meanError": null
     },
     {
@@ -49,8 +79,8 @@
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 0.6949996948242188,
-      "updateMs": 0.6750001907348633,
+      "buildMs": 1.4000000953674316,
+      "updateMs": 1,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -59,8 +89,8 @@
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 2.174999713897705,
-      "updateMs": 1.309999942779541,
+      "buildMs": 9.90500020980835,
+      "updateMs": 5.275000095367432,
       "meanError": 0
     },
     {
@@ -68,28 +98,57 @@
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 5.90500020980835,
-      "meanError": 5.568680367054213e-7,
+      "buildMs": 8.289999961853027,
+      "meanError": 5.000810138875186e-7,
       "note": "means differ run to run",
-      "updateMs": 0.7199997901916504
+      "updateMs": 2.2699999809265137
     },
     {
       "engine": "luma+readback",
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 5.90500020980835,
-      "meanError": 5.568680367054213e-7,
+      "buildMs": 8.289999961853027,
+      "meanError": 5.000810138875186e-7,
       "note": "means differ run to run",
-      "updateMs": 0.684999942779541
+      "updateMs": 1.4549999237060547
     },
     {
       "engine": "luma count-only",
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 3.809999942779541,
-      "updateMs": 0.40000009536743164,
+      "buildMs": 5.514999866485596,
+      "updateMs": 0.9549999237060547,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 100000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 12.619999885559082,
+      "meanError": 4.696190633553657e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.4750003814697266
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 100000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 12.619999885559082,
+      "meanError": 4.696190633553657e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.255000114440918
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 100000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 7.055000305175781,
+      "updateMs": 0.9800000190734863,
       "meanError": null
     },
     {
@@ -97,8 +156,8 @@
       "rows": 100000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 0.13000011444091797,
-      "updateMs": 0.11500024795532227,
+      "buildMs": 0.22499990463256836,
+      "updateMs": 0.2049999237060547,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -107,8 +166,8 @@
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 2.924999713897705,
-      "updateMs": 1.934999942779541,
+      "buildMs": 8.429999828338623,
+      "updateMs": 5.575000286102295,
       "meanError": 0
     },
     {
@@ -116,28 +175,57 @@
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 7.65500020980835,
-      "meanError": 3.8299713315094043e-7,
+      "buildMs": 13.320000171661377,
+      "meanError": 4.717218891433084e-7,
       "note": "means differ run to run",
-      "updateMs": 0.5449995994567871
+      "updateMs": 1.0299997329711914
     },
     {
       "engine": "luma+readback",
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 7.65500020980835,
-      "meanError": 3.8299713315094043e-7,
+      "buildMs": 13.320000171661377,
+      "meanError": 4.717218891433084e-7,
       "note": "means differ run to run",
-      "updateMs": 0.565000057220459
+      "updateMs": 1.299999713897705
     },
     {
       "engine": "luma count-only",
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 3.0300002098083496,
-      "updateMs": 0.4250001907348633,
+      "buildMs": 5.400000095367432,
+      "updateMs": 1.0799999237060547,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 100000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 13.930000305175781,
+      "meanError": 3.645953088452826e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.2799997329711914
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 100000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 13.930000305175781,
+      "meanError": 3.645953088452826e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.3350000381469727
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 100000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 6.03000020980835,
+      "updateMs": 0.9549999237060547,
       "meanError": null
     },
     {
@@ -145,8 +233,8 @@
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 0.625,
-      "updateMs": 0.6050000190734863,
+      "buildMs": 1.130000114440918,
+      "updateMs": 1.0999999046325684,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -155,8 +243,8 @@
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 1.8499999046325684,
-      "updateMs": 1.1399998664855957,
+      "buildMs": 6.305000305175781,
+      "updateMs": 4.650000095367432,
       "meanError": 0
     },
     {
@@ -164,28 +252,57 @@
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 4.759999752044678,
+      "buildMs": 8.260000228881836,
       "meanError": 1.6638388068514238e-7,
       "note": "means differ run to run",
-      "updateMs": 0.4849996566772461
+      "updateMs": 1.3050003051757812
     },
     {
       "engine": "luma+readback",
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 4.759999752044678,
+      "buildMs": 8.260000228881836,
       "meanError": 1.6638388068514238e-7,
       "note": "means differ run to run",
-      "updateMs": 0.47500038146972656
+      "updateMs": 1.0450000762939453
     },
     {
       "engine": "luma count-only",
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 2.9749999046325684,
-      "updateMs": 0.375,
+      "buildMs": 6.369999885559082,
+      "updateMs": 0.9199995994567871,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 100000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 7.789999961853027,
+      "meanError": 1.6638388068514238e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.0749998092651367
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 100000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 7.789999961853027,
+      "meanError": 1.6638388068514238e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.054999828338623
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 100000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 5.899999618530273,
+      "updateMs": 0.7949995994567871,
       "meanError": null
     },
     {
@@ -193,8 +310,8 @@
       "rows": 100000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 0.13000011444091797,
-      "updateMs": 0.11500024795532227,
+      "buildMs": 0.25,
+      "updateMs": 0.21000003814697266,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -203,8 +320,8 @@
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 11.59499979019165,
-      "updateMs": 10.730000019073486,
+      "buildMs": 30.005000114440918,
+      "updateMs": 28.139999866485596,
       "meanError": 0
     },
     {
@@ -212,28 +329,57 @@
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 74.92500019073486,
-      "meanError": 0.000007625705820170199,
+      "buildMs": 77.74000024795532,
+      "meanError": 0.000005567167318527731,
       "note": "means differ run to run",
-      "updateMs": 59.81500005722046
+      "updateMs": 61.19000005722046
     },
     {
       "engine": "luma+readback",
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 74.92500019073486,
-      "meanError": 0.000007625705820170199,
+      "buildMs": 77.74000024795532,
+      "meanError": 0.000005567167318527731,
       "note": "means differ run to run",
-      "updateMs": 74.04500007629395
+      "updateMs": 120.40999984741211
     },
     {
       "engine": "luma count-only",
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 6.039999961853027,
-      "updateMs": 1.25,
+      "buildMs": 9.1850004196167,
+      "updateMs": 1.6800003051757812,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 1000000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 254.55000019073486,
+      "meanError": 0.000003241970791929726,
+      "note": "means differ run to run",
+      "updateMs": 25.1850004196167
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 1000000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 254.55000019073486,
+      "meanError": 0.000003241970791929726,
+      "note": "means differ run to run",
+      "updateMs": 24.625
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 1000000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 6.965000152587891,
+      "updateMs": 2.5949997901916504,
       "meanError": null
     },
     {
@@ -241,8 +387,8 @@
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 11.454999923706055,
-      "updateMs": 11.445000171661377,
+      "buildMs": 11.619999885559082,
+      "updateMs": 11.539999961853027,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -251,8 +397,8 @@
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 9.110000133514404,
-      "updateMs": 8.394999980926514,
+      "buildMs": 16.84499979019165,
+      "updateMs": 13.130000114440918,
       "meanError": 0
     },
     {
@@ -260,28 +406,57 @@
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 12.289999961853027,
-      "meanError": 0.0000017463269673562043,
+      "buildMs": 12.945000171661377,
+      "meanError": 0.0000017065362351846804,
       "note": "means differ run to run",
-      "updateMs": 5.579999923706055
+      "updateMs": 5.275000095367432
     },
     {
       "engine": "luma+readback",
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 12.289999961853027,
-      "meanError": 0.0000017463269673562043,
+      "buildMs": 12.945000171661377,
+      "meanError": 0.0000017065362351846804,
       "note": "means differ run to run",
-      "updateMs": 5.639999866485596
+      "updateMs": 5.420000076293945
     },
     {
       "engine": "luma count-only",
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 5.679999828338623,
-      "updateMs": 1.2849998474121094,
+      "buildMs": 6.224999904632568,
+      "updateMs": 1.2400002479553223,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 1000000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 13,
+      "meanError": 0.000002097753250770519,
+      "note": "means differ run to run",
+      "updateMs": 4.429999828338623
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 1000000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 13,
+      "meanError": 0.000002097753250770519,
+      "note": "means differ run to run",
+      "updateMs": 4.335000038146973
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 1000000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 6.900000095367432,
+      "updateMs": 1.3400001525878906,
       "meanError": null
     },
     {
@@ -289,8 +464,8 @@
       "rows": 1000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 2.2150001525878906,
-      "updateMs": 2.1700000762939453,
+      "buildMs": 2.2049999237060547,
+      "updateMs": 2.114999771118164,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -299,8 +474,8 @@
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 20.40999984741211,
-      "updateMs": 19.03499984741211,
+      "buildMs": 28.81500005722046,
+      "updateMs": 23.924999713897705,
       "meanError": 0
     },
     {
@@ -308,28 +483,57 @@
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 11.585000038146973,
-      "meanError": 0.000001145425435906127,
+      "buildMs": 13.099999904632568,
+      "meanError": 0.0000011623014793132775,
       "note": "means differ run to run",
-      "updateMs": 2.429999828338623
+      "updateMs": 2.4449996948242188
     },
     {
       "engine": "luma+readback",
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 11.585000038146973,
-      "meanError": 0.000001145425435906127,
+      "buildMs": 13.099999904632568,
+      "meanError": 0.0000011623014793132775,
       "note": "means differ run to run",
-      "updateMs": 2.6700000762939453
+      "updateMs": 2.309999942779541
     },
     {
       "engine": "luma count-only",
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 6.480000019073486,
-      "updateMs": 1.8650002479553223,
+      "buildMs": 6.990000247955322,
+      "updateMs": 1.2549996376037598,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 1000000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 14,
+      "meanError": 0.0000011623014793132775,
+      "note": "means differ run to run",
+      "updateMs": 2.0300002098083496
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 1000000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 14,
+      "meanError": 0.0000011623014793132775,
+      "note": "means differ run to run",
+      "updateMs": 2.0299997329711914
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 1000000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 6.570000171661377,
+      "updateMs": 1.3249998092651367,
       "meanError": null
     },
     {
@@ -338,7 +542,7 @@
       "bins": 1024,
       "selectivity": 0.5,
       "buildMs": 11.474999904632568,
-      "updateMs": 11.46500015258789,
+      "updateMs": 11.369999885559082,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -347,8 +551,8 @@
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 8.78000020980835,
-      "updateMs": 8.34000015258789,
+      "buildMs": 10.019999980926514,
+      "updateMs": 12.190000057220459,
       "meanError": 0
     },
     {
@@ -356,37 +560,66 @@
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 10.035000324249268,
+      "buildMs": 9.019999980926514,
       "meanError": 3.9011115839735306e-7,
       "note": "means differ run to run",
-      "updateMs": 2.7300000190734863
+      "updateMs": 1.6100001335144043
     },
     {
       "engine": "luma+readback",
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 10.035000324249268,
+      "buildMs": 9.019999980926514,
       "meanError": 3.9011115839735306e-7,
       "note": "means differ run to run",
-      "updateMs": 2.554999828338623
+      "updateMs": 1.6100001335144043
     },
     {
       "engine": "luma count-only",
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 6.365000247955322,
+      "buildMs": 6.134999752044678,
       "updateMs": 1.0949997901916504,
       "meanError": null
     },
     {
+      "engine": "luma (subgroups)",
+      "rows": 1000000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 10.954999923706055,
+      "meanError": 3.9011115839735306e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.5500001907348633
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 1000000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 10.954999923706055,
+      "meanError": 3.9011115839735306e-7,
+      "note": "means differ run to run",
+      "updateMs": 1.4099998474121094
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 1000000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 6.740000247955322,
+      "updateMs": 1.1100001335144043,
+      "meanError": null
+    },
+    {
       "engine": "js",
       "rows": 1000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 2.2100000381469727,
-      "updateMs": 2.1649999618530273,
+      "buildMs": 2.125,
+      "updateMs": 2.1349997520446777,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -395,8 +628,8 @@
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 65.64499998092651,
-      "updateMs": 55.22500038146973,
+      "buildMs": 95.69500017166138,
+      "updateMs": 97.07999992370605,
       "meanError": 0
     },
     {
@@ -404,28 +637,57 @@
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 217.59499979019165,
-      "meanError": 0.000012429694365500057,
+      "buildMs": 227.9850001335144,
+      "meanError": 0.000010495150161949343,
       "note": "means differ run to run",
-      "updateMs": 368.10999965667725
+      "updateMs": 365.9650001525879
     },
     {
       "engine": "luma+readback",
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 217.59499979019165,
-      "meanError": 0.000012429694365500057,
+      "buildMs": 227.9850001335144,
+      "meanError": 0.000010495150161949343,
       "note": "means differ run to run",
-      "updateMs": 360.1349997520447
+      "updateMs": 328.835000038147
     },
     {
       "engine": "luma count-only",
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 10.190000057220459,
-      "updateMs": 2.7849998474121094,
+      "buildMs": 10.490000247955322,
+      "updateMs": 2.9000000953674316,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 4000000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 295.4199995994568,
+      "meanError": 0.000009622927089301304,
+      "note": "means differ run to run",
+      "updateMs": 54.864999771118164
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 4000000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 295.4199995994568,
+      "meanError": 0.000009622927089301304,
+      "note": "means differ run to run",
+      "updateMs": 60.644999980926514
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 4000000,
+      "bins": 16,
+      "selectivity": 0.5,
+      "buildMs": 12.914999961853027,
+      "updateMs": 4.185000419616699,
       "meanError": null
     },
     {
@@ -433,8 +695,8 @@
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.5,
-      "buildMs": 46.05499982833862,
-      "updateMs": 45.83500003814697,
+      "buildMs": 47.05500030517578,
+      "updateMs": 47.40500020980835,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -443,8 +705,8 @@
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 23.84499979019165,
-      "updateMs": 21.27500009536743,
+      "buildMs": 52.15000009536743,
+      "updateMs": 58.875,
       "meanError": 0
     },
     {
@@ -452,28 +714,57 @@
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 34.93499994277954,
-      "meanError": 0.000002494891734406926,
+      "buildMs": 33.69000005722046,
+      "meanError": 0.000002807867185344112,
       "note": "means differ run to run",
-      "updateMs": 10.884999752044678
+      "updateMs": 11.50499963760376
     },
     {
       "engine": "luma+readback",
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 34.93499994277954,
-      "meanError": 0.000002494891734406926,
+      "buildMs": 33.69000005722046,
+      "meanError": 0.000002807867185344112,
       "note": "means differ run to run",
-      "updateMs": 10.460000038146973
+      "updateMs": 12.769999980926514
     },
     {
       "engine": "luma count-only",
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 7.184999942779541,
-      "updateMs": 2.0900001525878906,
+      "buildMs": 9.184999942779541,
+      "updateMs": 2.4749999046325684,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 4000000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 22.394999980926514,
+      "meanError": 0.0000028063162734445917,
+      "note": "means differ run to run",
+      "updateMs": 10.355000019073486
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 4000000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 22.394999980926514,
+      "meanError": 0.0000028063162734445917,
+      "note": "means differ run to run",
+      "updateMs": 11.890000343322754
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 4000000,
+      "bins": 16,
+      "selectivity": 0.05,
+      "buildMs": 12.039999961853027,
+      "updateMs": 2.4499998092651367,
       "meanError": null
     },
     {
@@ -481,8 +772,8 @@
       "rows": 4000000,
       "bins": 16,
       "selectivity": 0.05,
-      "buildMs": 5.705000400543213,
-      "updateMs": 5.525000095367432,
+      "buildMs": 8.885000228881836,
+      "updateMs": 8.990000247955322,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -491,8 +782,8 @@
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 41.704999923706055,
-      "updateMs": 37.769999980926514,
+      "buildMs": 101.24500036239624,
+      "updateMs": 102.10999965667725,
       "meanError": 0
     },
     {
@@ -500,28 +791,57 @@
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 18.759999752044678,
-      "meanError": 0.0000021950423603237835,
+      "buildMs": 26.25,
+      "meanError": 0.000002117031340966875,
       "note": "means differ run to run",
-      "updateMs": 4.090000152587891
+      "updateMs": 4.400000095367432
     },
     {
       "engine": "luma+readback",
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 18.759999752044678,
-      "meanError": 0.0000021950423603237835,
+      "buildMs": 26.25,
+      "meanError": 0.000002117031340966875,
       "note": "means differ run to run",
-      "updateMs": 3.7799997329711914
+      "updateMs": 4.375
     },
     {
       "engine": "luma count-only",
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 5.940000057220459,
-      "updateMs": 2.0149998664855957,
+      "buildMs": 9.394999980926514,
+      "updateMs": 2.5399999618530273,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 4000000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 16.480000019073486,
+      "meanError": 0.000002049171466217008,
+      "note": "means differ run to run",
+      "updateMs": 4.190000057220459
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 4000000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 16.480000019073486,
+      "meanError": 0.000002049171466217008,
+      "note": "means differ run to run",
+      "updateMs": 4.384999752044678
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 4000000,
+      "bins": 1024,
+      "selectivity": 0.5,
+      "buildMs": 11.420000076293945,
+      "updateMs": 2.4700002670288086,
       "meanError": null
     },
     {
@@ -529,8 +849,8 @@
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.5,
-      "buildMs": 24.130000114440918,
-      "updateMs": 24.260000228881836,
+      "buildMs": 46.019999980926514,
+      "updateMs": 46.71500015258789,
       "meanError": 0,
       "note": "f64 reference"
     },
@@ -539,8 +859,8 @@
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 15.300000190734863,
-      "updateMs": 14.62999963760376,
+      "buildMs": 53.519999980926514,
+      "updateMs": 45.984999656677246,
       "meanError": 0
     },
     {
@@ -548,28 +868,57 @@
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 12.264999866485596,
+      "buildMs": 12.429999828338623,
       "meanError": 6.593616367208768e-7,
       "note": "means differ run to run",
-      "updateMs": 3.270000457763672
+      "updateMs": 3.510000228881836
     },
     {
       "engine": "luma+readback",
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 12.264999866485596,
+      "buildMs": 12.429999828338623,
       "meanError": 6.593616367208768e-7,
       "note": "means differ run to run",
-      "updateMs": 3.239999771118164
+      "updateMs": 3.885000228881836
     },
     {
       "engine": "luma count-only",
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 6.0400004386901855,
-      "updateMs": 2.205000400543213,
+      "buildMs": 10.680000305175781,
+      "updateMs": 2.6449999809265137,
+      "meanError": null
+    },
+    {
+      "engine": "luma (subgroups)",
+      "rows": 4000000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 14.525000095367432,
+      "meanError": 6.593616367208768e-7,
+      "note": "means differ run to run",
+      "updateMs": 3.9600000381469727
+    },
+    {
+      "engine": "luma+readback (subgroups)",
+      "rows": 4000000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 14.525000095367432,
+      "meanError": 6.593616367208768e-7,
+      "note": "means differ run to run",
+      "updateMs": 3.885000228881836
+    },
+    {
+      "engine": "luma count-only (subgroups)",
+      "rows": 4000000,
+      "bins": 1024,
+      "selectivity": 0.05,
+      "buildMs": 11.860000133514404,
+      "updateMs": 2.5900001525878906,
       "meanError": null
     },
     {
@@ -577,8 +926,8 @@
       "rows": 4000000,
       "bins": 1024,
       "selectivity": 0.05,
-      "buildMs": 4.559999942779541,
-      "updateMs": 4.549999713897705,
+      "buildMs": 8.729999542236328,
+      "updateMs": 9.150000095367432,
       "meanError": 0,
       "note": "f64 reference"
     }

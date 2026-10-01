@@ -23,6 +23,10 @@ export async function initGpu(canvas: HTMLCanvasElement): Promise<Gpu> {
   if (!adapter) throw new GpuUnavailable('No WebGPU adapter. GPU may be blocklisted.');
 
   const device = await adapter.requestDevice({
+    // Our kernels do not use subgroups, but luma's compute does when the device has them: its
+    // group-by coalesces keys across a subgroup instead of hammering one atomic per row, 6.7×
+    // faster at 4M rows on 16 groups (FINDINGS §13). A feature not requested is not there.
+    requiredFeatures: adapter.features.has('subgroups') ? ['subgroups'] : [],
     requiredLimits: {
       // 1M points x vec3 f32 is 12 MB; ask for headroom so the 5M bench can run.
       maxStorageBufferBindingSize: Math.min(
