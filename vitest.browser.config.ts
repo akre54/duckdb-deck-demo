@@ -47,11 +47,6 @@ export default defineConfig({
       name: 'chromium',
       provider: 'playwright',
       headless: true,
-      // Files run in parallel iframes by default, each with its own device. On SwiftShader
-      // (CI) the second device was lost as "Device was destroyed" partway through the first
-      // file, failing every test after it with "A valid external Instance reference no
-      // longer exists". Metal handled both. Two files, so serial costs a few seconds.
-      fileParallelism: false,
       providerOptions: {
         launch: {
           /**
@@ -74,6 +69,13 @@ export default defineConfig({
                   '--enable-features=Vulkan',
                   '--use-vulkan=swiftshader',
                   '--use-webgpu-adapter=swiftshader',
+                  // Without this, compute-only tests pass and the first frame presented to a
+                  // canvas loses the device ("Device was destroyed"), failing every test
+                  // after it with "A valid external Instance reference no longer exists".
+                  // The compositor's GL has to be SwiftShader too for the canvas to share
+                  // images with Dawn. `--use-angle=vulkan` and `--disable-vulkan-surface`
+                  // were tried and do not help.
+                  '--use-angle=swiftshader',
                 ]
               : []),
           ],

@@ -40,6 +40,17 @@ export function gpuDevice(): Promise<GPUDevice> {
   return devicePromise;
 }
 
+/**
+ * SwiftShader is Chromium's CPU implementation of Vulkan, and what CI runs WebGPU on. Two
+ * things differ from a real GPU, and tests that depend on either have to know: its f32 trig
+ * is only as accurate as WGSL requires (Metal is far better), and it is slow enough that a
+ * multi-million-row workload takes minutes rather than milliseconds.
+ */
+export function isSoftwareAdapter(device: GPUDevice): boolean {
+  const { vendor, architecture, description } = device.adapterInfo;
+  return /swiftshader/i.test(`${vendor} ${architecture} ${description}`);
+}
+
 export async function gpuAvailable(): Promise<boolean> {
   try {
     await gpuDevice();
