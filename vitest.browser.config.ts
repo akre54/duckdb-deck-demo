@@ -60,6 +60,17 @@ export default defineConfig({
             // Software rasterization, so the suite works on a machine or CI box with no
             // usable GPU. A real GPU is used when one is available.
             '--enable-unsafe-swiftshader',
+            // Chromium on Linux ships WebGPU behind a flag and only over Vulkan. The CI
+            // runners have no GPU, so Vulkan is SwiftShader's. Not applied elsewhere: macOS
+            // has WebGPU on Metal by default.
+            ...(process.platform === 'linux'
+              ? [
+                  '--enable-unsafe-webgpu',
+                  '--enable-features=Vulkan',
+                  '--use-vulkan=swiftshader',
+                  '--use-webgpu-adapter=swiftshader',
+                ]
+              : []),
           ],
         },
       },
