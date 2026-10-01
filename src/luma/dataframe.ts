@@ -135,35 +135,9 @@ export class LumaFilter {
     if (!expr) throw new Error('predicate has no luma GPU Dataframe form');
 
     this.luma = lumaDeviceFor(device, adapter);
-
-    const buffers: Record<string, LumaBuffer> = {};
-    for (const [name, handle] of Object.entries(columns)) {
-      const buffer = this.luma.createBuffer({
-        id: `luma:${name}`,
-        handle,
-        byteLength: handle.size,
-        usage: LumaBuffer.STORAGE | LumaBuffer.COPY_SRC | LumaBuffer.COPY_DST,
-      });
-      this.wrapped.push(buffer);
-      buffers[name] = buffer;
-    }
-
     const step = topology.kind === 'packed' ? Math.max(1, rows) : topology.rows;
-    const recordBatches: GPURecordBatch[] = [];
-    for (let offset = 0, index = 0; offset < rows; offset += step, index++) {
-      const length = Math.min(step, rows - offset);
-      const gpuData: Record<string, GPUData> = {};
-      for (const [name, buffer] of Object.entries(buffers)) {
-        // A view at a byte offset, not a copy. Storage bindings need 256-byte-aligned offsets,
-        // which 2048 f32 rows (8 KiB) satisfy.
-        gpuData[name] = new GPUData({ buffer, format: 'float32', length, byteOffset: offset * 4, ownsBuffer: false });
-      }
-      recordBatches.push(new GPURecordBatch({
-        gpuData,
-        fields: Object.keys(buffers).map((name) => ({ name, format: 'float32' as const, nullable: false })),
-        sourceInfo: { sourceBatchIndex: index, sourceRowIndexOffset: offset, sourceRowCount: length },
-      }));
-    }
+    const formatted = Object.fromEntries(Object.entries(columns).map(([name, buffer]) => [name, { buffer, format: 'float32' as const }]));
+    const recordBatches = borrowColumns(this.luma, formatted, rows, step, this.wrapped);
     this.batches = recordBatches.length;
 
     this.frame = new GPUDataFrame({ table: new GPUTable({ batches: recordBatches }), ownership: 'borrowed' });
@@ -212,6 +186,126 @@ export class LumaFilter {
     // without calling it.
     this.wrapped.length = 0;
   }
+}
+
+/** One aggregate over the filtered rows, per group: luma's dense count/sum/min/max/mean. */
+export type LumaAggregate = 'count' | { sum: string } | { min: string } | { max: string } | { mean: string };
+
+export interface LumaGroupByProps {
+  device: GPUDevice;
+  adapter: GPUAdapter;
+  /**
+   * The group key: u32, dense in `[0, groupCount)`. luma's group-by only takes dense keys, so
+   * it never has to size an output on the CPU; DuckDB makes a key dense at load time
+   * (`floor(...)` for a bin, `dense_rank()` for a sparse id).
+   */
+  key: { name: string; buffer: GPUBuffer };
+  groupCount: number;
+  /** f32 columns the predicate and the aggregates read, `rows` long, already on the GPU. */
+  columns: Record<string, GPUBuffer>;
+  rows: number;
+  aggregates: Record<string, LumaAggregate>;
+  /** Optional filter ahead of the grouping, in our IR; must be `compactable`. */
+  predicate?: Expr;
+  params?: Record<string, number>;
+}
+
+/**
+ * A compiled luma dense group-by over existing buffers: `WHERE predicate GROUP BY key`.
+ *
+ * Every output is `groupCount` long and stays on the GPU. A parameter change re-encodes the
+ * same graph — no recompile, no allocation, no readback — which is what makes a linked
+ * histogram's brush a uniform write rather than a requery.
+ */
+export class LumaGroupBy {
+  readonly luma: WebGPUDevice;
+  readonly groupCount: number;
+  private readonly frame: GPUDataFrame;
+  private readonly query: CompiledGPUDataFrameQuery;
+  private readonly wrapped: LumaBuffer[] = [];
+
+  constructor(props: LumaGroupByProps) {
+    const { device, adapter, key, groupCount, columns, rows, aggregates, predicate, params = {} } = props;
+    const expr = predicate ? toLumaExpr(predicate, params) : null;
+    if (predicate && !expr) throw new Error('predicate has no luma GPU Dataframe form');
+
+    this.luma = lumaDeviceFor(device, adapter);
+    this.groupCount = groupCount;
+    const formatted: Record<string, ColumnRef> = { [key.name]: { buffer: key.buffer, format: 'uint32' } };
+    for (const [name, buffer] of Object.entries(columns)) formatted[name] = { buffer, format: 'float32' };
+    const batches = borrowColumns(this.luma, formatted, rows, Math.max(1, rows), this.wrapped);
+
+    this.frame = new GPUDataFrame({ table: new GPUTable({ batches }), ownership: 'borrowed' });
+    const graph = new GPUCommandGraph<GPUDataFrameQueryParameters>(this.luma, { id: 'noodles-luma-group-by' });
+    // Column names are runtime strings here, so luma's schema-typed builders see `never`. LuSQL
+    // crosses the same boundary the same way.
+    const base = (expr ? this.frame.filter(expr) : this.frame) as unknown as {
+      groupBy(key: string, options: { groupCount: number }): {
+        aggregate(definitions: Record<string, LumaAggregate>): { compile(g: typeof graph): CompiledGPUDataFrameQuery };
+      };
+    };
+    this.query = base.groupBy(key.name, { groupCount }).aggregate(aggregates).compile(graph);
+  }
+
+  /** Re-run the graph with new parameter values; a separate submission, like `LumaFilter.run`. */
+  run(params: Record<string, number> = {}): void {
+    const encoder: CommandEncoder = this.luma.createCommandEncoder({ id: 'noodles-luma-group-by' });
+    this.query.encode(encoder, params);
+    this.luma.submit(encoder.finish() as Parameters<WebGPUDevice['submit']>[0]);
+  }
+
+  /** One aggregate's `groupCount` values: u32 for `count`, f32 otherwise. */
+  output(name: string): GPUBuffer {
+    const data = this.query.table.batches[0].gpuData[name];
+    if (!data) throw new Error(`no group-by output "${name}"`);
+    return bufferOf(data);
+  }
+
+  destroy(): void {
+    this.query.destroy();
+    this.frame.destroy();
+    this.wrapped.length = 0;
+  }
+}
+
+type ColumnRef = { buffer: GPUBuffer; format: 'float32' | 'uint32' };
+
+/**
+ * Present our buffers to luma as record batches of `step` rows, borrowed rather than copied.
+ * The luma wrappers are pushed onto `wrapped` so the owner can drop them without destroying
+ * the handles.
+ */
+function borrowColumns(
+  luma: WebGPUDevice, columns: Record<string, ColumnRef>, rows: number, step: number, wrapped: LumaBuffer[],
+): GPURecordBatch[] {
+  const buffers: Record<string, { buffer: LumaBuffer; format: ColumnRef['format'] }> = {};
+  for (const [name, { buffer: handle, format }] of Object.entries(columns)) {
+    const buffer = luma.createBuffer({
+      id: `luma:${name}`,
+      handle,
+      byteLength: handle.size,
+      usage: LumaBuffer.STORAGE | LumaBuffer.COPY_SRC | LumaBuffer.COPY_DST,
+    });
+    wrapped.push(buffer);
+    buffers[name] = { buffer, format };
+  }
+
+  const batches: GPURecordBatch[] = [];
+  for (let offset = 0, index = 0; offset < rows; offset += step, index++) {
+    const length = Math.min(step, rows - offset);
+    const gpuData: Record<string, GPUData> = {};
+    for (const [name, { buffer, format }] of Object.entries(buffers)) {
+      // A view at a byte offset, not a copy. Storage bindings need 256-byte-aligned offsets,
+      // which 2048 four-byte rows (8 KiB) satisfy.
+      gpuData[name] = new GPUData({ buffer, format, length, byteOffset: offset * 4, ownsBuffer: false });
+    }
+    batches.push(new GPURecordBatch({
+      gpuData,
+      fields: Object.entries(buffers).map(([name, { format }]) => ({ name, format, nullable: false })),
+      sourceInfo: { sourceBatchIndex: index, sourceRowIndexOffset: offset, sourceRowCount: length },
+    }));
+  }
+  return batches;
 }
 
 /**

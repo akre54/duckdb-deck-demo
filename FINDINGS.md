@@ -501,6 +501,57 @@ Three smaller results from wiring it up:
 - **luma's first compile costs 100–150 ms cold**, then 5–30 ms. It is a build-time cost, like
   pipeline creation, and is not paid per slider tick.
 
+## 13. luma's dense group-by wins a linked histogram, until a float sum meets few bins
+
+§12 used luma as a filter, but luma 9.4.2 ships more than that. `@luma.gl/experimental` also has
+a dense group-by (count/sum/min/max/mean), a unique-right hash join (inner/left/semi/anti), a
+global sort with top-K, histograms, `gpu-crossfilter`, and a small SQL front end (`LuSQL`). Each
+operator stays readback-free in the same way: it takes only shapes whose output size is known on
+the CPU in advance. Group keys must be dense `u32` in `[0, groupCount)`, join keys must be unique
+on the right, and every output has a fixed capacity. `LumaGroupBy` (`src/luma`) wraps the
+group-by over our own buffers, as `LumaFilter` wraps the filter.
+
+`tests/browser/groupby.browser.test.ts` races one crossfilter workload,
+`SELECT bin, count(*), avg(v) WHERE v > {{cut}} GROUP BY bin`, where `cut` is a brush on another
+view. DuckDB computes the bin once at load. Every engine's counts must match an f64 CPU reference
+exactly, and its means must agree to 1e-3. *update* is one brush tick, ending with the result
+where its consumer needs it. Apple Metal-3, median of 9.
+
+| 4M rows, sel 0.5 | 16 bins: update ms | 1024 bins: update ms |
+|---|---:|---:|
+| duckdb (prepared `$1`, dense scatter) | 55.2 | 37.8 |
+| js loop (f64 accumulators) | 45.8 | 24.3 |
+| **luma** count + mean, stays on the GPU | **368** | **4.09** |
+| luma + one `mapAsync` of both outputs | 360 | 3.78 |
+| luma count only | 2.78 | 2.01 |
+
+**With many bins it is 9–14× faster than DuckDB.** At 1024 bins with half the rows kept, luma
+takes 4 ms and DuckDB 38 ms (54 ms in an earlier run of the same sweep). That is a brush tick
+finishing well inside a frame. At 5% kept the gap narrows to 4.5×, 3.3 ms against 14.6 ms,
+because DuckDB has less to aggregate.
+
+**With few bins the float sum turns it into the slowest engine.** Counts accumulate in workgroup
+memory. Float sums go through a global `atomicCompareExchangeWeak` loop on bitcast `u32`s,
+because WebGPU has no float atomics. 4M rows on 16 words is a contention storm: 368 ms for
+count + mean, against 2.78 ms for the count alone. The cost tracks rows per bin, not rows.
+1M rows on 16 bins is already 60 ms. The fix belongs in luma: accumulate float sums per
+workgroup, as counts already are, then merge. Until then, a planner should price luma's
+`sum`/`mean` by rows per group and never pick it for a low-cardinality key.
+
+**Readback is not the cost.** Mapping 2 × `groupCount` words back to JS adds nothing measurable
+(3.78 vs 4.09 ms). So a DOM- or SVG-drawn histogram fed by a GPU group-by is viable. The worry
+that leaving the GPU erases the win does not hold for aggregate-sized outputs.
+
+**The means are not deterministic.** The same parameters, run twice, give bitwise-different
+means in every configuration, from 20k rows up. The relative error is small: at most 1.2e-5,
+worst at 16 bins. But a tooltip that changes its last digit with no input is a visible bug. The
+per-workgroup fix above, combined with a fixed merge order, would make it deterministic.
+
+**A plain JS loop beats DuckDB at every size here.** This holds once the data is already in
+typed arrays. It does not argue against DuckDB, whose work in this pipeline is the load, the
+binning and the dense keys. It argues that the per-tick engine should be anything but a
+requery.
+
 ## Recommended order of work for noodles
 
 Ranked by payoff per unit of risk. The first three are independent of any renderer decision.
