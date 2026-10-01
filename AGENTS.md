@@ -88,6 +88,12 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 - Playwright's default headless binary is `chrome-headless-shell`, which has **no WebGPU**:
   `navigator.gpu` exists but `requestAdapter()` returns null, so GPU tests skip while looking like
   they ran. The config uses `channel: 'chromium'`.
+- **CI runs WebGPU on SwiftShader** (`.github/workflows/ci.yml`; the Linux flags are in
+  `vitest.browser.config.ts`). Without `--use-angle=swiftshader` the first frame presented to
+  a canvas destroys the device and every later test fails with "A valid external Instance
+  reference no longer exists". SwiftShader's chained trig is looser than Metal's, and a
+  million-instance draw takes seconds there: check `isSoftwareAdapter` before widening a
+  tolerance or skipping a test, and never do either unconditionally.
 - `Runtime.build()` marks kernels dirty without dispatching. A derived attribute reads as zero
   until a frame is submitted — use the `settle()` helper in tests.
 - A bind-group cache must key on a token that changes when a buffer is *replaced*. Labels are not
