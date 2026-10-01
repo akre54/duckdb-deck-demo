@@ -5,6 +5,7 @@ import {
 } from '@noodles.gl/planner';
 import {
   gpuDevice, duck, readBuffer, storageBuffer, emptyStorageBuffer, expectNoGpuError,
+  isSoftwareAdapter,
 } from './harness.js';
 
 /**
@@ -222,7 +223,13 @@ function viaJs(src: string, params: Record<string, number> = {}): number[] {
  * f32-scale comparison: relative for large values, absolute near zero. `floor` is that
  * absolute part, for a result whose f32 error does not shrink with its magnitude.
  */
-function expectClose(actual: number[], expected: number[], label: string, floor = 1e-4): void {
+function expectClose(
+  actual: number[],
+  expected: number[],
+  label: string,
+  floor = 1e-4,
+  relative = 1e-4,
+): void {
   expect(actual, `${label} length`).toHaveLength(expected.length);
   for (let i = 0; i < expected.length; i++) {
     const e = expected[i];
@@ -231,7 +238,7 @@ function expectClose(actual: number[], expected: number[], label: string, floor 
       expect(Number.isNaN(a), `${label}[${i}] should be NaN`).toBe(true);
       continue;
     }
-    const tolerance = Math.max(floor, Math.abs(e) * 1e-4);
+    const tolerance = Math.max(floor, Math.abs(e) * relative);
     expect(Math.abs(a - e), `${label}[${i}]: got ${a}, want ${e}`).toBeLessThan(tolerance);
   }
 }
@@ -311,6 +318,20 @@ describe('divergences that are known and deliberate', () => {
   });
 });
 
+/**
+ * Relative tolerance for the geo prelude on the GPU.
+ *
+ * A geo function chains several trig calls (haversine is sin, cos, sqrt and asin), and WGSL
+ * allows each up to 2^-11 absolute error (sin, cos) or 4096 ULP (atan2). Metal comes in far
+ * under that and holds 1e-4. SwiftShader, which CI runs on, is conformant and no better: it
+ * missed 1e-4 by up to 12x, a `destination` longitude of 1.0693° reading 1.0680°. Single
+ * trig calls still hold 1e-4 there, so only the chained functions get the wider bound. A
+ * wrong formula is off by far more than 2e-3.
+ */
+function geoRelative(): number {
+  return isSoftwareAdapter(device) ? 2e-3 : 1e-4;
+}
+
 describe('the geo prelude computes the same numbers on all three', () => {
   // Points made from the three columns, so every row is a different pair and both signs of
   // Δlat and Δlng occur: a = 0.001..100, b = 0.5..1000, c = -5..12. The old hand-written
@@ -345,8 +366,8 @@ describe('the geo prelude computes the same numbers on all three', () => {
     expect(js.some(Number.isNaN), `${src} js NaN`).toBe(false);
     expectClose(sql, js, `${src} sql vs js`);
     // f32 on the GPU: 1e-4 relative is ~1 km on a 10,000 km distance and 0.02° on a bearing,
-    // which is the f32 floor for inputs this size, not slack.
-    expectClose(wgsl, js, `${src} wgsl vs js`, floor);
+    // which is the f32 floor for inputs this size, not slack. See `geoRelative` for SwiftShader.
+    expectClose(wgsl, js, `${src} wgsl vs js`, floor, geoRelative());
   });
 });
 
@@ -372,7 +393,7 @@ describe('constant geometries compute the same numbers on all three', () => {
     const js = viaJs(src);
     expectClose(await viaSql(src), js, `${src} sql vs js`);
     // f32: 1e-4 relative is ~10 m on these distances, and 1e-4° on a position.
-    expectClose(await viaWgsl(src), js, `${src} wgsl vs js`);
+    expectClose(await viaWgsl(src), js, `${src} wgsl vs js`, 1e-4, geoRelative());
   });
 
   it('classifies the rows as expected', () => {

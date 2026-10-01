@@ -1,0 +1,57 @@
+# Runs every suite AGENTS.md asks for on a change: typecheck, the Node tests, the build, and the
+# browser suite against real WebGPU and real DuckDB-Wasm.
+#
+# The runners have no GPU, so the browser job runs WebGPU on SwiftShader (see the Linux flags in
+# vitest.browser.config.ts). `gpuDevice()` throws when no adapter comes back, so a runner where
+# WebGPU is unavailable fails the job instead of passing with nothing exercised.
+name: CI
+
+on:
+  push:
+    branches: [main, noodles-editor]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same branch or PR makes the running check obsolete.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # `build` repeats the typecheck; the separate step above is there so a type error is
+      # reported as one rather than as a failed build.
+      - run: npm run build
+      # The Pages workflow only builds the demo on main; this catches a broken demo on a PR.
+      - run: npm run build:demo
+
+  browser:
+    name: Browser (WebGPU + DuckDB-Wasm)
+    runs-on: ubuntu-latest
+    # The suite takes about a minute on SwiftShader. A hung GPU queue otherwise runs to the
+    # six-hour default.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The full Chromium build, not the default headless shell, which has no WebGPU.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:gpu
