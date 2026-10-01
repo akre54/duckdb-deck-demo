@@ -16,8 +16,8 @@ packages/planner/   @noodles.gl/planner — headless. Expression IR + three back
 src/webgpu/         device, attributes, kernels, camera, calibration, render passes, runtime
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
 src/luma/           LumaFilter + lumaCompactor: luma.gl's GPU Dataframe as the runtime's
-                    compaction engine (FINDINGS §12). The only entry besides deck that
-                    imports luma
+                    compaction engine (FINDINGS §12); LumaGroupBy, its dense group-by
+                    (FINDINGS §13). The only entry besides deck that imports luma
 src/program/        ProgramRuntime, MaterializingCatalog (the memo), queryLayer/evaluateLayer
 src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, program-pane.ts
                     (see docs/deck-and-luma.md)
@@ -39,7 +39,7 @@ npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
 npm run dev        # the inspector on :5173, the node editor at /editor/
 npm run bench      # throughput, reported not asserted
-npm run perf:gpu   # engine race: sql / gpu-mask / cost / luma / js, writes tests/browser/__perf__
+npm run perf:gpu   # engine races (filter, group-by), writes tests/browser/__perf__
 ```
 
 Run `npm test` and `npm run typecheck` on every change. Run `npm run test:gpu` for anything
@@ -122,6 +122,12 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 - **Give luma's GPU Dataframe packed buffers, not DuckDB's record batches.** It dispatches
   and compacts per batch, so 2048-row chunks turn a 1.6 ms filter into 90 ms at 4M rows and
   yield one id list per batch. Pack first (the chunked upload tier does), then wrap.
+- **luma's group-by `sum`/`mean` collapses on few groups.** Float sums use a global CAS loop
+  (no float atomics in WebGPU), so cost tracks rows per group: 4M rows on 16 bins is 366 ms
+  against 2.9 ms for `count` alone (FINDINGS §13). Means also differ bitwise run to run.
+- **luma only uses subgroups if the device requested them.** It checks `device.features`, and
+  a feature not in `requiredFeatures` is absent. `initGpu` asks for `subgroups`; a test that
+  builds its own device must too, or it measures luma's slow path (366 vs 55 ms above).
 - **An expression is SQL-feasible only if its vectors are at the top level.** `enginesFor`
   checks this; a new construct that nests a vector must keep that check true.
 

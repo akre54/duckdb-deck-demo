@@ -43,7 +43,7 @@
     "bench": "vitest bench --run --config vitest.config.ts",
     "bench:gpu": "vitest bench --run --config vitest.browser.config.ts",
     "typecheck": "tsc --noEmit",
-    "perf:gpu": "VITE_PERF=1 vitest run --config vitest.browser.config.ts tests/browser/engines.browser.test.ts"
+    "perf:gpu": "VITE_PERF=1 vitest run --config vitest.browser.config.ts tests/browser/engines.browser.test.ts tests/browser/groupby.browser.test.ts"
   },
   "dependencies": {
     "@noodles.gl/planner": "*"

@@ -134,6 +134,9 @@ Point 3 turned into a useful demonstration rather than a blocker: the optimizer 
 
 **Revised recommendation.** The seam is real and the compute path works today, but the last inch — deck drawing a kernel-written buffer — needs three small fixes in deck/luma, not an architectural change. Those are the concrete asks: accept `float32` positions on a `BinaryAttribute`, emit `unorm8x4` instead of `unorm8x3`, and expose `requiredLimits` (or implement `attach()`) on the WebGPU adapter.
 
+*Update, 2026-10-01:* `requiredLimits` merged upstream in luma.gl#3312, and `attach()` is in
+review as luma.gl#3313. §14 tracks both.
+
 ---
 
 ## 6. A cost-based planner changes the answer, and the missing term was rendering
@@ -500,6 +503,121 @@ Three smaller results from wiring it up:
   `attach()` is still missing, and it still throws in `10.0.0-alpha.2`.
 - **luma's first compile costs 100–150 ms cold**, then 5–30 ms. It is a build-time cost, like
   pipeline creation, and is not paid per slider tick.
+
+## 13. luma's dense group-by wins a linked histogram, until a float sum meets few bins
+
+§12 used luma as a filter, but luma 9.4.2 ships more than that. `@luma.gl/experimental` also has
+a dense group-by (count/sum/min/max/mean), a unique-right hash join (inner/left/semi/anti), a
+global sort with top-K, histograms, `gpu-crossfilter`, and a small SQL front end (`LuSQL`). Each
+operator stays readback-free in the same way: it takes only shapes whose output size is known on
+the CPU in advance. Group keys must be dense `u32` in `[0, groupCount)`, join keys must be unique
+on the right, and every output has a fixed capacity. `LumaGroupBy` (`src/luma`) wraps the
+group-by over our own buffers, as `LumaFilter` wraps the filter.
+
+`tests/browser/groupby.browser.test.ts` races one crossfilter workload,
+`SELECT bin, count(*), avg(v) WHERE v > {{cut}} GROUP BY bin`, where `cut` is a brush on another
+view. DuckDB computes the bin once at load. Every engine's counts must match an f64 CPU reference
+exactly, and its means must agree to 1e-3. *update* is one brush tick, ending with the result
+where its consumer needs it. luma runs twice: on a device without the `subgroups` feature, and on
+one with it. Apple Metal-3, median of 9. Full table in `tests/browser/__perf__/groupby.md`.
+
+| 4M rows, sel 0.5 | 16 bins: update ms | 1024 bins: update ms |
+|---|---:|---:|
+| duckdb (prepared `$1`, dense scatter) | 97.1 | 102 |
+| js loop (f64 accumulators) | 47.4 | 46.7 |
+| **luma** count + mean, no `subgroups` | **366** | **4.40** |
+| **luma** count + mean, `subgroups` | **54.9** | **4.19** |
+| luma + one `mapAsync` of both outputs | 329 | 4.38 |
+| luma count only | 2.90 | 2.54 |
+
+DuckDB's times varied between runs: 38–55 ms at 4M rows in two earlier runs of the same sweep,
+97–102 ms here. luma's 1024-bin times stayed between 3.8 and 4.4 ms in all three runs.
+
+**With many bins luma is an order of magnitude faster than DuckDB.** At 1024 bins with half the
+rows kept, a brush tick costs about 4 ms on the GPU, against 38–102 ms for the requery. It also
+beats the JS loop by 10×. With 5% kept, DuckDB has less to aggregate, and the gap to DuckDB
+narrows to 4.5–13×.
+
+**With few bins the float sum turns it into the slowest engine.** Counts accumulate in workgroup
+memory. Float sums go through `atomicCompareExchangeWeak` loops on bitcast `u32` words in global
+memory, because WebGPU has no float atomics. 4M rows on 16 words is a contention storm: 366 ms
+for count + mean, against 2.90 ms for the count alone. The cost tracks rows per bin, not rows.
+1M rows on 16 bins is already 61 ms.
+
+**`subgroups` helps 6.7×, but it does not close the gap.** For 16 groups or fewer, luma 9.4.2
+first sums equal keys across a subgroup (`subgroupBallot` + `subgroupAdd`), then issues one CAS
+per distinct key per subgroup. That takes 366 ms down to 55 ms. It is still 19× the count-only
+time, and still slower than the JS loop. And it only happens if the device *requested* the
+feature: luma checks `device.features`. Our harness did not, and `initGpu` did not either. It
+does now. The remaining fix belongs in luma. Each workgroup should reduce to per-group partial
+sums in workgroup memory, as counts already do, and write them without atomics to a
+`[workgroups × groupCount]` scratch buffer, about 1 MB at 4M rows and 16 groups. A second pass
+then sums each group's partials in a fixed order. That removes the contention and makes the
+result deterministic. Until then, a planner should price luma's `sum`/`mean` by rows per group
+and avoid it for low-cardinality keys.
+
+**Readback is not the cost.** Mapping 2 × `groupCount` words back to JS adds nothing measurable
+at 1024 bins (4.38 vs 4.40 ms). So a DOM- or SVG-drawn histogram fed by a GPU group-by is viable.
+The worry that leaving the GPU erases the win does not hold for aggregate-sized outputs.
+
+**The means are not deterministic, with or without subgroups.** The same parameters, run twice,
+give bitwise-different means in every configuration, from 20k rows up. The relative error is
+small: at most 1.2e-5, worst at 16 bins. But a tooltip that changes its last digit with no input
+is a visible bug. The two-pass fixed-order reduction above fixes this too.
+
+**A plain JS loop beats DuckDB at every size here.** This holds once the data is already in
+typed arrays. It does not argue against DuckDB, whose work in this pipeline is the load, the
+binning and the dense keys. It argues that the per-tick engine should be anything but a
+requery.
+
+## 14. Upstream status: what is in flight, what to ask for, and in what order
+
+Most of the gaps in §5a, §12 and §13 are luma or deck work, and several are already open as PRs.
+Status as of 2026-10-01. The drafts in `docs/upstream/` are the next asks, written against the
+numbers above. Nothing in that directory has been posted.
+
+**Already fixed upstream.** `requiredLimits` on `DeviceProps` merged in
+[luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312), which answers the limits half of §5a #3.
+It is not in a release yet; this repo still runs 9.4.2.
+
+**In review.** None of these PRs depends on another.
+
+| Gap | PR |
+|---|---|
+| §5a #3: `attach()` an app-created `GPUDevice` | [luma.gl#3313](https://github.com/visgl/luma.gl/pull/3313) |
+| §12: one dispatch per batch (90 ms vs 1.6 ms) | [luma.gl#3326](https://github.com/visgl/luma.gl/pull/3326) fuses contiguous batches (11,722 → 8 dispatches); [luma.gl#3337](https://github.com/visgl/luma.gl/pull/3337) packs on upload |
+| §12a: indexed draw with a GPU-resident count | [luma.gl#3328](https://github.com/visgl/luma.gl/pull/3328), `Model` drawIndirect |
+| Pipeline rebuild cost | [luma.gl#3302](https://github.com/visgl/luma.gl/pull/3302) |
+| deck re-reading a buffer rewritten in place | [deck.gl#10779](https://github.com/visgl/deck.gl/pull/10779) |
+| Per-pass GPU timing (the §5a "no deck GPU time" caveat) | [deck.gl#10778](https://github.com/visgl/deck.gl/pull/10778), which overlaps [deck.gl#10279](https://github.com/visgl/deck.gl/pull/10279) |
+
+**Not yet asked for:**
+
+- **luma group-by float sums.** §13 found the contention and the nondeterminism. Draft:
+  `luma-group-by-float-sums.md`.
+- **More closed operators in `GPUExpression`:** `floor`, `clamp`, `min`/`max`, `%`,
+  `select`, and a `u32` cast. luma's expression language is closed on purpose, so no application
+  text reaches generated WGSL, and a "bring your own WGSL" hook would go against that. These
+  operators are enough to derive a dense group key on the GPU. That turns a bin-width change
+  from a requery into a parameter. §12's other gap, functions, has a workaround that needs
+  nothing upstream: our kernel computes the predicate into a 0/1 column, and luma filters on
+  `col > 0.5`. Draft: `luma-expression-ops.md`.
+- **deck layers that draw `ids[k]` with a GPU-resident instance count.** No deck issue exists.
+  Draft: `deck-indexed-indirect-rfc.md`.
+- **WebGPU f32 atomics,** [gpuweb#4894](https://github.com/gpuweb/gpuweb/issues/4894), Milestone 3.
+  The WGSL committee's open question is whether the CAS polyfill is acceptable. §13 is a
+  performance data point on that. Draft: `gpuweb-4894-comment.md`.
+
+**Order.**
+
+1. **Comments first.** They take minutes, and committees and maintainers take months.
+2. **luma's in-review stack next.** Once #3313 lands, `lumaDeviceFor` in `src/luma` can use
+   `attach()`, and the `new WebGPUDevice(...)` workaround goes away.
+3. **The group-by fix.**
+4. **Planner placement for group-by.** It follows §12a's pattern: a capability, legality (dense
+   key) and pricing by rows per group.
+5. **deck,** last. Its asks build on luma #3328 and on ibgreen's GPU-vector layers in
+   [luma.gl#3169](https://github.com/visgl/luma.gl/pull/3169).
 
 ## Recommended order of work for noodles
 
