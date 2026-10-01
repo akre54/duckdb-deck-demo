@@ -47,6 +47,11 @@ export default defineConfig({
       name: 'chromium',
       provider: 'playwright',
       headless: true,
+      // Files run in parallel iframes by default, each with its own device. On SwiftShader
+      // (CI) the second device was lost as "Device was destroyed" partway through the first
+      // file, failing every test after it with "A valid external Instance reference no
+      // longer exists". Metal handled both. Two files, so serial costs a few seconds.
+      fileParallelism: false,
       providerOptions: {
         launch: {
           /**
