@@ -54,10 +54,10 @@
     "@deck.gl/layers": "^9.4.0",
     "@deck.gl/mapbox": "^9.4.0",
     "@duckdb/duckdb-wasm": "^1.29.0",
-    "@luma.gl/core": "^9.4.0",
+    "@luma.gl/core": "^9.4.2",
     "@luma.gl/experimental": "^9.4.2",
     "@luma.gl/gpgpu": "^9.4.2",
-    "@luma.gl/webgpu": "^9.4.0"
+    "@luma.gl/webgpu": "^9.4.2"
   },
   "peerDependenciesMeta": {
     "@deck.gl/core": {
@@ -94,8 +94,13 @@
     "@deck.gl/layers": "^9.4.0",
     "@deck.gl/mapbox": "^9.4.0",
     "@duckdb/duckdb-wasm": "^1.29.0",
+    "@luma.gl/core": "^9.4.2",
+    "@luma.gl/engine": "^9.4.2",
     "@luma.gl/experimental": "^9.4.2",
     "@luma.gl/gpgpu": "^9.4.2",
+    "@luma.gl/shadertools": "^9.4.2",
+    "@luma.gl/webgl": "^9.4.2",
+    "@luma.gl/webgpu": "^9.4.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.7.0",

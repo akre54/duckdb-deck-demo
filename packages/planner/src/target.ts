@@ -75,7 +75,8 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
     ? Math.min(device.limits.maxBufferSize, device.limits.maxStorageBufferBindingSize * 4)
     : 512 * 1024 * 1024;
   const budget = Math.floor(limit * (1 - RENDER_RESERVE));
-  const storageBuffers = device?.limits.maxStorageBuffersPerShaderStage ?? 8;
+  const storageBuffers =
+    device?.limits.maxStorageBuffersPerShaderStage ?? WEBGPU_DEFAULT_STORAGE_BUFFERS;
 
   switch (id) {
     case 'webgpu-native':
@@ -96,13 +97,14 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
         compute: true,
         appOwnedBuffers: true,
         gpuBudgetBytes: budget,
-        // Not `storageBuffers`. luma 9.4 exposes no `requiredLimits` on device creation and
-        // its WebGPU adapter has no `attach()`, so deck's device cannot be raised above the
-        // WebGPU defaults or pointed at ours. 8 is a real constraint for this target, and
-        // the optimizer has to plan within it.
-        maxStorageBuffersPerStage: WEBGPU_DEFAULT_STORAGE_BUFFERS,
+        // This used to be pinned to the WebGPU default of 8: luma's device ran at default
+        // limits because nothing asked for more. `DeckWebgpuPane` now creates it with
+        // `featureLevel: 'max'`, which requests every adapter limit, so deck's device has
+        // the same limit as the device passed here. luma 9.4 still cannot attach deck to
+        // that device (no `attach()`), so the two are separate devices on the same adapter.
+        maxStorageBuffersPerStage: storageBuffers,
         compaction: false,
-        note: 'luma webgpuAdapter: compute + app-owned buffers, but capped at WebGPU default limits',
+        note: 'luma webgpuAdapter: compute + app-owned buffers, device created at the adapter’s limits',
       };
     case 'deck-webgl2':
       return {
