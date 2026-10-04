@@ -3,11 +3,10 @@ import { targetCaps, TARGET_IDS, type TargetCaps } from './target.js';
 
 /**
  * Capabilities are planner *inputs*, and two of them provably change plans (see
- * optimizer.test.ts). These tests pin the values, and in particular pin the one that is
- * counter-intuitive: `deck-webgpu` reports 8 storage buffers even on an adapter offering 10,
- * because luma 9.4 exposes no `requiredLimits` and its WebGPU adapter has no `attach()`, so
- * deck's device cannot be raised or shared. If that ever stops being true, this test is where
- * the constant should change.
+ * optimizer.test.ts). These tests pin the values. `deck-webgpu` used to report 8 storage
+ * buffers on any adapter, because luma's device was created at WebGPU's default limits.
+ * `DeckWebgpuPane` now asks luma for `featureLevel: 'max'` (every adapter limit), so every
+ * compute target reads the limit off the device it is given.
  */
 
 /** Minimal stand-in for the limits the caps reader consults. */
@@ -88,22 +87,20 @@ describe('gpu budget', () => {
 });
 
 describe('storage buffer limit', () => {
-  it('native and deck-webgl2 use the adapter’s limit', () => {
-    const device = fakeDevice({ maxStorageBuffersPerShaderStage: 10 });
-    expect(targetCaps('webgpu-native', device).maxStorageBuffersPerStage).toBe(10);
-    expect(targetCaps('deck-webgl2', device).maxStorageBuffersPerStage).toBe(10);
+  it.each(TARGET_IDS)('%s uses the device’s limit', (id) => {
+    expect(targetCaps(id, fakeDevice({ maxStorageBuffersPerShaderStage: 10 }))
+      .maxStorageBuffersPerStage).toBe(10);
+    expect(targetCaps(id, fakeDevice({ maxStorageBuffersPerShaderStage: 16 }))
+      .maxStorageBuffersPerStage).toBe(16);
   });
 
-  it('deck-webgpu is pinned to the WebGPU default even on a better adapter', () => {
-    // luma 9.4 cannot raise or share the device, so deck's is stuck at spec defaults. This
-    // is a real capability difference, and the optimizer routes around it.
-    const device = fakeDevice({ maxStorageBuffersPerShaderStage: 10 });
-    expect(targetCaps('deck-webgpu', device).maxStorageBuffersPerStage).toBe(8);
-    expect(targetCaps('deck-webgpu', undefined).maxStorageBuffersPerStage).toBe(8);
+  it.each(TARGET_IDS)('%s falls back to the spec minimum with no device', (id) => {
+    expect(targetCaps(id, undefined).maxStorageBuffersPerStage).toBe(8);
   });
 
-  it('falls back to the spec minimum with no device', () => {
-    expect(targetCaps('webgpu-native', undefined).maxStorageBuffersPerStage).toBe(8);
+  it.each(TARGET_IDS)('%s falls back to the spec minimum when the limit is unreported', (id) => {
+    const device = fakeDevice({ maxStorageBuffersPerShaderStage: undefined });
+    expect(targetCaps(id, device).maxStorageBuffersPerStage).toBe(8);
   });
 });
 

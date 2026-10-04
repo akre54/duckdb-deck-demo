@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { initGpu, type Gpu } from '../../src/webgpu/device.js';
 import { Runtime } from '../../src/webgpu/runtime.js';
+import { DeckWebgpuPane } from '../../src/deck/webgpu-pane.js';
 import { readColumn, evaluateStage, relationSource, sqlSource, targetCaps, type Graph } from '@noodles.gl/planner';
 import { duck, readBuffer, readBufferU32, expectNoGpuError } from './harness.js';
 
@@ -739,8 +740,29 @@ describe('source providers', () => {
     expect(caps.maxStorageBuffersPerStage)
       .toBe(gpu.device.limits.maxStorageBuffersPerShaderStage);
     expect(caps.gpuBudgetBytes).toBeGreaterThan(0);
-    // deck's device cannot be raised, so that target stays at the spec minimum.
-    expect(targetCaps('deck-webgpu', gpu.device).maxStorageBuffersPerStage).toBe(8);
+    // deck's luma device is created at the adapter's limits, so that target reads ours too.
+    expect(targetCaps('deck-webgpu', gpu.device).maxStorageBuffersPerStage)
+      .toBe(gpu.device.limits.maxStorageBuffersPerShaderStage);
+  });
+
+  it('deck’s luma device gets the same storage-buffer limit and subgroups as ours', async () => {
+    // `targetCaps('deck-webgpu', gpu.device)` plans against *our* device's limit, so the
+    // pane's own device has to really have it. Before `featureLevel: 'max'` it had 8.
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 64;
+    document.body.appendChild(canvas);
+    const pane = new DeckWebgpuPane(canvas);
+    await pane.init();
+    expect(pane.status.device).toBe('ok');
+    const deckDevice = (pane as unknown as { gpuDevice: GPUDevice }).gpuDevice;
+    expect(deckDevice.limits.maxStorageBuffersPerShaderStage)
+      .toBe(gpu.device.limits.maxStorageBuffersPerShaderStage);
+    // Not equal caps: `initGpu` caps buffer sizes at 512 MB and 'max' asks for everything, so
+    // deck's budget is the larger one. Planning against ours is the conservative direction.
+    expect(targetCaps('deck-webgpu', deckDevice).gpuBudgetBytes)
+      .toBeGreaterThanOrEqual(targetCaps('deck-webgpu', gpu.device).gpuBudgetBytes);
+    expect(deckDevice.features.has('subgroups')).toBe(gpu.device.features.has('subgroups'));
+    canvas.remove();
   });
 });
 

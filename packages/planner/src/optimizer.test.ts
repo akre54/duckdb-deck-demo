@@ -300,6 +300,53 @@ describe('capability constraints', () => {
       plan(g, schema, { policy: 'cost', stats: makeStats(), caps: targetCaps('deck-webgl2', undefined) }),
     ).toThrow(/no compute shaders/);
   });
+
+  describe('deck-webgpu storage-buffer limit follows the device', () => {
+    // A frequently dragged filter wants to be in the kernel, but fusing it with the
+    // projection, scale and ramp needs 10 storage buffers. At WebGPU's default of 8 the
+    // optimizer has to push it out; on a device created at the adapter's limits it stays.
+    const g: Graph = {
+      params: {
+        cut: { value: 60, kind: 'value', changeRate: 8 },
+        k: { value: 2, kind: 'value', changeRate: 8 },
+      },
+      nodes: [
+        source,
+        { id: 'f', type: 'filter', input: 'src', predicate: 'speed > {{cut}}' },
+        { id: 'st', type: 'stats', input: 'f', column: 'pop', ops: ['min', 'max'] },
+        { id: 'p', type: 'project', input: 'f', mode: 'mercator', x: 'lng', y: 'lat', z: 'elevation' },
+        { id: 'r', type: 'scale', input: 'p', name: 'pscale', expr: 'pop', kind: 'log', domain: 'auto', statsFrom: 'st', range: ['1', '{{k}}'] },
+        { id: 'c', type: 'colorscale', input: 'r', expr: 'elevation', ramp: 'viridis', domain: ['0', '900'] },
+        { id: 'out', type: 'render', input: 'c', mode: 'points' },
+      ],
+    };
+    const device = (maxStorageBuffersPerShaderStage: number) => ({
+      limits: {
+        maxBufferSize: 1024 * 1024 * 1024,
+        maxStorageBufferBindingSize: 256 * 1024 * 1024,
+        maxStorageBuffersPerShaderStage,
+      },
+    });
+    const planOn = (caps: ReturnType<typeof targetCaps>) =>
+      plan(g, schema, { policy: 'cost', stats: makeStats(), params: { cut: 60, k: 2 }, caps });
+
+    it('keeps the filter in the fused kernel when the device allows 10', () => {
+      const p = planOn(targetCaps('deck-webgpu', device(10)));
+      expect(stageOfNode(p, 'f')).toBe('gpu');
+      expect(p.kernels).toHaveLength(1);
+    });
+
+    it('moves the filter out of the kernel at the spec default of 8', () => {
+      for (const caps of [targetCaps('deck-webgpu', device(8)), targetCaps('deck-webgpu', undefined)]) {
+        const p = planOn(caps);
+        expect(stageOfNode(p, 'f')).not.toBe('gpu');
+        // It moved because the kernel did not fit, not because it was cheaper.
+        expect(p.explain.candidates.some(
+          (c) => !c.legal && /over the per-stage limit of 8/.test(c.reason ?? ''),
+        )).toBe(true);
+      }
+    });
+  });
 });
 
 describe('cost constants', () => {

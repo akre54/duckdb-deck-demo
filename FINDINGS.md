@@ -132,6 +132,8 @@ So the compute and handoff half of the answer is confirmed on shipping versions.
 
 Point 3 turned into a useful demonstration rather than a blocker: the optimizer treats the binding limit as a hard constraint, and on that target it *moves the filter node out of the kernel* so the fused kernel fits in exactly 8 bindings. The constraint does real work.
 
+*Update (2026-10-04):* the limits half of point 3 is fixed on 9.4. `featureLevel: 'max'` makes luma request every adapter limit (§12a), the pane now passes it, and `targetCaps('deck-webgpu')` reads the device's limit, so the filter stays in the kernel on a 10-buffer adapter. `attach()` is still missing in 9.4 (§14).
+
 **Revised recommendation.** The seam is real and the compute path works today, but the last inch — deck drawing a kernel-written buffer — needs three small fixes in deck/luma, not an architectural change. Those are the concrete asks: accept `float32` positions on a `BinaryAttribute`, emit `unorm8x4` instead of `unorm8x3`, and expose `requiredLimits` (or implement `attach()`) on the WebGPU adapter.
 
 *Update, 2026-10-01:* `requiredLimits` merged upstream in luma.gl#3312, and `attach()` is in
@@ -573,18 +575,26 @@ requery.
 ## 14. Upstream status: what is in flight, what to ask for, and in what order
 
 Most of the gaps in §5a, §12 and §13 are luma or deck work, and several are already open as PRs.
-Status as of 2026-10-01. The drafts in `docs/upstream/` are the next asks, written against the
+Status as of 2026-10-04. The drafts in `docs/upstream/` are the next asks, written against the
 numbers above. Nothing in that directory has been posted.
 
-**Already fixed upstream.** `requiredLimits` on `DeviceProps` merged in
-[luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312), which answers the limits half of §5a #3.
-It is not in a release yet; this repo still runs 9.4.2.
+**Already fixed upstream, in luma 10 only.** Both halves of §5a #3 are merged into luma's
+`master`, the v10 line, and shipped in `10.0.0-alpha.3`. Neither is in any 9.4 release, and
+this repo runs 9.4.2.
+
+- `requiredLimits` on `DeviceProps`: [luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312),
+  merged 2026-10-01. On 9.4 the limits half already has an answer: `featureLevel: 'max'` asks
+  for every adapter limit (§12a). `DeckWebgpuPane` now passes it, so `targetCaps('deck-webgpu')`
+  reads the device's storage-buffer limit instead of pinning 8.
+- `WebGPUAdapter.attach()` for an app-created `GPUDevice`:
+  [luma.gl#3313](https://github.com/visgl/luma.gl/pull/3313), merged 2026-10-02. On 9.4 it
+  still throws, so deck still gets its own device, and `src/luma` still wraps ours with
+  `new WebGPUDevice(...)`.
 
 **In review.** None of these PRs depends on another.
 
 | Gap | PR |
 |---|---|
-| §5a #3: `attach()` an app-created `GPUDevice` | [luma.gl#3313](https://github.com/visgl/luma.gl/pull/3313) |
 | §12: one dispatch per batch (90 ms vs 1.6 ms) | [luma.gl#3326](https://github.com/visgl/luma.gl/pull/3326) fuses contiguous batches (11,722 → 8 dispatches); [luma.gl#3337](https://github.com/visgl/luma.gl/pull/3337) packs on upload |
 | §12a: indexed draw with a GPU-resident count | [luma.gl#3328](https://github.com/visgl/luma.gl/pull/3328), `Model` drawIndirect |
 | Pipeline rebuild cost | [luma.gl#3302](https://github.com/visgl/luma.gl/pull/3302) |
@@ -611,8 +621,9 @@ It is not in a release yet; this repo still runs 9.4.2.
 **Order.**
 
 1. **Comments first.** They take minutes, and committees and maintainers take months.
-2. **luma's in-review stack next.** Once #3313 lands, `lumaDeviceFor` in `src/luma` can use
-   `attach()`, and the `new WebGPUDevice(...)` workaround goes away.
+2. **luma's in-review stack next.** #3313 has landed, but only in luma 10. Once this repo is on
+   a luma 10 release, `lumaDeviceFor` in `src/luma` can use `attach()`, and the
+   `new WebGPUDevice(...)` workaround goes away.
 3. **The group-by fix.**
 4. **Planner placement for group-by.** It follows §12a's pattern: a capability, legality (dense
    key) and pricing by rows per group.
