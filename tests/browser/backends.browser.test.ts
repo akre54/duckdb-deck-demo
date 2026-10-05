@@ -325,9 +325,9 @@ describe('divergences that are known and deliberate', () => {
  * under that and holds 1e-4. SwiftShader, which CI runs on, measured 1-2e-4 per call, and a
  * geo function chains several: a distance came in at 1.25e-4 and a midpoint at 2.8e-4. So
  * 5e-4 on SwiftShader, which is platform error and not slack: a wrong formula is off by more.
- * Before `__geo_destination`'s longitude was reconditioned this needed 2e-3, and that was
- * hiding a 1.3% error in a 25 km move at 80° N. If a SwiftShader-only failure wants this
- * raised, find the cancellation first.
+ * Before `__geo_destination` was reconditioned this needed 2e-3, and that was hiding errors
+ * of 1.3% (longitude) and 30% (latitude) in a 25 km move at 80° N. If a SwiftShader-only
+ * failure wants this raised, look for a cancellation or an asin near ±1 first.
  */
 function geoRelative(): number {
   return isSoftwareAdapter(device) ? 5e-4 : 1e-4;

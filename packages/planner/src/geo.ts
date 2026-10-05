@@ -99,24 +99,32 @@ export const GEO_SPECS: Record<string, FunctionSpec> = {
   /** ST_Azimuth: radians clockwise from north, in [0, 2π). `%` is floored on every backend. */
   st_azimuth: { params: ['a', 'b'], body: '__geo_bearing(a, b) % 6.283185307179586' },
 
-  // Destination along a great circle, `d` in radians of arc and `az` in radians. Latitude is
-  // clamped for the same reason as haversine: rounding at the poles.
+  // Destination along a great circle, `d` in radians of arc and `az` in radians.
   //
-  // The longitude is the textbook atan2(sin θ sin δ cos φ₁, cos δ − sin φ₁ sin φ₂) with cos φ₁
-  // divided out of both arguments. The textbook denominator subtracts two nearly equal numbers
-  // on a short move at high latitude: 25 km at 80° N lost 1.3% of the move on SwiftShader,
-  // whose trig is only as accurate as WGSL requires, and 17x more precision than this form
-  // even on Metal. Dividing by cos φ₁ is safe because the numerator carries the same factor.
-  __geo_dest_lat: {
+  // Written as the destination's direction from the start: north (`__geo_dest_n`), east
+  // (`__geo_dest_e`) and up (`__geo_dest_sin_lat`, which is sin φ₂). Longitude is
+  // atan2(east, north) and latitude atan2(up, √(north² + east²)). The textbook forms are
+  // atan2(sin θ sin δ cos φ₁, cos δ − sin φ₁ sin φ₂) and asin(sin φ₂), and on a short move at
+  // high latitude both lose the move: the first subtracts two nearly equal numbers, and asin's
+  // slope near 1 multiplies the error in sin φ₂ (5.8x at 80°). For 25 km north-ish at 80° N on
+  // SwiftShader, whose trig is only as accurate as WGSL requires, they were off by 1.3% and
+  // 30% of the move, and even Metal lost 17x more precision in the longitude than this form.
+  __geo_dest_n: {
     params: ['p', 'd', 'az'],
-    body: 'asin(clamp(sin(radians(p.y)) * cos(d) + cos(radians(p.y)) * sin(d) * cos(az), -1.0, 1.0))',
+    body: 'cos(radians(p.y)) * cos(d) - sin(radians(p.y)) * sin(d) * cos(az)',
+  },
+  __geo_dest_e: { params: ['p', 'd', 'az'], body: 'sin(az) * sin(d)' },
+  __geo_dest_sin_lat: {
+    params: ['p', 'd', 'az'],
+    body: 'sin(radians(p.y)) * cos(d) + cos(radians(p.y)) * sin(d) * cos(az)',
   },
   __geo_destination: {
     params: ['p', 'd', 'az'],
     body:
-      '[degrees(radians(p.x) + atan2(sin(az) * sin(d), ' +
-      'cos(radians(p.y)) * cos(d) - sin(radians(p.y)) * sin(d) * cos(az))), ' +
-      'degrees(__geo_dest_lat(p, d, az))]',
+      '[degrees(radians(p.x) + atan2(__geo_dest_e(p, d, az), __geo_dest_n(p, d, az))), ' +
+      'degrees(atan2(__geo_dest_sin_lat(p, d, az), sqrt(' +
+      '__geo_dest_n(p, d, az) * __geo_dest_n(p, d, az) + ' +
+      '__geo_dest_e(p, d, az) * __geo_dest_e(p, d, az))))]',
   },
   /** ST_Project(geog, metres, azimuth radians). */
   st_project: { params: ['p', 'm', 'az'], body: `__geo_destination(p, m / ${EARTH_RADIUS_M}, az)` },
@@ -354,11 +362,14 @@ function polygonAndPoint(args: readonly Expr[]): [Geometry & { dim: 2 }, Expr] {
  * `along`. The segment is found by a balanced comparison of `s` against the cumulative lengths.
  * Within segment i, with φ₁ its start latitude, θ its bearing and δ = (s − startᵢ) / R:
  *
- *     sin φ₂ = sin φ₁ cos δ + cos φ₁ cos θ sin δ
- *     λ₂     = λ₁ + atan2(sin θ sin δ, cos φ₁ cos δ − sin φ₁ cos θ sin δ)
+ *     north = cos φ₁ cos δ − sin φ₁ cos θ sin δ
+ *     east  = sin θ sin δ
+ *     up    = sin φ₁ cos δ + cos φ₁ cos θ sin δ
+ *     λ₂    = λ₁ + atan2(east, north)
+ *     φ₂    = atan2(up, √(north² + east²))
  *
- * which is `__geo_destination` with every term of the constant start written in as a number,
- * including its well-conditioned longitude (see there).
+ * which is `__geo_destination` with every term of the constant start written in as a number.
+ * See there for why it is not the textbook asin form.
  */
 function along(g: Geometry & { dim: 1 }, metres: Expr): Expr {
   const segs: { a: Position; start: number; az: number }[] = [];
@@ -375,12 +386,14 @@ function along(g: Geometry & { dim: 1 }, metres: Expr): Expr {
   const leaf = ({ a, start, az }: typeof segs[number], c: 'x' | 'y'): Expr => {
     const [sinP, cosP] = [Math.sin(a[1] * RAD), Math.cos(a[1] * RAD)];
     const d = bin('/', bin('-', s, num(start)), num(EARTH_RADIUS_M));
-    const sinP2 = bin('+', bin('*', num(sinP), call('cos', d)), bin('*', num(cosP * Math.cos(az)), call('sin', d)));
-    if (c === 'y') return bin('*', call('asin', call('clamp', sinP2, num(-1), num(1))), num(1 / RAD));
-    const dl = call('atan2',
-      bin('*', num(Math.sin(az)), call('sin', d)),
-      bin('-', bin('*', num(cosP), call('cos', d)), bin('*', num(sinP * Math.cos(az)), call('sin', d))));
-    return bin('*', bin('+', num(a[0] * RAD), dl), num(1 / RAD));
+    const north = bin('-', bin('*', num(cosP), call('cos', d)), bin('*', num(sinP * Math.cos(az)), call('sin', d)));
+    const east = bin('*', num(Math.sin(az)), call('sin', d));
+    if (c === 'y') {
+      const up = bin('+', bin('*', num(sinP), call('cos', d)), bin('*', num(cosP * Math.cos(az)), call('sin', d)));
+      const flat = call('sqrt', bin('+', bin('*', north, north), bin('*', east, east)));
+      return bin('*', call('atan2', up, flat), num(1 / RAD));
+    }
+    return bin('*', bin('+', num(a[0] * RAD), call('atan2', east, north)), num(1 / RAD));
   };
   const pick = (lo: number, hi: number, c: 'x' | 'y'): Expr => {
     if (hi - lo === 1) return leaf(segs[lo], c);
