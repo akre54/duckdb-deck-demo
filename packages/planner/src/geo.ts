@@ -99,9 +99,14 @@ export const GEO_SPECS: Record<string, FunctionSpec> = {
   /** ST_Azimuth: radians clockwise from north, in [0, 2π). `%` is floored on every backend. */
   st_azimuth: { params: ['a', 'b'], body: '__geo_bearing(a, b) % 6.283185307179586' },
 
-  // Destination along a great circle, `d` in radians of arc and `az` in radians. The latitude
-  // is its own helper because the longitude formula needs it too. Clamped for the same reason
-  // as haversine: rounding at the poles.
+  // Destination along a great circle, `d` in radians of arc and `az` in radians. Latitude is
+  // clamped for the same reason as haversine: rounding at the poles.
+  //
+  // The longitude is the textbook atan2(sin θ sin δ cos φ₁, cos δ − sin φ₁ sin φ₂) with cos φ₁
+  // divided out of both arguments. The textbook denominator subtracts two nearly equal numbers
+  // on a short move at high latitude: 25 km at 80° N lost 1.3% of the move on SwiftShader,
+  // whose trig is only as accurate as WGSL requires, and 17x more precision than this form
+  // even on Metal. Dividing by cos φ₁ is safe because the numerator carries the same factor.
   __geo_dest_lat: {
     params: ['p', 'd', 'az'],
     body: 'asin(clamp(sin(radians(p.y)) * cos(d) + cos(radians(p.y)) * sin(d) * cos(az), -1.0, 1.0))',
@@ -109,8 +114,8 @@ export const GEO_SPECS: Record<string, FunctionSpec> = {
   __geo_destination: {
     params: ['p', 'd', 'az'],
     body:
-      '[degrees(radians(p.x) + atan2(sin(az) * sin(d) * cos(radians(p.y)), ' +
-      'cos(d) - sin(radians(p.y)) * sin(__geo_dest_lat(p, d, az)))), ' +
+      '[degrees(radians(p.x) + atan2(sin(az) * sin(d), ' +
+      'cos(radians(p.y)) * cos(d) - sin(radians(p.y)) * sin(d) * cos(az))), ' +
       'degrees(__geo_dest_lat(p, d, az))]',
   },
   /** ST_Project(geog, metres, azimuth radians). */
@@ -350,9 +355,10 @@ function polygonAndPoint(args: readonly Expr[]): [Geometry & { dim: 2 }, Expr] {
  * Within segment i, with φ₁ its start latitude, θ its bearing and δ = (s − startᵢ) / R:
  *
  *     sin φ₂ = sin φ₁ cos δ + cos φ₁ cos θ sin δ
- *     λ₂     = λ₁ + atan2(sin θ cos φ₁ sin δ, cos δ − sin φ₁ sin φ₂)
+ *     λ₂     = λ₁ + atan2(sin θ sin δ, cos φ₁ cos δ − sin φ₁ cos θ sin δ)
  *
- * which is `__geo_destination` with every term of the constant start written in as a number.
+ * which is `__geo_destination` with every term of the constant start written in as a number,
+ * including its well-conditioned longitude (see there).
  */
 function along(g: Geometry & { dim: 1 }, metres: Expr): Expr {
   const segs: { a: Position; start: number; az: number }[] = [];
@@ -372,8 +378,8 @@ function along(g: Geometry & { dim: 1 }, metres: Expr): Expr {
     const sinP2 = bin('+', bin('*', num(sinP), call('cos', d)), bin('*', num(cosP * Math.cos(az)), call('sin', d)));
     if (c === 'y') return bin('*', call('asin', call('clamp', sinP2, num(-1), num(1))), num(1 / RAD));
     const dl = call('atan2',
-      bin('*', num(Math.sin(az) * cosP), call('sin', d)),
-      bin('-', call('cos', d), bin('*', num(sinP), sinP2)));
+      bin('*', num(Math.sin(az)), call('sin', d)),
+      bin('-', bin('*', num(cosP), call('cos', d)), bin('*', num(sinP * Math.cos(az)), call('sin', d))));
     return bin('*', bin('+', num(a[0] * RAD), dl), num(1 / RAD));
   };
   const pick = (lo: number, hi: number, c: 'x' | 'y'): Expr => {

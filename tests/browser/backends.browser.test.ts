@@ -321,15 +321,16 @@ describe('divergences that are known and deliberate', () => {
 /**
  * Relative tolerance for the geo prelude on the GPU.
  *
- * A geo function chains several trig calls (haversine is sin, cos, sqrt and asin), and WGSL
- * allows each up to 2^-11 absolute error (sin, cos) or 4096 ULP (atan2). Metal comes in far
- * under that and holds 1e-4. SwiftShader, which CI runs on, is conformant and no better: it
- * missed 1e-4 by up to 12x, a `destination` longitude of 1.0693° reading 1.0680°. Single
- * trig calls still hold 1e-4 there, so only the chained functions get the wider bound. A
- * wrong formula is off by far more than 2e-3.
+ * WGSL allows sin and cos up to 2^-11 absolute error and atan2 4096 ULP. Metal comes in far
+ * under that and holds 1e-4. SwiftShader, which CI runs on, measured 1-2e-4 per call, and a
+ * geo function chains several: a distance came in at 1.25e-4 and a midpoint at 2.8e-4. So
+ * 5e-4 on SwiftShader, which is platform error and not slack: a wrong formula is off by more.
+ * Before `__geo_destination`'s longitude was reconditioned this needed 2e-3, and that was
+ * hiding a 1.3% error in a 25 km move at 80° N. If a SwiftShader-only failure wants this
+ * raised, find the cancellation first.
  */
 function geoRelative(): number {
-  return isSoftwareAdapter(device) ? 2e-3 : 1e-4;
+  return isSoftwareAdapter(device) ? 5e-4 : 1e-4;
 }
 
 describe('the geo prelude computes the same numbers on all three', () => {
