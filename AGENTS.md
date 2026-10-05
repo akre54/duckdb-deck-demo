@@ -30,8 +30,8 @@ and to its built `dist` when the root package compiles — that is why `tsconfig
 ## Commands
 
 ```bash
-npm test           # 680 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
-npm run test:gpu   # 66 browser tests, Chromium, real WebGPU + real DuckDB
+npm test           # node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
+npm run test:gpu   # browser tests, Chromium, real WebGPU + real DuckDB
 npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
 npm run dev        # the inspector on :5173, the node editor at /editor/

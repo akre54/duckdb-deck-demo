@@ -26,8 +26,8 @@ suggested next changes and open research.
 ```bash
 npm install
 npm run dev        # the inspector at /, the node editor at /editor/
-npm test           # 680 node tests, including real DuckDB through duckdb-wasm's Node build
-npm run test:gpu   # 66 browser tests, real WebGPU + real DuckDB
+npm test           # node tests, including real DuckDB through duckdb-wasm's Node build
+npm run test:gpu   # browser tests, real WebGPU + real DuckDB
 ```
 
 You need Chrome or Edge 113+, or Safari 26+. [FINDINGS.md](FINDINGS.md) has the measured
@@ -412,8 +412,8 @@ fails to compile instead of becoming a dependency a consumer has to install.
 ## Tests
 
 ```bash
-npm test          # 680 tests, node
-npm run test:gpu  # 66 tests, Chromium, real WebGPU + real DuckDB
+npm test          # node tests
+npm run test:gpu  # browser tests, Chromium, real WebGPU + real DuckDB
 npm run bench     # throughput, reported not asserted
 ```
 
