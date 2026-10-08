@@ -135,8 +135,10 @@ attributes, not to own the render path.
 Do next, roughly in order of payoff:
 
 1. **Upstream the three deck/luma fixes.** Accept float32 positions on a `BinaryAttribute`.
-   Emit `unorm8x4` for colors. Adopt luma 10's `attach()` on the WebGPU adapter (merged, not
-   in any 9.4 release). These are what stand between the working compute path and pixels.
+   Emit `unorm8x4` for colors. Adopt luma 10's `attach()` on the WebGPU adapter (merged, not in
+   any 9.4 release). These are what stand between the working compute path and pixels. As of
+   2026-10-08 the float32-position and `unorm8x4` fixes are open as deck.gl#10776 and #10753.
+   See FINDINGS §14.
 2. **Emit geographic positions from the planner.** Add a `project` mode that outputs lng/lat,
    or deck's common space, so the map path binds positions directly instead of inverting
    mercator on the CPU.

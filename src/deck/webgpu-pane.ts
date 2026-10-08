@@ -76,6 +76,9 @@ export class DeckWebgpuPane {
    * It is still luma's own device, not ours: `WebGPUAdapter.attach()` throws "not
    * implemented" in every 9.4 release (it landed in luma 10, FINDINGS §14). Both devices ask
    * for a high-performance adapter, so the planner reads the limit off ours.
+   *
+   * TODO(luma#3313): `attach()` is merged and in luma v10.0.0-alpha.3. On a release that has it,
+   * attach our own `GPUDevice` here instead of creating a second one.
    */
   async init(): Promise<void> {
     if (this.device) return;

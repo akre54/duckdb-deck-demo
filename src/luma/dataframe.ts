@@ -318,6 +318,8 @@ const wrappers = new WeakMap<GPUDevice, WebGPUDevice>();
 function lumaDeviceFor(device: GPUDevice, adapter: GPUAdapter): WebGPUDevice {
   let luma = wrappers.get(device);
   if (!luma) {
+    // TODO(luma#3313): `WebGPUAdapter.attach()` is merged (v10.0.0-alpha.3, not in 9.4). Replace
+    // this constructor call with `attach()` once we can pin a release that has it.
     // No `createCanvasContext`: this wrapper exists for compute, and the canvas stays ours.
     luma = new WebGPUDevice({}, device, adapter, adapter.info);
     wrappers.set(device, luma);

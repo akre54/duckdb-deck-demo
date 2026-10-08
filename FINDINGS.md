@@ -136,8 +136,11 @@ Point 3 turned into a useful demonstration rather than a blocker: the optimizer 
 
 **Revised recommendation.** The seam is real and the compute path works today, but the last inch — deck drawing a kernel-written buffer — needs three small fixes in deck/luma, not an architectural change. Those are the concrete asks: accept `float32` positions on a `BinaryAttribute`, emit `unorm8x4` instead of `unorm8x3`, and expose `requiredLimits` (or implement `attach()`) on the WebGPU adapter.
 
-*Update, 2026-10-01:* `requiredLimits` merged upstream in luma.gl#3312, and `attach()` is in
-review as luma.gl#3313. §14 tracks both.
+*Update, 2026-10-08:* `requiredLimits` ([luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312))
+and `attach()` ([luma.gl#3313](https://github.com/visgl/luma.gl/pull/3313)) are both merged and
+are in `v10.0.0-alpha.3`. Neither is in a 9.4 release, so this repo (on 9.4.2) still carries the
+workarounds. The fp64 and `unorm8x3` halves are still open: [deck.gl#10776](https://github.com/visgl/deck.gl/pull/10776)
+and [deck.gl#10753](https://github.com/visgl/deck.gl/pull/10753). §14 tracks all of it.
 
 ---
 
@@ -501,8 +504,8 @@ Three smaller results from wiring it up:
   `Buffer` also takes an existing `GPUBuffer` as `handle`. That is how luma runs on our device,
   with our raised limits, over our buffers, with no copy.
 - **luma 9.4 can raise its own limits.** `featureLevel: 'max'` makes the WebGPU adapter request
-  every adapter limit. The "no `requiredLimits`" half of §5a #3 has a 9.4 answer. Only
-  `attach()` is still missing, and it still throws in `10.0.0-alpha.2`.
+  every adapter limit. The "no `requiredLimits`" half of §5a #3 has a 9.4 answer. `attach()`
+  threw in 9.4 and in `10.0.0-alpha.2`; it is implemented in `10.0.0-alpha.3`.
 - **luma's first compile costs 100–150 ms cold**, then 5–30 ms. It is a build-time cost, like
   pipeline creation, and is not paid per slider tick.
 
@@ -558,6 +561,11 @@ then sums each group's partials in a fixed order. That removes the contention an
 result deterministic. Until then, a planner should price luma's `sum`/`mean` by rows per group
 and avoid it for low-cardinality keys.
 
+*Update, 2026-10-08:* this reduction is now [luma.gl#3391](https://github.com/visgl/luma.gl/pull/3391)
+(open; ibgreen's three P2 review comments were answered on 2026-10-05). The numbers in this
+section describe luma 9.4.2 and stay true of it. They will not describe a release that contains
+#3391, so re-run `npm run perf:gpu` on that release before changing any planner constant.
+
 **Readback is not the cost.** Mapping 2 × `groupCount` words back to JS adds nothing measurable
 at 1024 bins (4.38 vs 4.40 ms). So a DOM- or SVG-drawn histogram fed by a GPU group-by is viable.
 The worry that leaving the GPU erases the win does not hold for aggregate-sized outputs.
@@ -574,61 +582,72 @@ requery.
 
 ## 14. Upstream status: what is in flight, what to ask for, and in what order
 
-Most of the gaps in §5a, §12 and §13 are luma or deck work, and several are already open as PRs.
-Status as of 2026-10-04. The drafts in `docs/upstream/` are the next asks, written against the
-numbers above. Nothing in that directory has been posted.
+Most of the gaps in §5a, §12 and §13 are luma or deck work. Status as of 2026-10-08. The drafts and
+what became of them are in [docs/upstream/](docs/upstream/README.md). Nothing here is in a 9.4
+release; `v10.0.0-alpha.3` (2026-10-04) is the only release carrying any of it.
 
-**Already fixed upstream, in luma 10 only.** Both halves of §5a #3 are merged into luma's
-`master`, the v10 line, and shipped in `10.0.0-alpha.3`. Neither is in any 9.4 release, and
-this repo runs 9.4.2.
+**Landed.**
 
-- `requiredLimits` on `DeviceProps`: [luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312),
-  merged 2026-10-01. On 9.4 the limits half already has an answer: `featureLevel: 'max'` asks
-  for every adapter limit (§12a). `DeckWebgpuPane` now passes it, so `targetCaps('deck-webgpu')`
-  reads the device's storage-buffer limit instead of pinning 8.
-- `WebGPUAdapter.attach()` for an app-created `GPUDevice`:
-  [luma.gl#3313](https://github.com/visgl/luma.gl/pull/3313), merged 2026-10-02. On 9.4 it
-  still throws, so deck still gets its own device, and `src/luma` still wraps ours with
-  `new WebGPUDevice(...)`.
-
-**In review.** None of these PRs depends on another.
-
-| Gap | PR |
+| Gap | Where |
 |---|---|
-| §12: one dispatch per batch (90 ms vs 1.6 ms) | [luma.gl#3326](https://github.com/visgl/luma.gl/pull/3326) fuses contiguous batches (11,722 → 8 dispatches); [luma.gl#3337](https://github.com/visgl/luma.gl/pull/3337) packs on upload |
-| §12a: indexed draw with a GPU-resident count | [luma.gl#3328](https://github.com/visgl/luma.gl/pull/3328), `Model` drawIndirect |
-| Pipeline rebuild cost | [luma.gl#3302](https://github.com/visgl/luma.gl/pull/3302) |
-| deck re-reading a buffer rewritten in place | [deck.gl#10779](https://github.com/visgl/deck.gl/pull/10779) |
-| Per-pass GPU timing (the §5a "no deck GPU time" caveat) | [deck.gl#10778](https://github.com/visgl/deck.gl/pull/10778), which overlaps [deck.gl#10279](https://github.com/visgl/deck.gl/pull/10279) |
+| §5a #3: `requiredLimits` | [luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312), in `v10.0.0-alpha.3` |
+| §5a #3: `attach()` an app-created `GPUDevice` | [luma.gl#3313](https://github.com/visgl/luma.gl/pull/3313), in `v10.0.0-alpha.3`, v10 only (a 9.4 backport has been asked about, not decided) |
+| GPUVector-first deck layer family | [luma.gl#3169](https://github.com/visgl/luma.gl/pull/3169), merged 2026-10-02 |
+| Binders: empty batches, chunk byte offsets | [luma.gl#3338](https://github.com/visgl/luma.gl/pull/3338), in alpha.3 |
+| `Buffer` `byteOffset`; range-only readback | [luma.gl#3335](https://github.com/visgl/luma.gl/pull/3335), [#3330](https://github.com/visgl/luma.gl/pull/3330), cherry-picked to 9.4 as #3336 and #3386 |
 
-**Not yet asked for:**
+**Open, awaiting maintainer review.** None of these depends on another.
 
-- **luma group-by float sums.** §13 found the contention and the nondeterminism. Draft:
-  `luma-group-by-float-sums.md`.
-- **More closed operators in `GPUExpression`:** `floor`, `clamp`, `min`/`max`, `%`,
-  `select`, and a `u32` cast. luma's expression language is closed on purpose, so no application
-  text reaches generated WGSL, and a "bring your own WGSL" hook would go against that. These
-  operators are enough to derive a dense group key on the GPU. That turns a bin-width change
-  from a requery into a parameter. §12's other gap, functions, has a workaround that needs
-  nothing upstream: our kernel computes the predicate into a 0/1 column, and luma filters on
-  `col > 0.5`. Draft: `luma-expression-ops.md`.
-- **deck layers that draw `ids[k]` with a GPU-resident instance count.** No deck issue exists.
-  Draft: `deck-indexed-indirect-rfc.md`.
-- **WebGPU f32 atomics,** [gpuweb#4894](https://github.com/gpuweb/gpuweb/issues/4894), Milestone 3.
-  The WGSL committee's open question is whether the CAS polyfill is acceptable. §13 is a
-  performance data point on that. Draft: `gpuweb-4894-comment.md`.
+| Gap | PR | State |
+|---|---|---|
+| §13: float `sum`/`mean` contend on few groups; nondeterministic | [luma.gl#3391](https://github.com/visgl/luma.gl/pull/3391) | ibgreen reviewed 2026-10-05; three P2s answered the same day; awaiting re-review |
+| §12: one dispatch per batch (90 ms vs 1.6 ms) | [luma.gl#3326](https://github.com/visgl/luma.gl/pull/3326) fuses contiguous batches; [#3337](https://github.com/visgl/luma.gl/pull/3337) packs on upload | no review yet; #3326 merged with master 2026-10-08 |
+| §12a: indexed draw with a GPU-resident count | [luma.gl#3328](https://github.com/visgl/luma.gl/pull/3328) | no review yet |
+| Draw-call parity between WebGL and WebGPU | [luma.gl#3333](https://github.com/visgl/luma.gl/pull/3333) | ibgreen's one comment fixed; only the Coveralls aggregate is red |
+| Pipeline rebuild cost | [luma.gl#3302](https://github.com/visgl/luma.gl/pull/3302) | no review yet |
+| deck re-reading a buffer rewritten in place | [deck.gl#10779](https://github.com/visgl/deck.gl/pull/10779) | bot review only; may be rescoped to v9 (D3) |
+| §5a #1: external float64 buffers on WebGPU | [deck.gl#10776](https://github.com/visgl/deck.gl/pull/10776) | may be superseded by float32-relative-to-`coordinateOrigin` (D4) |
+| §5a #2: 3-component 8/16-bit attributes | [deck.gl#10753](https://github.com/visgl/deck.gl/pull/10753) | bot review only |
+| Per-pass GPU timing | [deck.gl#10778](https://github.com/visgl/deck.gl/pull/10778) | overlaps [#10279](https://github.com/visgl/deck.gl/pull/10279); heads-up comment posted, no reply |
 
-**Order.**
+**Posted and waiting for an answer.**
 
-1. **Comments first.** They take minutes, and committees and maintainers take months.
-2. **luma's in-review stack next.** #3313 has landed, but only in luma 10. Once this repo is on
-   a luma 10 release, `lumaDeviceFor` in `src/luma` can use `attach()`, and the
-   `new WebGPUDevice(...)` workaround goes away.
-3. **The group-by fix.**
-4. **Planner placement for group-by.** It follows §12a's pattern: a capability, legality (dense
-   key) and pricing by rows per group.
-5. **deck,** last. Its asks build on luma #3328 and on ibgreen's GPU-vector layers in
-   [luma.gl#3169](https://github.com/visgl/luma.gl/pull/3169).
+- [luma.gl#2550](https://github.com/visgl/luma.gl/issues/2550) (v10 tracker), 2026-10-05: maps the
+  PRs onto the tranches and asks six questions, D1–D6. D1 (physical chunk layout) and D2 (one
+  selection type, mask or id list) gate #3326, #3337 and the deck RFC.
+- [deck.gl#10781](https://github.com/visgl/deck.gl/issues/10781), 2026-10-01: RFC for layers that
+  draw `ids[k]` with a GPU-resident instance count. Waiting on D2.
+- [deck.gl#10712](https://github.com/visgl/deck.gl/issues/10712) (v10 tracker), 2026-10-01: the
+  GPU-resident data path checklist.
+- [gpuweb#4894](https://github.com/gpuweb/gpuweb/issues/4894), 2026-10-08: §13 as a data point on
+  the f32 `atomicCompareExchangeWeak` polyfill. The WGSL committee's open question was whether
+  the polyfill is acceptable.
+
+**Not asked for yet.**
+
+- **More closed operators in `GPUExpression`** (`floor`, `clamp`, `min`/`max`, `%`, `select`, a
+  `u32` cast). Raised as D5, not filed as an issue. These are enough to derive a dense group key
+  on the GPU, which turns a bin-width change from a requery into a parameter. §12's other gap,
+  functions, has a workaround that needs nothing upstream: our kernel computes the predicate into
+  a 0/1 column, and luma filters on `col > 0.5`.
+- **D4 and D6** (float32 positions relative to `coordinateOrigin`; queryable autotune profiles).
+  Also only raised on #2550.
+
+**What to do on our side while waiting.**
+
+1. **Price group-by in the planner** as a placement, following §12a: a capability, legality
+   (dense key) and a cost by rows per group. Keep the cost constants calibrated at startup rather
+   than hard-coded, because #3391 changes the few-group cost substantially.
+2. **When #3313 is in a release we can pin**, delete `lumaDeviceFor`'s `new WebGPUDevice(...)`
+   in `src/luma/dataframe.ts` and the second-device creation in `src/deck/webgpu-pane.ts`. Until
+   then both are marked `TODO(luma#3313)`. The pin would be `10.0.0-alpha.3` or later, or a 9.4.x
+   with a backport.
+3. **When #3391 is in a release,** re-run `npm run perf:gpu`, update §13 and the `AGENTS.md` trap.
+4. **When D2 is answered,** write the deck side of #10781 against the selection type chosen.
+
+**Open questions, none of them ours to answer.** What ibgreen decides on D1 and D2. Whether
+luma's GPU compute modules stay in luma (slide 24 of the 2026-10-08 OpenVis deck asks whether
+they should move out of vis.gl). How the WGSL committee reads the polyfill data point.
 
 ## Recommended order of work for noodles
 

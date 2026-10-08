@@ -125,6 +125,7 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 - **luma's group-by `sum`/`mean` collapses on few groups.** Float sums use a global CAS loop
   (no float atomics in WebGPU), so cost tracks rows per group: 4M rows on 16 bins is 366 ms
   against 2.9 ms for `count` alone (FINDINGS §13). Means also differ bitwise run to run.
+  luma.gl#3391 (open) fixes both with a two-pass reduction; until a release has it, this holds.
 - **luma only uses subgroups if the device requested them.** It checks `device.features`, and
   a feature not in `requiredFeatures` is absent. `initGpu` asks for `subgroups`; a test that
   builds its own device must too, or it measures luma's slow path (366 vs 55 ms above).
