@@ -45,13 +45,15 @@ The target tells the planner what deck can do. Plan with the target that matches
 ```ts
 import { plan, targetCaps } from '@noodles.gl/planner';
 
-plan(graph, schema, { caps: targetCaps('deck-webgl2') });   // no compute: no GPU stage
-plan(graph, schema, { caps: targetCaps('deck-webgpu') });   // compute, 8 storage buffers
+plan(graph, schema, { caps: targetCaps('deck-webgl2', device) });   // no compute: no GPU stage
+plan(graph, schema, { caps: targetCaps('deck-webgpu', device) });   // compute, device's storage buffers
 ```
 
 On `deck-webgl2` the GPU stage disappears, and anything with no SQL form (such as `ramp()`)
-is placed on the CPU. On `deck-webgpu` the optimizer fits the fused kernel into 8 storage
-bindings, because that is the limit on luma's device (see bug 3 below).
+is placed on the CPU. On `deck-webgpu` the optimizer fits the fused kernel into the device's
+`maxStorageBuffersPerShaderStage` (8, the spec default, when no device is given). The pane
+creates luma's device with `featureLevel: 'max'`, so it has the adapter's limit, not the default
+(see bug 3 below).
 
 ## deck.gl with WebGL2
 
@@ -116,9 +118,10 @@ details:
 1. `ScatterplotLayer` expects fp64-encoded positions (a 24-byte stride). WGSL has no f64, and
    `type: 'float32'` on the binary attribute does not override the layer.
 2. A 3-component color becomes `unorm8x3`, which is not a valid WebGPU vertex format.
-3. luma's WebGPU device cannot take `requiredLimits`, and `luma.attachDevice()` is not
-   implemented. So deck cannot share an app-owned device, and runs at WebGPU's default
-   limits.
+3. `luma.attachDevice()` is not implemented in luma 9.4, so deck cannot share an app-owned
+   device. The limits half is solved: `featureLevel: 'max'` makes luma's own device request
+   every adapter limit. `attach()` and a `requiredLimits` prop landed in luma 10
+   (FINDINGS §14).
 
 ## What deck keeps doing
 
@@ -132,10 +135,10 @@ attributes, not to own the render path.
 Do next, roughly in order of payoff:
 
 1. **Upstream the three deck/luma fixes.** Accept float32 positions on a `BinaryAttribute`.
-   Emit `unorm8x4` for colors. Expose `requiredLimits` or implement `attach()` on the WebGPU
-   adapter. These are what stand between the working compute path and pixels. As of 2026-10-08
-   `requiredLimits` and `attach()` are merged (luma v10.0.0-alpha.3 only); the float32-position
-   and `unorm8x4` fixes are open as deck.gl#10776 and #10753. See FINDINGS §14.
+   Emit `unorm8x4` for colors. Adopt luma 10's `attach()` on the WebGPU adapter (merged, not in
+   any 9.4 release). These are what stand between the working compute path and pixels. As of
+   2026-10-08 the float32-position and `unorm8x4` fixes are open as deck.gl#10776 and #10753.
+   See FINDINGS §14.
 2. **Emit geographic positions from the planner.** Add a `project` mode that outputs lng/lat,
    or deck's common space, so the map path binds positions directly instead of inverting
    mercator on the CPU.

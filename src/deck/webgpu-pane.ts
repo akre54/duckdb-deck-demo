@@ -67,22 +67,18 @@ export class DeckWebgpuPane {
   /**
    * Create luma's WebGPU device and a Deck that shares it. Idempotent.
    *
-   * Two things had to be worked around here, both worth recording:
+   * `featureLevel: 'max'` is what makes this device's limits match our own. luma 9.4's
+   * WebGPU adapter turns it into `requiredFeatures` = every adapter feature (so `subgroups`
+   * too, which luma's compute checks for) and `requiredLimits` = every adapter limit.
+   * Without it the device ran at WebGPU's defaults — 8 storage buffers per compute stage
+   * where the adapter offers 10 — and `targetCaps('deck-webgpu')` had to pin 8.
    *
-   *   - `luma.attachDevice(existingGPUDevice, …)` throws "WebGPUAdapter.attach() not
-   *     implemented" in luma 9.4, so deck cannot be pointed at a device the application
-   *     already owns. It has to create its own.
-   *   - luma 9.4's `DeviceProps` has no `requiredLimits`, so that device runs at WebGPU's
-   *     defaults — notably 8 storage buffers per compute stage, where our own device asked
-   *     the adapter for 10.
+   * It is still luma's own device, not ours: `WebGPUAdapter.attach()` throws "not
+   * implemented" in every 9.4 release (it landed in luma 10, FINDINGS §14). Both devices ask
+   * for a high-performance adapter, so the planner reads the limit off ours.
    *
-   * TODO(luma#3312, #3313): both are merged and in luma v10.0.0-alpha.3, but not in 9.4. On a
-   * release that has them, pass `requiredLimits` and `attach()` our own device here and set
-   * `targetCaps('deck-webgpu')` from the real limit instead of 8.
-   *
-   * The consequence is a genuine capability difference between targets rather than a bug to
-   * hide, which is why `targetCaps('deck-webgpu')` reports 8. The optimizer then has to find
-   * a plan whose fused kernel fits in 8 bindings — a constraint doing real work.
+   * TODO(luma#3313): `attach()` is merged and in luma v10.0.0-alpha.3. On a release that has it,
+   * attach our own `GPUDevice` here instead of creating a second one.
    */
   async init(): Promise<void> {
     if (this.device) return;
@@ -90,6 +86,7 @@ export class DeckWebgpuPane {
       this.device = await luma.createDevice({
         type: 'webgpu',
         adapters: [webgpuAdapter],
+        featureLevel: 'max',
         createCanvasContext: { canvas: this.canvas },
       });
       // The underlying GPUDevice, so validation can be checked with an error scope rather

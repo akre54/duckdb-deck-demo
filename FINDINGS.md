@@ -132,6 +132,8 @@ So the compute and handoff half of the answer is confirmed on shipping versions.
 
 Point 3 turned into a useful demonstration rather than a blocker: the optimizer treats the binding limit as a hard constraint, and on that target it *moves the filter node out of the kernel* so the fused kernel fits in exactly 8 bindings. The constraint does real work.
 
+*Update (2026-10-04):* the limits half of point 3 is fixed on 9.4. `featureLevel: 'max'` makes luma request every adapter limit (§12a), the pane now passes it, and `targetCaps('deck-webgpu')` reads the device's limit, so the filter stays in the kernel on a 10-buffer adapter. `attach()` is still missing in 9.4 (§14).
+
 **Revised recommendation.** The seam is real and the compute path works today, but the last inch — deck drawing a kernel-written buffer — needs three small fixes in deck/luma, not an architectural change. Those are the concrete asks: accept `float32` positions on a `BinaryAttribute`, emit `unorm8x4` instead of `unorm8x3`, and expose `requiredLimits` (or implement `attach()`) on the WebGPU adapter.
 
 *Update, 2026-10-08:* `requiredLimits` ([luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312))
