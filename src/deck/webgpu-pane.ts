@@ -76,6 +76,10 @@ export class DeckWebgpuPane {
    *     defaults — notably 8 storage buffers per compute stage, where our own device asked
    *     the adapter for 10.
    *
+   * TODO(luma#3312, #3313): both are merged and in luma v10.0.0-alpha.3, but not in 9.4. On a
+   * release that has them, pass `requiredLimits` and `attach()` our own device here and set
+   * `targetCaps('deck-webgpu')` from the real limit instead of 8.
+   *
    * The consequence is a genuine capability difference between targets rather than a bug to
    * hide, which is why `targetCaps('deck-webgpu')` reports 8. The optimizer then has to find
    * a plan whose fused kernel fits in 8 bindings — a constraint doing real work.
