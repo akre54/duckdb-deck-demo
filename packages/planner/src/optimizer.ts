@@ -246,26 +246,19 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
 
   // --- SQL stage ----------------------------------------------------------
   const sqlOps = sum(analysis.order.slice(0, assignment.sqlEnd).map((node) => node.ops));
-  // Columns scanned: source columns any surviving node reads.
-  const downstreamReads = new Set<string>();
-  for (let i = assignment.sqlEnd; i < n; i++) {
-    for (const r of analysis.order[i].reads) downstreamReads.add(r);
-  }
-  for (const s of analysis.statsNodes) downstreamReads.add(s.column);
-  for (let i = 0; i < assignment.sqlEnd; i++) {
-    for (const r of analysis.order[i].reads) downstreamReads.add(r);
-  }
-  const scannedColumns = Math.max(1, [...downstreamReads].filter((c) => analysis.sourceSchema.has(c)).length);
+  // Columns scanned: source columns any node reads, in SQL or after it. This is DuckDB's
+  // read, not the upload; what crosses to the GPU is `plannedBuffers`.
+  const scanned = new Set<string>();
+  for (const node of analysis.order) for (const r of node.reads) scanned.add(r);
+  for (const s of analysis.statsNodes) scanned.add(s.column);
+  const scannedColumns = Math.max(1, [...scanned].filter((c) => analysis.sourceSchema.has(c)).length);
   acc.addBuild('duckdb scan', sqlScanMs(costs, sourceRows, scannedColumns, sqlOps));
 
   // --- attributes crossing into the GPU -----------------------------------
-  // Passthrough source columns the later stages read.
-  const passthrough = [...downstreamReads].filter((c) => analysis.sourceSchema.has(c));
+  const planned = plannedBuffers(analysis, assignment, rowBytesOf);
   const chunks = estimateChunks(sqlRows);
-  for (const col of passthrough) {
-    const bytes = sqlRows * 4;
-    acc.addBuild('upload arrow columns', uploadMs(costs, bytes, chunks));
-    acc.addGpuBytes(bytes);
+  for (const col of planned.passthrough) {
+    acc.addBuild('upload arrow columns', uploadMs(costs, sqlRows * 4, chunks));
     const colStats = stats?.columns.get(col);
     // f64 or nullable columns cannot be handed to the GPU as-is.
     if (!colStats || colStats.isF64 || colStats.nullFrac > 0) {
@@ -274,12 +267,8 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
   }
 
   // Attributes produced by the SQL stage: uploaded, and interleaved if they are vectors.
-  for (let i = 0; i < assignment.sqlEnd; i++) {
-    const node = analysis.order[i];
-    if (node.kind !== 'attribute') continue;
-    const bytes = sqlRows * rowBytesOf(node, 'sql');
-    acc.addBuild('upload arrow columns', uploadMs(costs, bytes, chunks * node.width));
-    acc.addGpuBytes(bytes);
+  for (const node of planned.sqlUploads) {
+    acc.addBuild('upload arrow columns', uploadMs(costs, sqlRows * rowBytesOf(node, 'sql'), chunks * node.width));
     if (node.width > 1) {
       // SQL columns are scalars, so a vec3 arrives as three columns and must be packed.
       acc.addBuild('interleave sql vectors', interleaveMs(costs, sqlRows * node.width));
@@ -292,9 +281,7 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
   for (let i = assignment.sqlEnd; i < assignment.cpuEnd; i++) {
     const node = analysis.order[i];
     if (node.kind !== 'attribute') continue;
-    const bytes = sqlRows * rowBytesOf(node, 'cpu');
-    acc.addBuild('upload cpu results', uploadMs(costs, bytes, 1));
-    acc.addGpuBytes(bytes);
+    acc.addBuild('upload cpu results', uploadMs(costs, sqlRows * rowBytesOf(node, 'cpu'), 1));
   }
 
   // --- GPU stage ----------------------------------------------------------
@@ -319,11 +306,7 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
     // The engine's selection mask and compacted ids, one u32 each per row.
     acc.addGpuBytes(sqlRows * 8);
   }
-  for (let i = assignment.cpuEnd; i < n; i++) {
-    const node = analysis.order[i];
-    if (node.kind !== 'attribute') continue;
-    acc.addGpuBytes(sqlRows * rowBytesOf(node, 'gpu'));
-  }
+  acc.addGpuBytes(sqlRows * sum([...planned.buffers.values()]));
 
   // --- memory constraint --------------------------------------------------
   const gpuBytes = acc.result().gpuBytes;
@@ -355,7 +338,7 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
 
   // --- amortised interaction ----------------------------------------------
   // Suffix costs: what re-running from a given stage would cost.
-  const castElements = passthrough.length * sqlRows;
+  const castElements = planned.passthrough.length * sqlRows;
   const totalBytes = gpuBytes;
   // Anything upstream of a compaction invalidates it. A requery also changes the row count,
   // which the engine's outputs are sized to, so it recompiles.
@@ -573,6 +556,85 @@ function countStorageBindings(
   for (const w of written) read.delete(w);
   const total = read.size + written.size + (ramp ? 1 : 0);
   return { reads: read.size, writes: written.size, ramp, total };
+}
+
+/**
+ * The attribute buffers emit will allocate for an assignment, name -> bytes per row, and the
+ * uploads behind them.
+ *
+ * This mirrors emit rather than approximating it, because the memory constraint is a hard
+ * limit and the upload terms are what the optimizer trades SQL against the GPU on. It used to
+ * charge every source column any node read, including ones read only inside SQL, which emit's
+ * projection pushdown never selects: a sql-first scatter was priced at 52 bytes a row against
+ * the 40 it allocates, so pushing work into SQL looked dearer than it was. It also charged
+ * wrangle locals that stay in kernel registers, and missed the discard mask. A test in
+ * `packing.test.ts` holds this to emit's allocation across graphs, policies and targets.
+ */
+function plannedBuffers(
+  analysis: Analysis,
+  assignment: Assignment,
+  rowBytesOf: (node: AnalyzedNode, stage: Stage) => number,
+): { buffers: Map<string, number>; passthrough: string[]; sqlUploads: AnalyzedNode[] } {
+  const { order, sourceSchema, strings } = analysis;
+  const n = order.length;
+  const buffers = new Map<string, number>();
+  // The first producer of a name allocates its buffer; a later stage writes it in place.
+  const add = (name: string, bytes: number) => { if (!buffers.has(name)) buffers.set(name, bytes); };
+  const mask = analysis.conventions.mask;
+
+  // --- SQL: what the row query selects ---------------------------------------
+  const aggregateIndex = order.findIndex((node) => node.kind === 'aggregate');
+  const aggregateInSql = aggregateIndex >= 0 && aggregateIndex < assignment.sqlEnd;
+  let passthrough: string[] = [];
+  const sqlUploads: AnalyzedNode[] = [];
+  if (aggregateInSql) {
+    // GROUP BY keys and aggregates replace the passthrough columns, and attributes before
+    // the aggregate live only in the inner query.
+    const agg = order[aggregateIndex];
+    for (const g of agg.groupBy ?? []) add(g, 4);
+    for (const a of agg.aggs ?? []) add(a.name, 4);
+    for (let i = aggregateIndex + 1; i < assignment.sqlEnd; i++) {
+      if (order[i].kind === 'attribute') sqlUploads.push(order[i]);
+    }
+  } else {
+    // Projection pushdown: source columns read after SQL, stats columns, and anything bound
+    // outside the graph. Strings are selected too but never reach a GPU buffer.
+    const needed = new Set<string>();
+    for (let i = assignment.sqlEnd; i < n; i++) for (const r of order[i].reads) needed.add(r);
+    for (const s of analysis.statsNodes) needed.add(s.column);
+    for (const name of externalAttributes(analysis)) needed.add(name);
+    passthrough = [...needed].filter((c) => sourceSchema.has(c) && !strings.has(c)).sort();
+    for (const c of passthrough) add(c, 4);
+    for (let i = 0; i < assignment.sqlEnd; i++) if (order[i].kind === 'attribute') sqlUploads.push(order[i]);
+  }
+  for (const node of sqlUploads) add(node.name!, rowBytesOf(node, 'sql'));
+  for (let i = 0; i < assignment.sqlEnd; i++) {
+    // A raw SQL node selects one scalar column per declared write.
+    for (const w of rawWritesOf(order[i])) add(w, 4);
+  }
+
+  // --- CPU: every result is uploaded, and a filter becomes the mask ---------
+  for (let i = assignment.sqlEnd; i < assignment.cpuEnd; i++) {
+    const node = order[i];
+    if (node.kind === 'attribute') add(node.name!, rowBytesOf(node, 'cpu'));
+    if (node.kind === 'filter') add(mask, 4);
+  }
+
+  // --- GPU: buffers only for what something outside the kernel reads ---------
+  // The same rule `buildKernel` and `countStorageBindings` apply; a name an earlier stage
+  // already gave a buffer keeps it, because the kernel writes that buffer in place.
+  const external = externalAttributes(analysis);
+  for (let i = assignment.cpuEnd; i < n; i++) {
+    const node = order[i];
+    const kept = (name: string) => external.has(name) || buffers.has(name);
+    if (node.kind === 'attribute' && kept(node.name!)) add(node.name!, rowBytesOf(node, 'gpu'));
+    if (node.kind === 'filter' && !assignment.compact) add(mask, 4);
+    const raw = node.node as { type?: string; writes?: { name: string; width: number }[] };
+    if (node.kind === 'raw' && raw.type === 'raw') {
+      for (const w of raw.writes ?? []) if (kept(w.name)) add(w.name, rowBytesOf({ ...node, name: w.name, width: w.width }, 'gpu'));
+    }
+  }
+  return { buffers, passthrough, sqlUploads };
 }
 
 /** Declared writes of a raw node, or none for any other kind. */

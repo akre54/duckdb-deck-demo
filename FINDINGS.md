@@ -207,6 +207,18 @@ Targets are described by capability, not product name (`core/target.ts`): `compu
 
 GPU memory works the same way: over-budget candidates are rejected, and if none survive the error lists every candidate with its shortfall rather than saying "no plan".
 
+### The byte estimate now matches the allocation (2026-10-14)
+
+The optimizer's GPU-byte term, which gates the memory budget and feeds the upload costs, did
+not match what emit allocates. It charged every source column any node read, including ones
+read only inside SQL, which projection pushdown never selects. It charged wrangle locals that
+stay in kernel registers, and it never charged the discard mask. A sql-first scatter was
+priced at 52 bytes a row against the 40 it allocates, so pushing work into SQL looked dearer
+than it was. `plannedBuffers` now lists the buffers by emit's own rules, and
+`packing.test.ts` holds the estimate to the allocation exactly across five graphs, four
+policies and three targets. No existing test's plan choice changed; the bias was there, but
+on these graphs it was not large enough to flip a decision.
+
 ## 7. A wrangle node makes the pipeline programmable, and needs no planner support
 
 `scale`, `colorscale` and `project` were already sugar over the expression IR. The `wrangle` node is the general case — a VEX-style multi-statement body, which is PR #491's stated Phase 2 `AttributeWrangleOp`:

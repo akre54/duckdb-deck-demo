@@ -4,6 +4,7 @@ import { analyze } from './analyze.js';
 import { optimize, sameAssignment } from './optimizer.js';
 import { packedColorName, positionFormat, rowBytes, unpackRgba8 } from './packing.js';
 import { DEFAULT_COSTS } from './cost.js';
+import { scatterGraph, wrangleGraph, heatmapGraph, SCHEMA, STATS } from './fixtures.js';
 import { targetCaps } from './target.js';
 import type { Graph } from './types.js';
 
@@ -144,10 +145,66 @@ describe('hilo positions', () => {
     const rows = 1000;
     const bytes = emitted.attributes.reduce((sum, a) => sum + rows * rowBytes(a), 0);
     expect(emitted.attributes.find((a) => a.name === 'P')!.format).toBe('hilo');
-    // The optimizer also counts source columns read only inside SQL (lng, lat here) as
-    // uploaded, which emit's projection pushdown does not select. A known overestimate,
-    // older than the formats; everything else must match byte for byte.
-    const sqlOnlyReads = rows * 4 * 2;
-    expect(chosen.cost!.gpuBytes).toBe(bytes + sqlOnlyReads);
+    expect(chosen.cost!.gpuBytes).toBe(bytes);
+  });
+});
+
+describe('the optimizer prices exactly the buffers emit allocates', () => {
+  // Two implementations of one rule. The estimate gates the memory budget and weighs SQL
+  // against the GPU; it used to charge source columns read only inside SQL (52 bytes a row
+  // against 40 for a sql-first scatter), kernel-register locals, and miss the discard mask.
+  const aggregate: Graph = {
+    params: {},
+    nodes: [
+      { ...source, dataset: { ref: 'test', estimatedRows: 1_000_000 } },
+      { id: 'cell', type: 'attribute', input: 'src', name: 'cell', expr: 'floor(lng / 10.0)' },
+      { id: 'agg', type: 'aggregate', input: 'cell', groupBy: ['cell'], aggs: [{ name: 'n', expr: 'count()' }, { name: 'meanEl', expr: 'avg(elevation)' }] },
+      { id: 'p', type: 'attribute', input: 'agg', name: 'P', expr: '[cell, n, 0.0]' },
+      { id: 'c', type: 'colorscale', input: 'p', expr: 'meanEl', ramp: 'viridis', domain: ['0', '900'] },
+      { id: 'out', type: 'render', input: 'c', mode: 'points' },
+    ],
+  };
+  const raw: Graph = {
+    params: {},
+    nodes: [
+      { ...source, dataset: { ref: 'test', estimatedRows: 1_000_000 } },
+      { id: 'p', type: 'attribute', input: 'src', name: 'P', expr: '[lng, lat, 0.0]' },
+      {
+        id: 'r', type: 'raw', input: 'p', engine: 'gpu', reads: ['elevation'],
+        writes: [{ name: 'Cd', width: 3 }, { name: 'tmp', width: 1 }],
+        code: 'tmp = elevation / 900.0; Cd = vec3<f32>(tmp, 0.5, 0.25);',
+      },
+      { id: 'out', type: 'render', input: 'r', mode: 'points' },
+    ],
+  };
+  const graphs = { scatter: scatterGraph(), wrangle: wrangleGraph(), heatmap: heatmapGraph(), aggregate, raw };
+  const policies = ['cost', 'auto', 'sql-first', 'gpu-first'] as const;
+  const targets = ['webgpu-native', 'deck-webgpu', 'deck-webgl2'] as const;
+  let checked = 0;
+
+  for (const [name, graph] of Object.entries(graphs)) {
+    for (const id of targets) {
+      it(`${name} on ${id}`, () => {
+        for (const policy of policies) {
+          let p;
+          try {
+            p = plan(graph, SCHEMA, { policy, stats: STATS, caps: targetCaps(id, undefined) });
+          } catch {
+            continue; // a fixed policy can be illegal on a target; that is tested elsewhere
+          }
+          const rows = p.explain.estimatedRows;
+          const chosen = p.explain.candidates.find((c) => sameAssignment(c.assignment, p.explain.chosen))!;
+          const emitted = p.attributes
+            .filter((a) => a.type !== 'str')
+            .reduce((sum, a) => sum + rows * rowBytes(a), 0) + (p.compaction ? rows * 8 : 0);
+          expect(chosen.cost!.gpuBytes, `${name} ${policy} ${id}`).toBe(emitted);
+          checked++;
+        }
+      });
+    }
+  }
+
+  it('checked enough plans to mean something', () => {
+    expect(checked).toBeGreaterThanOrEqual(15);
   });
 });
