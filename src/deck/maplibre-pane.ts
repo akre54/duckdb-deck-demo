@@ -15,6 +15,7 @@
 
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { ScatterplotLayer } from '@deck.gl/layers';
+import { DataFilterExtension } from '@deck.gl/extensions';
 
 import { evaluateStage, toUint8Color, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
 import type { DeckMetrics } from './webgl2-pane.js';
@@ -52,7 +53,7 @@ export class DeckMaplibrePane {
   private readonly overlay: MapboxOverlay;
   private readonly coordinates: NonNullable<DeckMaplibreOptions['coordinates']>;
   private metricsValue: DeckMetrics = {
-    rows: 0, materializeMs: 0, evalMs: 0, packMs: 0, bytes: 0, frameMs: 0, code: '',
+    rows: 0, materializeMs: 0, evalMs: 0, packMs: 0, bytes: 0, frameMs: 0, code: '', allocations: 0,
   };
   private lastStamp = 0;
 
@@ -89,6 +90,7 @@ export class DeckMaplibrePane {
       this.metricsValue = {
         ...this.metricsValue, rows, materializeMs: 0, evalMs: 0, packMs: 0, bytes: 0,
         code: plan.render.mode !== 'points' ? '(heatmap mode has no map layer here)' : '',
+        allocations: this.metricsValue.allocations,
       };
       return;
     }
@@ -103,21 +105,25 @@ export class DeckMaplibrePane {
     const sizeSrc = attrs.values.get(plan.channels.size);
 
     const tPack = performance.now();
-    // A filter the planner left on the GPU is a discard mask, not a WHERE clause. deck has
-    // no per-instance discard, so masked rows are dropped here — otherwise the map would
-    // show rows the graph filtered out.
+    // A filter the planner left on the GPU is a discard mask, not a WHERE clause.
+    // With DataFilterExtension, the mask is bound as a filter value and filtering happens on GPU.
     const mask = plan.maskAttribute ? attrs.values.get(plan.maskAttribute) : undefined;
-    const keep = mask ? keptRows(mask.data, mask.width, rows) : undefined;
-    const n = keep ? keep.length : rows;
+    const n = rows;  // No CPU compaction - keep full row count
 
     const positions = this.coordinates === 'normalized-mercator'
-      ? inverseMercator(pos.data, pos.width, rows, keep)
-      : pick(widen(pos.data, pos.width, rows), 3, keep);
+      ? inverseMercator(pos.data, pos.width, rows)
+      : widen(pos.data, pos.width, rows);
     const colors = colorSrc
-      ? pick(toUint8Color(colorSrc.data, colorSrc.width, rows), 4, keep)
+      ? toUint8Color(colorSrc.data, colorSrc.width, rows)
       : undefined;
-    const sizes = sizeSrc ? pick(sizeSrc.data, 1, keep) : undefined;
+    const sizes = sizeSrc ? sizeSrc.data : undefined;
     const packMs = performance.now() - tPack;
+
+    // Track allocations: count buffers created by helper functions (no pick() anymore).
+    let allocs = 0;
+    if (this.coordinates === 'normalized-mercator') allocs++;  // inverseMercator() allocates
+    else if (pos.width !== 3) allocs++;  // widen() allocates
+    if (colors) allocs++;  // toUint8Color() allocates
 
     const layer = new ScatterplotLayer({
       id: 'maplibre',
@@ -127,6 +133,7 @@ export class DeckMaplibrePane {
           getPosition: { value: positions, size: 3 },
           ...(colors ? { getFillColor: { value: colors, size: 4 } } : {}),
           ...(sizes ? { getRadius: { value: sizes, size: 1 } } : {}),
+          ...(mask ? { getFilterValue: { value: mask.data, size: mask.width } } : {}),
         },
       },
       coordinateSystem: 'lnglat',
@@ -141,6 +148,9 @@ export class DeckMaplibrePane {
       // zoom is kilometres, and an offset that large lifts points visibly at street zoom.
       // Without the test, overlapping points draw in row order at every zoom and pitch.
       parameters: { depthCompare: 'always' },
+      // DataFilterExtension: GPU-side mask filtering, stable buffer layout across parameter changes.
+      extensions: mask ? [new DataFilterExtension({ filterSize: mask.width as 1 | 2 | 3 | 4 })] : [],
+      filterRange: mask ? [0.5, Number.MAX_VALUE] : undefined,
     });
     this.overlay.setProps({ layers: [layer] });
 
@@ -152,6 +162,7 @@ export class DeckMaplibrePane {
       bytes: positions.byteLength + (colors?.byteLength ?? 0) + (sizes?.byteLength ?? 0),
       frameMs: this.metricsValue.frameMs,
       code: attrs.code,
+      allocations: this.metricsValue.allocations + allocs,
     };
   }
 
@@ -159,24 +170,6 @@ export class DeckMaplibrePane {
     this.map.removeControl(this.overlay);
     this.overlay.finalize();
   }
-}
-
-/** Row indices whose mask value passes, matching the WebGPU pass's `< 0.5` discard test. */
-function keptRows(mask: Float32Array, width: number, rows: number): Uint32Array {
-  const out = new Uint32Array(rows);
-  let n = 0;
-  for (let i = 0; i < rows; i++) if (mask[i * width] >= 0.5) out[n++] = i;
-  return out.subarray(0, n);
-}
-
-function pick<T extends Float32Array | Uint8Array>(src: T, width: number, keep?: Uint32Array): T {
-  if (!keep) return src;
-  const out = new (src.constructor as new (n: number) => T)(keep.length * width);
-  for (let j = 0; j < keep.length; j++) {
-    const i = keep[j];
-    for (let c = 0; c < width; c++) out[j * width + c] = src[i * width + c];
-  }
-  return out;
 }
 
 function widen(src: Float32Array, width: number, rows: number): Float32Array {
@@ -189,13 +182,11 @@ function widen(src: Float32Array, width: number, rows: number): Float32Array {
 }
 
 /** The inverse of `project`'s normalized Web Mercator (see `desugar` in the planner). */
-function inverseMercator(src: Float32Array, width: number, rows: number, keep?: Uint32Array): Float32Array {
-  const n = keep ? keep.length : rows;
-  const out = new Float32Array(n * 3);
-  for (let j = 0; j < n; j++) {
-    const i = keep ? keep[j] : j;
-    out[j * 3] = src[i * width] * 360;
-    out[j * 3 + 1] = (2 * Math.atan(Math.exp(src[i * width + 1] * 2 * Math.PI)) - Math.PI / 2) * (180 / Math.PI);
+function inverseMercator(src: Float32Array, width: number, rows: number): Float32Array {
+  const out = new Float32Array(rows * 3);
+  for (let i = 0; i < rows; i++) {
+    out[i * 3] = src[i * width] * 360;
+    out[i * 3 + 1] = (2 * Math.atan(Math.exp(src[i * width + 1] * 2 * Math.PI)) - Math.PI / 2) * (180 / Math.PI);
   }
   return out;
 }

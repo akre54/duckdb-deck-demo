@@ -18,6 +18,7 @@
 
 import { Deck, OrbitView } from '@deck.gl/core';
 import { ScatterplotLayer } from '@deck.gl/layers';
+import { DataFilterExtension } from '@deck.gl/extensions';
 
 import { evaluateStage, toUint8Color, type PhysicalPlan, type CpuAttributes, type ColumnUpload } from '@noodles.gl/planner';
 import type { OrbitCamera } from '../webgpu/camera.js';
@@ -35,6 +36,8 @@ export interface DeckMetrics {
   frameMs: number;
   /** The generated JS loop, for the inspector. */
   code: string;
+  /** Count of buffer allocations (for tracking reallocation on parameter changes). */
+  allocations: number;
 }
 
 export class DeckPane {
@@ -43,7 +46,7 @@ export class DeckPane {
   private lastStamp = 0;
   private attrs?: CpuAttributes;
   private metricsValue: DeckMetrics = {
-    rows: 0, materializeMs: 0, evalMs: 0, packMs: 0, bytes: 0, frameMs: 0, code: '',
+    rows: 0, materializeMs: 0, evalMs: 0, packMs: 0, bytes: 0, frameMs: 0, code: '', allocations: 0,
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -108,7 +111,7 @@ export class DeckPane {
   ): void {
     if (rows === 0 || plan.render.mode !== 'points') {
       this.deck.setProps({ layers: [] });
-      this.metricsValue = { rows, materializeMs: 0, evalMs: 0, packMs: 0, bytes: 0, frameMs: this.frameMs, code: plan.render.mode !== 'points' ? '(heatmap mode has no deck.gl equivalent here)' : '' };
+      this.metricsValue = { rows, materializeMs: 0, evalMs: 0, packMs: 0, bytes: 0, frameMs: this.frameMs, code: plan.render.mode !== 'points' ? '(heatmap mode has no deck.gl equivalent here)' : '', allocations: this.metricsValue.allocations };
       return;
     }
 
@@ -133,6 +136,14 @@ export class DeckPane {
     // deck wants vec3 positions; widen if the graph produced 2D.
     const positions = pos.width === 3 ? pos.data : widen(pos.data, pos.width, rows);
 
+    // Extract mask attribute for DataFilterExtension.
+    const mask = plan.maskAttribute ? attrs.values.get(plan.maskAttribute) : undefined;
+
+    // Track allocations: increment when new typed arrays are created.
+    let allocs = 0;
+    if (pos.width !== 3) allocs++;  // widen() allocates
+    if (colors) allocs++;            // toUint8Color() allocates
+
     const layer = new ScatterplotLayer({
       id: 'compare',
       // Binary attributes: deck skips its accessor loop entirely.
@@ -142,6 +153,7 @@ export class DeckPane {
           getPosition: { value: positions, size: 3 },
           ...(colors ? { getFillColor: { value: colors, size: 4 } } : {}),
           ...(sizeSrc ? { getRadius: { value: sizeSrc.data, size: 1 } } : {}),
+          ...(mask ? { getFilterValue: { value: mask.data, size: mask.width } } : {}),
         },
       },
       // The COORDINATE_SYSTEM enum is deprecated; the string is the current spelling.
@@ -152,6 +164,9 @@ export class DeckPane {
       getFillColor: colors ? undefined : [140, 200, 242],
       getRadius: sizeSrc ? undefined : 2,
       pickable: false,
+      // DataFilterExtension: GPU-side mask filtering, stable buffer layout across parameter changes.
+      extensions: mask ? [new DataFilterExtension({ filterSize: mask.width as 1 | 2 | 3 | 4 })] : [],
+      filterRange: mask ? [0.5, Number.MAX_VALUE] : undefined,
     });
 
     this.deck.setProps({ layers: [layer] });
@@ -166,6 +181,7 @@ export class DeckPane {
       bytes,
       frameMs: this.frameMs,
       code: attrs.code,
+      allocations: this.metricsValue.allocations + allocs,
     };
   }
 

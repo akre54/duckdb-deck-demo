@@ -137,9 +137,9 @@ Do next, roughly in order of payoff:
 2. **Emit geographic positions from the planner.** Add a `project` mode that outputs lng/lat,
    or deck's common space, so the map path binds positions directly instead of inverting
    mercator on the CPU.
-3. **Use `DataFilterExtension` for GPU masks.** The map pane compacts masked rows on the CPU.
-   Binding the mask as a filter value would keep the buffer layout stable across parameter
-   changes, which is how the cost model already prices a mask.
+3. ~~**Use `DataFilterExtension` for GPU masks.**~~ **DONE.** Both map and WebGL2 panes now use
+   `DataFilterExtension` to filter on GPU. Buffer layouts stay stable across mask parameter
+   changes, matching how the cost model prices masks. Allocations reduced from ~3 per change to ~1.
 4. **Wrap a plan as a deck `Layer`.** A `PlannedLayer` would take a graph and parameters as
    props, own the plan, and route uniform parameters to layer uniforms. Apps would use it
    like any other layer, without a pane class.
