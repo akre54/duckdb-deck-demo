@@ -33,8 +33,8 @@ and to its built `dist` when the root package compiles — that is why `tsconfig
 ## Commands
 
 ```bash
-npm test           # 714 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
-npm run test:gpu   # 89 browser tests, Chromium, real WebGPU + real DuckDB
+npm test           # 722 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
+npm run test:gpu   # 91 browser tests, Chromium, real WebGPU + real DuckDB
 npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
 npm run dev        # the inspector on :5173, the node editor at /editor/
@@ -139,6 +139,13 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 
 ## Programs and the editor
 
+- **Polygons are vertex rows, like paths.** `pathId` groups them into polygons and `ringId`
+  into rings (first ring the outline, the rest holes); the ORDER BY is `pathId, ringId,
+  orderBy`. `evaluateLayer` computes `starts` and `rings`; the deck adapter triangulates
+  (`src/deck/triangulate.ts`, earcut) and passes `indices` with `_normalize: false`, so deck
+  never re-tessellates. Earcut lives in `src/deck` because the program runtime takes no
+  rendering dependencies.
+
 - The IR is still `Graph`. `plan()` rejects relational nodes; `compileProgram` accepts them
   and calls `plan()` per layer. Do not teach `plan()` about joins.
 - Operators are not IR nodes. Add behaviour as an operator whose `lower()` emits existing IR
@@ -157,7 +164,7 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 
 ## Scope
 
-Deliberately absent: picking, transitions, polygon marks, string functions, costing of
+Deliberately absent: picking, transitions, extruded polygons, string functions, costing of
 relations (a `rematerialize` route is reported, not priced), and more than one aggregate or
 colour ramp per *layer*. Before adding one, check
 [FINDINGS.md](FINDINGS.md) — "What this prototype does not prove" says what the numbers here do

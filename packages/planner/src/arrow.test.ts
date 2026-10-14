@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { Table, tableFromArrays, vectorFromArray, Float32 } from 'apache-arrow';
-import { readColumn, readVectorColumns } from './arrow.js';
+import { readColumn, readVectorColumns, ringStarts } from './arrow.js';
 import { materialize } from './cpu-stage.js';
 
 /**
@@ -145,5 +145,23 @@ describe('readVectorColumns with hiLo', () => {
     expect(Number.isNaN(up.hiLo![6])).toBe(true);
     expect(Number.isNaN(up.hiLo![9])).toBe(true);
     expect(up.hiLo![0]).toBe(1.5);
+  });
+});
+
+describe('ringStarts', () => {
+  it('starts a ring where the polygon or the ring changes', () => {
+    const poly = [1, 1, 1, 1, 1, 1, 2, 2, 2];
+    const ring = [0, 0, 0, 1, 1, 1, 0, 0, 0];
+    expect([...ringStarts(poly, ring)]).toEqual([0, 3, 6]);
+    // Polygon 2 reusing ring id 1 still starts a new run at its first row.
+    expect([...ringStarts([1, 1, 2, 2], [1, 1, 1, 1])]).toEqual([0, 2]);
+  });
+
+  it('without ring ids, rings are polygons', () => {
+    expect([...ringStarts([5, 5, 6], undefined)]).toEqual([0, 2]);
+  });
+
+  it('counts in kept rows, as the mask leaves them', () => {
+    expect([...ringStarts([1, 1, 1, 1], [0, 0, 1, 1], [0, 2, 3])]).toEqual([0, 1]);
   });
 });

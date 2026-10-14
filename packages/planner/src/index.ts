@@ -136,7 +136,7 @@ export {
 
 // --- Arrow -> f32 and the CPU stage ---------------------------------------
 export {
-  readColumn, readVectorColumns, readStrings, readValues, runStarts, type Tier, type ColumnUpload,
+  readColumn, readVectorColumns, readStrings, readValues, runStarts, ringStarts, type Tier, type ColumnUpload,
 } from './arrow.js';
 export {
   evaluateStage, materialize, toUint8Color, type CpuAttributes,

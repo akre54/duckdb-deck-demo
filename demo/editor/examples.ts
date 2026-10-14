@@ -3,6 +3,7 @@ import earthquakes from './examples/earthquakes.json';
 import network from './examples/network.json';
 import trips from './examples/trips.json';
 import arrivals from './examples/arrivals.json';
+import hexes from './examples/hexes.json';
 
 /** The bundled examples, keyed by the `#example=` hash. JSON imports need the cast. */
 export const EXAMPLES: Record<string, { label: string; doc: EditorDoc }> = {
@@ -10,6 +11,7 @@ export const EXAMPLES: Record<string, { label: string; doc: EditorDoc }> = {
   network: { label: 'Airport route network', doc: network as unknown as EditorDoc },
   trips: { label: 'Taxi trips + demand grid', doc: trips as unknown as EditorDoc },
   arrivals: { label: 'Airport arrivals replay', doc: arrivals as unknown as EditorDoc },
+  hexes: { label: 'Hex cells with holes (polygons)', doc: hexes as unknown as EditorDoc },
 };
 
 export const DEFAULT_EXAMPLE = 'network';

@@ -716,8 +716,8 @@ applies, and the optimizer and `emit` both call it.
 The result that matters most: **§5a's two layout blockers are now removed from our side.**
 On the deck-webgpu target, deck 9.4's WebGPU `ScatterplotLayer` draws a kernel-written
 position, color and radius with no WebGPU validation error and no readback (browser test "deck draws
-the kernel's buffers"). That checks for errors across two frames; it does not compare
-pixels. The upstream fixes (deck.gl#10776, #10753) are still the right ones for other
+the kernel's buffers"). The test checks for errors across two frames; the inspector's side
+by side view shows the same points, colored, in both panes. The upstream fixes (deck.gl#10776, #10753) are still the right ones for other
 producers, but this repo no longer waits on them.
 
 Costs and limits:
@@ -729,6 +729,37 @@ Costs and limits:
 - The orbit camera clamps its distance at 0.02, where f32 error is below a pixel. The
   precision matters at deep zoom (a test camera, or a map), not at the demo's own framing.
 - A layer output keeps f32 positions, because its consumers evaluate on the CPU.
+
+### 15d. Polygon layers in Cesium's layout
+
+`BufferPolygonCollection` stores each polygon as an offset and count into one shared vertex
+array, holes as the vertex where each inner ring starts, and a triangle index range the
+caller fills (with earcut). The row model already had the first part for paths, so a polygon
+is one more grouping:
+
+- **Planner.** The `polygon` layer kind is a vertex layer with `ringId` beside `pathId`, both
+  read raw. Rows sort by polygon, then ring, then vertex. The first ring is the outline and
+  the rest are holes.
+- **Program runtime.** `evaluateLayer` returns `starts` (one per polygon) and `rings` (one per
+  ring) from the same run-length pass paths use (`ringStarts`).
+- **Deck adapter.** It triangulates with earcut (`src/deck/triangulate.ts`) and gives
+  `SolidPolygonLayer` binary `startIndices`, `indices` and `_normalize: false`, so deck does
+  no tessellation of its own. Triangulation runs once per evaluated `LayerData` (the pane's
+  identity cache), and its time is reported. An optional outline is a `PathLayer` of closed
+  loops over the same vertex array, cut at ring starts instead of polygon starts.
+- **Tested end to end.** Real DuckDB returns rows out of order and the plan's ORDER BY fixes
+  them. The triangulated area of a 4x4 square with a 2x2 hole plus a triangle is 14. Pixels
+  read back from deck show the ring filled and the hole empty. The editor example
+  (`hexes.json`) draws hexagon cells with holes where a cell's value is high.
+
+Limits:
+
+- Flat only. Extruded side walls would need deck's per-vertex ring breaks (`vertexValid`),
+  which its binary path derives only when it tessellates itself.
+- Earcut runs in lng/lat, where deck would project to mercator first. That is invisible for
+  polygons small next to the earth's curvature.
+- A filter is per row, so one that keeps some of a polygon's vertices leaves a partial
+  polygon. Filter on a per-polygon value, as the example does.
 
 ## Recommended order of work for noodles
 
@@ -759,6 +790,6 @@ Stated plainly, because the numbers above are easy to over-read.
 - **Cardinality estimation assumes uniformity and independence.** The 0.5% accuracy above is a property of uniformly-generated synthetic data, not of the estimator. Skewed or correlated columns are where it will be wrong, and the explain pane exists to show that rather than hide it.
 - The cost model does not model: DuckDB's own parallelism or its choice of scan strategy, GPU occupancy or cache behavior, overdraw (a render term proportional to instances ignores that zoomed-out points overlap), or the possibility that a plan changes what is *visible* rather than only what it costs.
 - Change rates are declared in the graph, not measured from real interaction. A planner that watched actual slider traffic would need no `changeRate` field.
-- Strings are SQL-only (no string functions in the op table yet). No picking, no transitions, no polygon marks. The MapLibre basemap (`src/deck/maplibre-pane.ts`) uses the WebGL2 attribute path only, so it has no GPU stage; the orbit view's geo is still a hand-rolled mercator.
+- Strings are SQL-only (no string functions in the op table yet). No picking, no transitions. Polygons are flat only. The MapLibre basemap (`src/deck/maplibre-pane.ts`) uses the WebGL2 attribute path only, so it has no GPU stage; the orbit view's geo is still a hand-rolled mercator.
 - Heatmap weights are quantized to 1/256 and accumulated as `u32`, because WebGPU has no float atomics. Weights below ~0.004 contribute nothing.
 - Single machine, single GPU, synthetic data. The 5M-row case allocates 206 MB of attribute buffers, which needed an explicit `maxStorageBufferBindingSize` request.

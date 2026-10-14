@@ -292,6 +292,32 @@ export function runStarts(ids: ArrayLike<unknown>, keep?: ArrayLike<number>): Ui
   return Uint32Array.from(starts);
 }
 
+/**
+ * Ring starts for polygon layers: a new run wherever the polygon id or the ring id changes,
+ * over the rows that `keep` retains. Without ring ids every polygon is one ring and this is
+ * `runStarts(pathIds)`.
+ */
+export function ringStarts(
+  pathIds: ArrayLike<unknown>,
+  ringIds: ArrayLike<unknown> | undefined,
+  keep?: ArrayLike<number>,
+): Uint32Array {
+  if (!ringIds) return runStarts(pathIds, keep);
+  const n = keep ? keep.length : pathIds.length;
+  const starts: number[] = [];
+  let prevPath: unknown = Symbol('none');
+  let prevRing: unknown = Symbol('none');
+  for (let j = 0; j < n; j++) {
+    const i = keep ? keep[j] : j;
+    if (pathIds[i] !== prevPath || ringIds[i] !== prevRing) {
+      starts.push(j);
+      prevPath = pathIds[i];
+      prevRing = ringIds[i];
+    }
+  }
+  return Uint32Array.from(starts);
+}
+
 function bitSet(bitmap: Uint8Array, index: number): boolean {
   return (bitmap[index >> 3] & (1 << (index & 7))) !== 0;
 }

@@ -563,10 +563,11 @@ function emit(
   // --- the row query -------------------------------------------------------
   const arrowAttributes: AttributeDecl[] = [];
   const pathId = analysis.layer?.pathId;
+  const ringId = analysis.layer?.ringId;
   /** Name plus its non-f32 type, if it has one. */
   const typed = (name: string): { name: string; type?: 'str' | 'raw' } =>
     analysis.strings.has(name) ? { name, type: 'str' }
-    : name === pathId ? { name, type: 'raw' }
+    : name === pathId || name === ringId ? { name, type: 'raw' }
     : name === analysis.rowIdColumn ? { name, type: 'raw' }
     : { name };
   // One numbering for the whole row query: SELECT list and WHERE clause together.

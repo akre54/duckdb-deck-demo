@@ -57,7 +57,8 @@
     "@luma.gl/core": "^9.4.2",
     "@luma.gl/experimental": "^9.4.2",
     "@luma.gl/gpgpu": "^9.4.2",
-    "@luma.gl/webgpu": "^9.4.2"
+    "@luma.gl/webgpu": "^9.4.2",
+    "@math.gl/polygon": "^4.1.0"
   },
   "peerDependenciesMeta": {
     "@deck.gl/core": {
@@ -86,6 +87,9 @@
     },
     "@luma.gl/webgpu": {
       "optional": true
+    },
+    "@math.gl/polygon": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -101,6 +105,7 @@
     "@luma.gl/shadertools": "^9.4.2",
     "@luma.gl/webgl": "^9.4.2",
     "@luma.gl/webgpu": "^9.4.2",
+    "@math.gl/polygon": "^4.1.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^4.7.0",

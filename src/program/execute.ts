@@ -10,7 +10,7 @@
 
 import {
   type LayerPlan, type SqlEngine, type ColumnUpload,
-  readColumn, readVectorColumns, readStrings, readValues, runStarts, evaluateStage,
+  readColumn, readVectorColumns, readStrings, readValues, runStarts, ringStarts, evaluateStage,
 } from '@noodles.gl/planner';
 
 export interface QueriedLayer {
@@ -30,8 +30,13 @@ export interface LayerData {
   strings: Map<string, string[]>;
   /** Raw uint32/int columns like __rowid, preserved through compaction. */
   raw?: Map<string, unknown[]>;
-  /** Path starts, for vertex layers. */
+  /** Path starts, for vertex layers. For a polygon layer, one per polygon. */
   starts?: Uint32Array;
+  /**
+   * Ring starts, for polygon layers: a row where the polygon or its ring changes. A ring start
+   * that is not also a polygon start begins a hole. The deck adapter triangulates from these.
+   */
+  rings?: Uint32Array;
   evalMs: number;
   /** The generated CPU loop, for the inspector. */
   code: string;
@@ -112,12 +117,15 @@ export function evaluateLayer(
 
   const pathId = plan.layer?.pathId;
   const ids = pathId ? queried.raw.get(pathId) : undefined;
+  const ringId = plan.layer?.ringId;
+  const isPolygon = plan.layer?.kind === 'polygon';
   return {
     rows: keep ? keep.length : queried.rows,
     attributes,
     strings,
     raw,
     starts: ids ? runStarts(ids, keep) : undefined,
+    rings: ids && isPolygon ? ringStarts(ids, ringId ? queried.raw.get(ringId) : undefined, keep) : undefined,
     evalMs: evaluated.evalMs,
     code: evaluated.code,
   };

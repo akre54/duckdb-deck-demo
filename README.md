@@ -26,8 +26,8 @@ suggested next changes and open research.
 ```bash
 npm install
 npm run dev        # the inspector at /, the node editor at /editor/
-npm test           # 680 node tests, including real DuckDB through duckdb-wasm's Node build
-npm run test:gpu   # 66 browser tests, real WebGPU + real DuckDB
+npm test           # 722 node tests, including real DuckDB through duckdb-wasm's Node build
+npm run test:gpu   # 91 browser tests, real WebGPU + real DuckDB
 ```
 
 You need Chrome or Edge 113+, or Safari 26+. [FINDINGS.md](FINDINGS.md) has the measured
@@ -477,11 +477,13 @@ catch an order-of-magnitude regression rather than a 20% one.
 - User functions cannot recurse and are inlined, so they name work rather than saving it.
 - Joins, unions and other relational nodes exist only in programs (`compileProgram`), and
   are SQL-only. Strings are SQL-only too: a string literal or column pins its reader to SQL.
-- No picking, transitions or polygon marks. The program pane draws scatter, arc, path, trips,
-  column and text layers.
+- No picking or transitions. The program pane draws scatter, arc, path, trips, column, text
+  and polygon layers. Polygons are flat (no extrusion), and a filter that keeps only some of
+  a polygon's vertices leaves a partial polygon; filter on a per-polygon value.
 - The optimizer is exact only for plans whose stage boundaries follow topological order.
   For a linear chain that is every legal plan. For a branching DAG it is not.
 - Cardinality estimation assumes uniformity and independence. The sub-1% accuracy on the
   synthetic demo data says more about the data than about the estimator.
-- deck.gl's WebGPU render path currently fails on kernel-written buffers, for three specific
-  reasons. See §5a and the end of [FINDINGS.md](FINDINGS.md).
+- deck.gl's WebGPU render path draws kernel-written buffers only on the `deck-webgpu` target,
+  where the planner writes positions in deck's fp64 hi/lo layout and color as packed RGBA8
+  (FINDINGS §5a and §15).
