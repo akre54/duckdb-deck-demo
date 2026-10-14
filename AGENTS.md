@@ -33,8 +33,8 @@ and to its built `dist` when the root package compiles — that is why `tsconfig
 ## Commands
 
 ```bash
-npm test           # 680 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
-npm run test:gpu   # 66 browser tests, Chromium, real WebGPU + real DuckDB
+npm test           # 714 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
+npm run test:gpu   # 89 browser tests, Chromium, real WebGPU + real DuckDB
 npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
 npm run dev        # the inspector on :5173, the node editor at /editor/
@@ -78,6 +78,11 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
   `materialise`. Prose may use either.
 - Attribute names are Houdini's (`P`, `Cd`, `pscale`, `Alpha`) but only as a *default* — see
   `conventions.ts`. Internal attributes are `__`-prefixed and get no buffer.
+- **Attribute storage formats are decided in `packing.ts` and nowhere else.** A kernel-written
+  color is packed RGBA8 (`rgba8`), and the position channel can be `hilo` (f32 high and low
+  halves, `[hi.xyz, lo.xyz]` a row). The optimizer's byte estimate and `emit` both call
+  `packedColorName` and `positionFormat`, and tests hold them together. A buffer's byte size
+  is `rowBytes(decl)`, never `width * 4`.
 - SQL uses numbered placeholders (`$1`), never positional `?` — op templates like `fit()` repeat
   arguments, and positional binds silently mismatched.
 - Every new module under `packages/planner/src` or `src/webgpu` must be re-exported from its

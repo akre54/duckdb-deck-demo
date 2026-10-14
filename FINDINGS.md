@@ -134,6 +134,10 @@ Point 3 turned into a useful demonstration rather than a blocker: the optimizer 
 
 *Update (2026-10-04):* the limits half of point 3 is fixed on 9.4. `featureLevel: 'max'` makes luma request every adapter limit (§12a), the pane now passes it, and `targetCaps('deck-webgpu')` reads the device's limit, so the filter stays in the kernel on a 10-buffer adapter. `attach()` is still missing in 9.4 (§14).
 
+*Update, 2026-10-14:* points 1 and 2 are solved on our side for the deck-webgpu target: the
+kernel writes color as packed RGBA8 (`unorm8x4`) and position in deck's fp64 hi/lo layout, and
+deck 9.4 draws them (§15c).
+
 **Revised recommendation.** The seam is real and the compute path works today, but the last inch — deck drawing a kernel-written buffer — needs three small fixes in deck/luma, not an architectural change. Those are the concrete asks: accept `float32` positions on a `BinaryAttribute`, emit `unorm8x4` instead of `unorm8x3`, and expose `requiredLimits` (or implement `attach()`) on the WebGPU adapter.
 
 *Update, 2026-10-08:* `requiredLimits` ([luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312))
@@ -687,6 +691,44 @@ fromRow, upload)`.
   they still do not cross the bus. `generation` changes, so bind groups rebuild.
 - A gap or a width change throws. No source streams yet; a provider that appends is the
   missing half.
+
+### 15c. Positions as hi/lo halves, drawn relative to eye
+
+Cesium splits each double position into two floats (`EncodedCartesian3`) and subtracts the
+camera from each half before projecting. The position channel now has that format,
+`hilo`: per row `[hi.xyz, lo.xyz]`, 24 bytes for a vec3. `positionFormat` decides when it
+applies, and the optimizer and `emit` both call it.
+
+- **SQL-computed position: real precision.** It is selected as DOUBLE, not FLOAT, and split
+  during the interleave pass SQL vectors already needed. `ColumnUpload.data` stays the f32
+  view, so CPU consumers read exactly what they did before.
+- **Kernel-written position.** It stays f32 on `webgpu-native`. On `deck-webgpu`
+  (`TargetCaps.fp64Positions`) the kernel writes the `hilo` layout with a zero low half: no
+  precision gained, but it is deck's fp64 attribute layout byte for byte.
+- **Points shader.** It projects relative to the eye. `OrbitCamera.pack` adds a second matrix
+  built from `eye - target` (small numbers only) and the target's own hi/lo halves.
+- **Measured** (`precision.browser.test.ts`, which runs the shader's own `projectRte`): points
+  2e-8 apart near x = 0.31, viewed from 1e-6 away, sit 12.9 px apart. Hi/lo positions land
+  within 0.00002 px of an f64 reference. The same points as f32 are off by up to 9.6 px.
+- **MapLibre pane.** When SQL produced the position, the pane recombines the halves into a
+  Float64Array, so deck's WebGL2 path does its own fp64 split.
+
+The result that matters most: **§5a's two layout blockers are now removed from our side.**
+On the deck-webgpu target, deck 9.4's WebGPU `ScatterplotLayer` draws a kernel-written
+position, color and radius with no WebGPU validation error and no readback (browser test "deck draws
+the kernel's buffers"). That checks for errors across two frames; it does not compare
+pixels. The upstream fixes (deck.gl#10776, #10753) are still the right ones for other
+producers, but this repo no longer waits on them.
+
+Costs and limits:
+
+- `P` from SQL is 24 bytes a row instead of 12. The optimizer prices that, so on a tight
+  budget it pushes position math out of SQL.
+- Kernel arithmetic stays f32. A kernel reading a `hilo` position sums the halves, so
+  precision survives only when SQL computes the position and no later stage rewrites it.
+- The orbit camera clamps its distance at 0.02, where f32 error is below a pixel. The
+  precision matters at deep zoom (a test camera, or a map), not at the demo's own framing.
+- A layer output keeps f32 positions, because its consumers evaluate on the CPU.
 
 ## Recommended order of work for noodles
 

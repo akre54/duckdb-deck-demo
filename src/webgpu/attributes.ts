@@ -8,7 +8,9 @@
  * rather than a re-upload.
  */
 
-import { rowBytes, unpackRgba8, type AttributeFormat, type ColumnUpload } from '@noodles.gl/planner';
+import {
+  rowBytes, unpackRgba8, splitHiLo, joinHiLo, materialize, type AttributeFormat, type ColumnUpload,
+} from '@noodles.gl/planner';
 import { gpuData } from './gpu-compat.js';
 
 export interface GpuAttribute {
@@ -129,9 +131,10 @@ export class AttributeSet {
    * Upload a column. For the 'chunked' tier this issues one writeBuffer per Arrow
    * record batch, letting the GPU copy engine do the concatenation instead of JS.
    */
-  write(name: string, width: number, rows: number, upload: ColumnUpload): GpuAttribute {
-    const attr = this.ensure(name, width, rows, 'arrow');
-    this.upload(attr, 0, rows, upload);
+  write(name: string, width: number, rows: number, upload: ColumnUpload, format?: AttributeFormat): GpuAttribute {
+    if (format === 'rgba8') throw new Error(`Attribute '${name}': rgba8 is written by a kernel, not uploaded`);
+    const attr = this.ensure(name, width, rows, 'arrow', format);
+    this.upload(attr, 0, rows, format === 'hilo' ? hiLoUpload(upload, width, rows) : upload);
     attr.upload = upload;
     return attr;
   }
@@ -183,9 +186,11 @@ export class AttributeSet {
 
   /** writeBuffer `rows` rows of `upload` into `attr` starting at `fromRow`. */
   private upload(attr: GpuAttribute, fromRow: number, rows: number, upload: ColumnUpload): void {
-    const { name, width } = attr;
-    const needed = rows * width;
-    const base = fromRow * width * 4;
+    const { name } = attr;
+    // f32 elements a row: the component count, or twice it for `hilo`.
+    const perRow = rowBytes(attr) / 4;
+    const needed = rows * perRow;
+    const base = fromRow * perRow * 4;
 
     if (upload.chunks) {
       let element = 0;
@@ -216,7 +221,7 @@ export class AttributeSet {
    * Copy an attribute back as f32 components, unpacking a packed format. A diagnostic for
    * tests and the inspector: it waits for the GPU, and nothing on the draw path calls it.
    */
-  async read(name: string): Promise<Float32Array> {
+  async read(name: string): Promise<Float32Array | Float64Array> {
     const attr = this.get(name);
     const bytes = align4(Math.max(4, attr.rows * rowBytes(attr)));
     const staging = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -228,9 +233,10 @@ export class AttributeSet {
     const copy = staging.getMappedRange().slice(0);
     staging.unmap();
     staging.destroy();
-    return attr.format === 'rgba8'
-      ? unpackRgba8(new Uint32Array(copy), attr.width, attr.rows)
-      : new Float32Array(copy, 0, attr.rows * attr.width);
+    if (attr.format === 'rgba8') return unpackRgba8(new Uint32Array(copy), attr.width, attr.rows);
+    // Doubles, so the low half is visible: hi + lo summed in f32 would round it away.
+    if (attr.format === 'hilo') return joinHiLo(new Float32Array(copy), attr.width, attr.rows);
+    return new Float32Array(copy, 0, attr.rows * attr.width);
   }
 
   /** Drop attributes not present in `keep`, freeing their buffers. */
@@ -247,6 +253,15 @@ export class AttributeSet {
     for (const a of this.map.values()) a.buffer.destroy();
     this.map.clear();
   }
+}
+
+/**
+ * An upload in the `hilo` layout. A vector read with `hiLo` already has it; anything else (a
+ * CPU-stage result, a single-precision column) is f32, so its low half is zero.
+ */
+function hiLoUpload(upload: ColumnUpload, width: number, rows: number): ColumnUpload {
+  const data = upload.hiLo ?? splitHiLo(materialize(upload), width, rows);
+  return { ...upload, chunks: undefined, data };
 }
 
 export function align4(n: number): number {

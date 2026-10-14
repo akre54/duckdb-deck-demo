@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { plan, type Schema } from './planner.js';
 import { analyze } from './analyze.js';
-import { optimize } from './optimizer.js';
-import { packedColorName, rowBytes, unpackRgba8 } from './packing.js';
+import { optimize, sameAssignment } from './optimizer.js';
+import { packedColorName, positionFormat, rowBytes, unpackRgba8 } from './packing.js';
 import { DEFAULT_COSTS } from './cost.js';
 import { targetCaps } from './target.js';
 import type { Graph } from './types.js';
@@ -89,5 +89,65 @@ describe('packed RGBA8 color', () => {
     expect(out[0]).toBe(1);
     expect(out[1]).toBeCloseTo(128 / 255, 6);
     expect(out[2]).toBe(0);
+  });
+});
+
+describe('hilo positions', () => {
+  const caps = (id: 'webgpu-native' | 'deck-webgpu') => targetCaps(id, undefined);
+
+  it('a position computed in SQL is selected as DOUBLE and declared hilo', () => {
+    const p = plan(ramp, schema, { policy: 'sql-first' });
+    const P = p.attributes.find((a) => a.name === 'P')!;
+    expect(P).toMatchObject({ provenance: 'arrow', width: 3, format: 'hilo' });
+    expect(rowBytes(P)).toBe(24);
+    expect(p.sql).toContain('AS DOUBLE) AS "P_0"');
+    // Other SQL columns stay FLOAT.
+    expect(p.sql).toMatch(/CAST\("elevation" AS FLOAT\)/);
+  });
+
+  it('a kernel that reads a hilo position adds the halves', () => {
+    // ramp() has no SQL form, so under sql-first P is computed in SQL and the kernel reads it.
+    const g = scatter({ id: 'c', type: 'attribute', input: 'p', name: 'Cd', expr: 'ramp(P.x)' });
+    const p = plan(g, schema, 'sql-first');
+    expect(p.attributes.find((a) => a.name === 'P')!.format).toBe('hilo');
+    expect(p.kernels[0].code).toMatch(/b_P\[i \* 6u \+ 0u\] \+ b_P\[i \* 6u \+ 3u\]/);
+  });
+
+  it('a kernel-written position is f32 natively and hilo, low half zero, for deck', () => {
+    const native = plan(ramp, schema, { policy: 'gpu-first', caps: caps('webgpu-native') });
+    expect(native.attributes.find((a) => a.name === 'P')!.format).toBeUndefined();
+    const deck = plan(ramp, schema, { policy: 'gpu-first', caps: caps('deck-webgpu') });
+    expect(deck.attributes.find((a) => a.name === 'P')).toMatchObject({ provenance: 'derived', format: 'hilo' });
+    expect(deck.kernels[0].code).toMatch(/b_P\[i \* 6u \+ 3u\] = 0\.0;/);
+    expect(deck.kernels[0].code).toMatch(/b_P\[i \* 6u \+ 0u\] = v\d+\[0\];/);
+  });
+
+  it('a layer output keeps f32 positions: its consumers read columns on the CPU', () => {
+    const analysis = analyze({
+      params: {},
+      nodes: [
+        source,
+        { id: 'p', type: 'attribute', input: 'src', name: 'P', expr: '[lng, lat, 0]' },
+        { id: 'out', type: 'layer', input: 'p', kind: 'scatter', channels: { position: 'P' } },
+      ],
+      output: 'out',
+    } as Graph, schema);
+    expect(analysis.layer).toBeDefined();
+    expect(positionFormat(analysis, caps('deck-webgpu'), 'sql')).toBeUndefined();
+  });
+
+  it('the optimizer prices a SQL position at 24 bytes a row, as emit allocates it', () => {
+    const analysis = analyze(ramp, schema);
+    const result = optimize(analysis, { costs: DEFAULT_COSTS, caps: caps('webgpu-native'), params: {}, policy: 'sql-first' });
+    const chosen = result.candidates.find((c) => sameAssignment(c.assignment, result.chosen))!;
+    const emitted = plan(ramp, schema, 'sql-first');
+    const rows = 1000;
+    const bytes = emitted.attributes.reduce((sum, a) => sum + rows * rowBytes(a), 0);
+    expect(emitted.attributes.find((a) => a.name === 'P')!.format).toBe('hilo');
+    // The optimizer also counts source columns read only inside SQL (lng, lat here) as
+    // uploaded, which emit's projection pushdown does not select. A known overestimate,
+    // older than the formats; everything else must match byte for byte.
+    const sqlOnlyReads = rows * 4 * 2;
+    expect(chosen.cost!.gpuBytes).toBe(bytes + sqlOnlyReads);
   });
 });

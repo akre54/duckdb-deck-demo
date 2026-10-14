@@ -13,7 +13,7 @@
  */
 
 import { type Expr, columnsOf, parseExpr, widthOf } from './expr.js';
-import { toSql, toSqlColumns, quoteIdent, castToFloat, SqlParams } from './backends/sql.js';
+import { toSql, toSqlColumns, quoteIdent, castToFloat, castToDouble, SqlParams } from './backends/sql.js';
 import { toWgsl, wgslType, wgslParamMember, type Resolver } from './backends/wgsl.js';
 import {
   type Graph, type RenderNode, type Bin2dNode, type RawNode, type ParamSpec, type RampName,
@@ -30,7 +30,7 @@ import {
 import { type CostConstants, DEFAULT_COSTS, type CostBreakdown } from './cost.js';
 import type { SourceStats } from './stats.js';
 import { type TargetCaps, targetCaps } from './target.js';
-import { packedColorName, type AttributeFormat } from './packing.js';
+import { packedColorName, positionFormat, type AttributeFormat } from './packing.js';
 
 export { PlanError };
 export type { Schema, Stage, Policy, Assignment, Candidate };
@@ -261,6 +261,8 @@ function rawSqlFor(raw: RawStage, name: string, nodeId: string): string {
 function selectItems(
   item: { name: string; width: number; expr?: Expr; raw?: string; str?: boolean },
   bind: SqlParams,
+  /** Select as DOUBLE rather than FLOAT: a `hilo` position keeps the precision (`packing.ts`). */
+  double = false,
 ): string[] {
   // A string cannot reach a GPU buffer, so the f32 narrowing that every numeric item gets
   // would turn it into NULL. It is selected as itself.
@@ -278,7 +280,7 @@ function selectItems(
     }
     return [`${castToFloat(`(${item.raw})`)} AS ${quoteIdent(item.name)}`];
   }
-  return toSqlColumns(item.expr!, item.name, bind).items;
+  return toSqlColumns(item.expr!, item.name, bind, double ? castToDouble : castToFloat).items;
 }
 
 /**
@@ -307,7 +309,7 @@ function emitRaw(
     registerOnly: Set<string>;
     order: AnalyzedNode[];
     next: () => string;
-    packed?: string;
+    formats: Map<string, AttributeFormat>;
   },
 ): void {
   if (typeof raw.code !== 'string') {
@@ -361,21 +363,11 @@ function emitRaw(
       continue;
     }
     if (!ctx.writes.includes(w.name)) ctx.writes.push(w.name);
+    const format = ctx.formats.get(w.name);
     if (!ctx.derivedOut.some((d) => d.name === w.name)) {
-      ctx.derivedOut.push({
-        name: w.name, width: w.width, provenance: 'derived',
-        ...(w.name === ctx.packed ? { format: 'rgba8' as const } : {}),
-      });
+      ctx.derivedOut.push({ name: w.name, width: w.width, provenance: 'derived', ...(format ? { format } : {}) });
     }
-    if (w.name === ctx.packed) {
-      body.push(`  ${bufName(w.name)}[i] = ${packRgba8(local, w.width, node.nodeId)};`);
-    } else if (w.width === 1) {
-      body.push(`  ${bufName(w.name)}[i] = ${local};`);
-    } else {
-      for (const c of range(w.width)) {
-        body.push(`  ${bufName(w.name)}[i * ${w.width}u + ${c}u] = ${local}[${c}];`);
-      }
-    }
+    body.push(...storeAttribute(w.name, local, w.width, format, node.nodeId));
   }
 }
 
@@ -416,6 +408,12 @@ function emit(
   let maskAttribute: string | undefined;
   /** Where a GPU- or CPU-stage filter writes its discard mask, per the conventions. */
   const mask = analysis.conventions.mask;
+
+  /** The position channel's name when the SQL stage produces it as `hilo`. */
+  const sqlPosition = positionFormat(analysis, ctx.caps, 'sql') ? analysis.channels.position : undefined;
+  const isSqlPosition = (item: { name: string; width: number }) => item.name === sqlPosition && item.width >= 2;
+  const sqlFormat = (item: { name: string; width: number }) =>
+    isSqlPosition(item) ? { format: 'hilo' as const } : {};
 
   const aggregateIndex = order.findIndex((node) => node.kind === 'aggregate');
   const aggregateInSql = aggregateIndex >= 0 && aggregateIndex < assignment.sqlEnd;
@@ -610,7 +608,7 @@ function emit(
         .flatMap((item) => componentColumns(item.name, item.width))
         .filter((c) => analysis.sourceSchema.has(c));
       const star = shadowed.length ? `* EXCLUDE (${shadowed.map(quoteIdent).join(', ')})` : '*';
-      const pre = preAggSelect.flatMap((item) => selectItems(item, rowBind));
+      const pre = preAggSelect.flatMap((item) => selectItems(item, rowBind, isSqlPosition(item)));
       from = `(SELECT ${star}, ${pre.join(', ')} FROM ${relation}) AS "pre"`;
     }
     const inner = `SELECT ${[...groupItems, ...aggItems].join(', ')} FROM ${from}${where} GROUP BY ${groupItems.join(', ')}`;
@@ -628,7 +626,7 @@ function emit(
       const outer = [
         ...groupItems,
         ...aggs.map((a) => quoteIdent(a.name)),
-        ...postAggSelect.flatMap((item) => selectItems(item, rowBind)),
+        ...postAggSelect.flatMap((item) => selectItems(item, rowBind, isSqlPosition(item))),
       ];
       sql = `SELECT ${outer.join(', ')} FROM (${inner}) AS "agg"`;
       notes.push('a SQL attribute follows the aggregate, so the query is wrapped in a subquery');
@@ -638,7 +636,7 @@ function emit(
     for (const s of postAggSelect) {
       arrowAttributes.push({
         ...typed(s.name), width: s.width, provenance: 'arrow',
-        sourceColumns: componentColumns(s.name, s.width),
+        sourceColumns: componentColumns(s.name, s.width), ...sqlFormat(s),
       });
     }
   } else {
@@ -659,7 +657,7 @@ function emit(
       ...passthrough.map((c) => (typed(c).type
         ? `${quoteIdent(c)} AS ${quoteIdent(c)}`
         : `${castToFloat(quoteIdent(c))} AS ${quoteIdent(c)}`)),
-      ...preAggSelect.flatMap((item) => selectItems(item, rowBind)),
+      ...preAggSelect.flatMap((item) => selectItems(item, rowBind, isSqlPosition(item))),
     ];
     if (items.length === 0) items.push('1 AS "__unit"');
     sql = `SELECT ${items.join(', ')} FROM ${relation}${emitWhere(whereExprs, rowBind)}`;
@@ -679,7 +677,7 @@ function emit(
     for (const s of preAggSelect) {
       arrowAttributes.push({
         ...typed(s.name), width: s.width, provenance: 'arrow',
-        sourceColumns: componentColumns(s.name, s.width),
+        sourceColumns: componentColumns(s.name, s.width), ...sqlFormat(s),
       });
     }
     notes.push(
@@ -717,7 +715,11 @@ function emit(
     const width = node?.width ?? inferWidth(s.expr!, widthOfName);
     widthOfName.set(s.name, width);
     if (!cpuAttributes.some((a) => a.name === s.name)) {
-      cpuAttributes.push({ name: s.name, width, provenance: 'cpu', internal: node?.internal });
+      // A position the SQL stage already gave a `hilo` buffer keeps that layout.
+      const upstream = arrowAttributes.find((a) => a.name === s.name)?.format;
+      const format = upstream ?? (s.name === analysis.channels.position && width >= 2
+        ? positionFormat(analysis, ctx.caps, 'cpu') : undefined);
+      cpuAttributes.push({ name: s.name, width, provenance: 'cpu', internal: node?.internal, ...(format ? { format } : {}) });
     }
   }
 
@@ -741,7 +743,15 @@ function emit(
     const colorName = packedColorName(analysis);
     const packed = colorName && !arrowAttributes.some((a) => a.name === colorName) && !cpuAttributes.some((a) => a.name === colorName)
       ? colorName : undefined;
-    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, kernelExternal, packed);
+    // Storage formats the kernel must read and write in. An upstream buffer's format wins,
+    // because the kernel reads or overwrites that buffer in place.
+    const formats = new Map<string, AttributeFormat>();
+    for (const a of [...arrowAttributes, ...cpuAttributes]) if (a.format) formats.set(a.name, a.format);
+    if (packed) formats.set(packed, 'rgba8');
+    const position = analysis.channels.position;
+    const gpuPosition = positionFormat(analysis, ctx.caps, 'gpu');
+    if (gpuPosition && !formats.has(position)) formats.set(position, gpuPosition);
+    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, kernelExternal, formats);
     kernels.push(kernel);
     for (const p of kernel.params) uniformParams.add(p);
   }
@@ -873,8 +883,8 @@ function buildKernel(
   order: AnalyzedNode[],
   /** Names something outside the kernel reads. Anything else stays in a register. */
   external: Set<string>,
-  /** The attribute stored as packed RGBA8 rather than f32 components, if any. */
-  packed?: string,
+  /** Attributes stored in a format other than f32 components (`packing.ts`). */
+  formats: Map<string, AttributeFormat> = new Map(),
 ): KernelPlan {
   /** SSA: attribute name -> current WGSL local. Lets a node overwrite what it reads. */
   const live = new Map<string, { code: string; width: number }>();
@@ -897,10 +907,7 @@ function buildKernel(
     }
     reads.add(name);
     const local = `r${ssa++}`;
-    const code = width === 1
-      ? `${bufName(name)}[i]`
-      : `${wgslType(width)}(${range(width).map((c) => `${bufName(name)}[i * ${width}u + ${c}u]`).join(', ')})`;
-    body.push(`  let ${local} = ${code};`);
+    body.push(`  let ${local} = ${loadAttribute(name, width, formats.get(name))};`);
     const val = { code: local, width };
     live.set(name, val);
     return val;
@@ -910,7 +917,7 @@ function buildKernel(
     if (node.raw) {
       emitRaw(node, node.raw, {
         resolve, body, live, widths, params, writes, derivedOut, external, registerOnly, order,
-        next: () => `v${ssa++}`, packed,
+        next: () => `v${ssa++}`, formats,
       });
       continue;
     }
@@ -932,21 +939,14 @@ function buildKernel(
     }
 
     if (!writes.includes(node.name)) writes.push(node.name);
+    const format = formats.get(node.name);
     if (!derivedOut.some((d) => d.name === node.name)) {
       derivedOut.push({
         name: node.name, width: emitted.width, provenance: 'derived', internal: analyzed?.internal,
-        ...(node.name === packed ? { format: 'rgba8' as const } : {}),
+        ...(format ? { format } : {}),
       });
     }
-    if (node.name === packed) {
-      body.push(`  ${bufName(node.name)}[i] = ${packRgba8(local, emitted.width, node.nodeId)};`);
-    } else if (emitted.width === 1) {
-      body.push(`  ${bufName(node.name)}[i] = ${local};`);
-    } else {
-      for (const c of range(emitted.width)) {
-        body.push(`  ${bufName(node.name)}[i * ${emitted.width}u + ${c}u] = ${local}[${c}];`);
-      }
-    }
+    body.push(...storeAttribute(node.name, local, emitted.width, format, node.nodeId));
   }
 
   // A register-only temporary is never bound, even though earlier nodes "read" it — the
@@ -966,12 +966,12 @@ function buildKernel(
   if (usesRamp) {
     bindings.push(`@group(0) @binding(${slot++}) var<storage, read> ramp_lut: array<vec4<f32>>;`);
   }
+  const element = (name: string) => (formats.get(name) === 'rgba8' ? 'u32' : 'f32');
   for (const name of readOnly) {
-    bindings.push(`@group(0) @binding(${slot++}) var<storage, read> ${bufName(name)}: array<f32>;`);
+    bindings.push(`@group(0) @binding(${slot++}) var<storage, read> ${bufName(name)}: array<${element(name)}>;`);
   }
   for (const name of writes) {
-    const element = name === packed ? 'u32' : 'f32';
-    bindings.push(`@group(0) @binding(${slot++}) var<storage, read_write> ${bufName(name)}: array<${element}>;`);
+    bindings.push(`@group(0) @binding(${slot++}) var<storage, read_write> ${bufName(name)}: array<${element(name)}>;`);
   }
 
   const prelude = usesRamp
@@ -1016,17 +1016,47 @@ function emitWhere(exprs: Expr[], bind: SqlParams): string {
   return ` WHERE ${exprs.map((e) => toSql(e, bind).code).join(' AND ')}`;
 }
 
-/**
- * WGSL that packs a 3- or 4-component color local into one u32. `pack4x8unorm` clamps to
- * [0, 1], so an out-of-range color saturates exactly as `toUint8Color` does on the CPU path.
- */
-function packRgba8(local: string, width: number, nodeId: string): string {
-  // `packedColorName` chose this attribute from its final width. An earlier write of another
-  // width would leave the buffer holding two layouts, so refuse rather than mix them.
-  if (width !== 3 && width !== 4) {
-    throw new PlanError(`Node ${nodeId}: color attribute is packed as RGBA8 but this write has width ${width}`);
+/** WGSL that loads one row of an attribute as a value of its logical width. */
+function loadAttribute(name: string, width: number, format: AttributeFormat | undefined): string {
+  const buf = bufName(name);
+  if (format === 'rgba8') return width === 4 ? `unpack4x8unorm(${buf}[i])` : `unpack4x8unorm(${buf}[i]).rgb`;
+  if (format === 'hilo') {
+    // hi + lo in f32 rounds back to hi: kernel arithmetic is f32 either way. The precision
+    // lives in the buffer for the renderer, which subtracts the eye from each half first.
+    const stride = width * 2;
+    return `${wgslType(width)}(${range(width).map((c) => `${buf}[i * ${stride}u + ${c}u] + ${buf}[i * ${stride}u + ${width + c}u]`).join(', ')})`;
   }
-  return width === 4 ? `pack4x8unorm(${local})` : `pack4x8unorm(vec4<f32>(${local}, 1.0))`;
+  if (width === 1) return `${buf}[i]`;
+  return `${wgslType(width)}(${range(width).map((c) => `${buf}[i * ${width}u + ${c}u]`).join(', ')})`;
+}
+
+/** WGSL statements that store a local into one row of an attribute. */
+function storeAttribute(
+  name: string, local: string, width: number, format: AttributeFormat | undefined, nodeId: string,
+): string[] {
+  const buf = bufName(name);
+  if (format === 'rgba8') {
+    // `packedColorName` chose this attribute from its final width. An earlier write of another
+    // width would leave the buffer holding two layouts, so refuse rather than mix them.
+    if (width !== 3 && width !== 4) {
+      throw new PlanError(`Node ${nodeId}: color attribute is packed as RGBA8 but this write has width ${width}`);
+    }
+    // `pack4x8unorm` clamps to [0, 1], so an out-of-range color saturates exactly as
+    // `toUint8Color` does on the CPU path.
+    const packed = width === 4 ? `pack4x8unorm(${local})` : `pack4x8unorm(vec4<f32>(${local}, 1.0))`;
+    return [`  ${buf}[i] = ${packed};`];
+  }
+  if (format === 'hilo') {
+    // A kernel computes in f32, so the low half is zero: the layout without the precision.
+    const stride = width * 2;
+    const at = (c: number) => (width === 1 ? local : `${local}[${c}]`);
+    return range(width).flatMap((c) => [
+      `  ${buf}[i * ${stride}u + ${c}u] = ${at(c)};`,
+      `  ${buf}[i * ${stride}u + ${width + c}u] = 0.0;`,
+    ]);
+  }
+  if (width === 1) return [`  ${buf}[i] = ${local};`];
+  return range(width).map((c) => `  ${buf}[i * ${width}u + ${c}u] = ${local}[${c}];`);
 }
 
 function bufName(attr: string): string {

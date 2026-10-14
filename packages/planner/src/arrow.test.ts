@@ -113,3 +113,37 @@ describe('readVectorColumns', () => {
     expect(readVectorColumns(table, ['a']).tier).toBe('arrow');
   });
 });
+
+describe('readVectorColumns with hiLo', () => {
+  it('keeps a double past f32 precision as hi + lo, and the f32 view unchanged', () => {
+    // 0.1234567890123 needs ~41 bits; f32 holds 24.
+    const x = [0.1234567890123, -179.99999999, 1e-9 + 0.5];
+    const y = [42.000000001, 0, -0.25];
+    const table = tableFromArrays({ P_0: new Float64Array(x), P_1: new Float64Array(y) });
+    const up = readVectorColumns(table, ['P_0', 'P_1'], { hiLo: true });
+    expect(up.tier).toBe('cast');
+    expect(up.hiLo).toHaveLength(3 * 2 * 2);
+    for (let i = 0; i < 3; i++) {
+      const [hx, hy, lx, ly] = up.hiLo!.subarray(i * 4, i * 4 + 4);
+      expect(up.data![i * 2]).toBe(Math.fround(x[i]));
+      expect(hx).toBe(Math.fround(x[i]));
+      expect(Math.abs(hx + lx - x[i])).toBeLessThan(1e-13 * Math.max(1, Math.abs(x[i])));
+      expect(Math.abs(hy + ly - y[i])).toBeLessThan(1e-13 * Math.max(1, Math.abs(y[i])));
+    }
+    // And the f32 view alone really does lose it, or this test proves nothing.
+    expect(Math.abs(up.data![0] - x[0])).toBeGreaterThan(1e-9);
+  });
+
+  it('nulls become NaN in both halves', () => {
+    const table = new Table({
+      a: vectorFromArray([1.5, null, 3.5]),
+      b: vectorFromArray([0.25, 0.5, null]),
+    });
+    const up = readVectorColumns(table, ['a', 'b'], { hiLo: true });
+    expect(up.nullCount).toBe(2);
+    expect(Number.isNaN(up.hiLo![4])).toBe(true);
+    expect(Number.isNaN(up.hiLo![6])).toBe(true);
+    expect(Number.isNaN(up.hiLo![9])).toBe(true);
+    expect(up.hiLo![0]).toBe(1.5);
+  });
+});

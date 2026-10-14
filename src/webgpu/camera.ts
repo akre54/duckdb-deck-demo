@@ -16,8 +16,11 @@ export interface OrbitState {
   far: number;
 }
 
-/** Bytes in the View uniform: mat4 (64) + eye vec4 (16) + viewport vec4 (16). */
-export const VIEW_UNIFORM_SIZE = 96;
+/**
+ * Bytes in the View uniform: mat4 viewProj (64) + eye vec4 (16) + viewport vec4 (16), then
+ * the relative-to-eye half: mat4 viewProjRte (64) + target hi vec4 (16) + target lo vec4 (16).
+ */
+export const VIEW_UNIFORM_SIZE = 192;
 
 export class OrbitCamera {
   state: OrbitState = {
@@ -62,6 +65,21 @@ export class OrbitCamera {
     this.scratch[21] = height;
     this.scratch[22] = 0;
     this.scratch[23] = 0;
+
+    // Relative to eye, as Cesium does it. The shader subtracts the target from each position
+    // before the matrix sees it, so the matrix is built about the origin: `eye - target` is the
+    // orbit offset, a small vector, and no large translation ever reaches an f32 matrix. The
+    // target goes up as hi/lo halves to subtract from a `hilo` position's halves separately.
+    const { target } = this.state;
+    const rel: [number, number, number] = [eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]];
+    this.scratch.set(multiply(proj, lookAt(rel, [0, 0, 0], [0, 1, 0])), 24);
+    for (let c = 0; c < 3; c++) {
+      const hi = Math.fround(target[c]);
+      this.scratch[40 + c] = hi;
+      this.scratch[44 + c] = target[c] - hi;
+    }
+    this.scratch[43] = 0;
+    this.scratch[47] = 0;
     return this.scratch;
   }
 
