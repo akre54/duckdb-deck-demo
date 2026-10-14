@@ -26,7 +26,7 @@ suggested next changes and open research.
 ```bash
 npm install
 npm run dev        # the inspector at /, the node editor at /editor/
-npm test           # 722 node tests, including real DuckDB through duckdb-wasm's Node build
+npm test           # 738 node tests, including real DuckDB through duckdb-wasm's Node build
 npm run test:gpu   # 91 browser tests, real WebGPU + real DuckDB
 ```
 
