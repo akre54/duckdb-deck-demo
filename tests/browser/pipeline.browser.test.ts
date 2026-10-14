@@ -3,7 +3,7 @@ import { initGpu, type Gpu } from '../../src/webgpu/device.js';
 import { Runtime } from '../../src/webgpu/runtime.js';
 import { DeckWebgpuPane } from '../../src/deck/webgpu-pane.js';
 import { readColumn, evaluateStage, relationSource, sqlSource, targetCaps, type Graph } from '@noodles.gl/planner';
-import { duck, readBuffer, readBufferU32, expectNoGpuError } from './harness.js';
+import { duck, readBufferU32, expectNoGpuError } from './harness.js';
 
 /**
  * The pipeline end to end on real engines: DuckDB produces Arrow, the upload path lands it on
@@ -89,11 +89,16 @@ async function settle(from: Runtime = rt): Promise<void> {
   await gpu.device.queue.onSubmittedWorkDone();
 }
 
-/** Read an attribute buffer back as a plain array. */
+/** Read an attribute back as plain f32 components, unpacking a packed color. */
 async function attribute(name: string, from: Runtime = rt): Promise<number[]> {
-  const attr = from.attributes.get(name);
-  return [...(await readBuffer(gpu.device, attr.buffer, attr.rows * attr.width))];
+  return [...(await from.attributes.read(name))];
 }
+
+/**
+ * A kernel-written color is stored as RGBA8 (planner `packing.ts`), so it reads back
+ * quantized: within half a step of the f32 value, plus float noise.
+ */
+const RGBA8 = 1 / 255;
 
 function closeTo(actual: number[], expected: number[], label: string, tolerance = 2e-3): void {
   expect(actual, `${label} length`).toHaveLength(expected.length);
@@ -301,7 +306,7 @@ describe('placement does not change the picture', () => {
     for (const policy of ['auto', 'sql-first'] as const) {
       closeTo(results[policy].P, results['cost'].P, `${policy} vs cost P`);
       closeTo(results[policy].pscale, results['cost'].pscale, `${policy} vs cost pscale`);
-      closeTo(results[policy].Cd, results['cost'].Cd, `${policy} vs cost Cd`);
+      closeTo(results[policy].Cd, results['cost'].Cd, `${policy} vs cost Cd`, RGBA8);
     }
   });
 
@@ -348,6 +353,10 @@ describe('placement does not change the picture', () => {
     await settle(withGpu);
     const gpuP = await attribute('P', withGpu);
     const gpuCd = await attribute('Cd', withGpu);
+    // The kernel's color is one packed u32 a row, a third of three f32 components.
+    const packed = withGpu.attributes.get('Cd');
+    expect(packed.format).toBe('rgba8');
+    expect(packed.buffer.size).toBe(Math.ceil(packed.capacityRows * 4 / 4) * 4);
     withGpu.destroy();
 
     const noCompute = await newRuntime();
@@ -359,7 +368,7 @@ describe('placement does not change the picture', () => {
     // No kernel to dispatch, but a frame keeps the two paths symmetric.
     await settle(noCompute);
     closeTo(await attribute('P', noCompute), gpuP, 'cpu vs gpu P');
-    closeTo(await attribute('Cd', noCompute), gpuCd, 'cpu vs gpu Cd');
+    closeTo(await attribute('Cd', noCompute), gpuCd, 'cpu vs gpu Cd', RGBA8);
     noCompute.destroy();
   });
 });
@@ -534,11 +543,12 @@ describe('custom logic runs on the real engines', () => {
     );
     const elevation = (table.toArray() as { elevation: number }[]).map((r) => Number(r.elevation));
     // Row order is the query's, and the kernel wrote in that order.
+    // Packed RGBA8 saturates at 1, as deck's Uint8 colors do, so red clamps.
     const expected = elevation.flatMap((e) => {
       const t = e / 900;
-      return [t * 3, t, 1 - t];
+      return [Math.min(1, t * 3), t, 1 - t];
     });
-    closeTo(cd.slice(0, expected.length), expected, 'raw wgsl Cd');
+    closeTo(cd.slice(0, expected.length), expected, 'raw wgsl Cd', RGBA8);
   });
 
   it('a raw wgsl node still fuses into one dispatch', async () => {
@@ -763,6 +773,30 @@ describe('source providers', () => {
       .toBeGreaterThanOrEqual(targetCaps('deck-webgpu', gpu.device).gpuBudgetBytes);
     expect(deckDevice.features.has('subgroups')).toBe(gpu.device.features.has('subgroups'));
     canvas.remove();
+  });
+
+  it('deck binds the kernel’s packed RGBA8 color as unorm8x4', async () => {
+    // The 3-component f32 color makes deck 9.4 derive `unorm8x3`, which is not a WebGPU
+    // vertex format, so the pane used to leave Cd unbound. Packed, it is deck's own layout.
+    const local = await newRuntime();
+    // gpu-first so P is a kernel write too: the pane uploads source columns and binds
+    // kernel outputs, and has no route for a CPU-stage attribute.
+    const built = await local.build(scatter(), 'gpu-first');
+    expect(built.plan.attributes.find((a) => a.name === 'Cd')?.format).toBe('rgba8');
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 64;
+    document.body.appendChild(canvas);
+    const pane = new DeckWebgpuPane(canvas);
+    await pane.update(built.plan, local.sourceUploads, local.params(), built.rows);
+    expect(pane.status.compute, pane.status.detail).toBe('ok');
+    expect(pane.status.sharedBuffers).toContain('Cd');
+    // The color no longer blocks the draw. What remains is FINDINGS §5a point 1: deck wants
+    // fp64 positions, a 24-byte stride, and the kernel writes float32x3.
+    expect(pane.status.detail).not.toMatch(/unorm8x3/);
+    expect(pane.status.detail).toMatch(/stride 24/);
+    pane.destroy();
+    canvas.remove();
+    local.destroy();
   });
 });
 

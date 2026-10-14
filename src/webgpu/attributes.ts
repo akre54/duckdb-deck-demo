@@ -8,13 +8,15 @@
  * rather than a re-upload.
  */
 
-import type { ColumnUpload } from '@noodles.gl/planner';
+import { rowBytes, unpackRgba8, type AttributeFormat, type ColumnUpload } from '@noodles.gl/planner';
 import { gpuData } from './gpu-compat.js';
 
 export interface GpuAttribute {
   name: string;
-  /** Components per row: 1 = f32, 3 = vec3<f32>, etc. */
+  /** Components per row: 1 = f32, 3 = vec3<f32>, etc. Logical, whatever the storage format. */
   width: number;
+  /** Absent for f32 components. `rgba8` is one packed u32 per row; see planner `packing.ts`. */
+  format?: AttributeFormat;
   buffer: GPUBuffer;
   /** Rows the buffer can hold; >= the current row count. */
   capacityRows: number;
@@ -75,9 +77,11 @@ export class AttributeSet {
    * Get or allocate an attribute buffer. Reuses the existing buffer when the width
    * matches and capacity is sufficient — the case that keeps parameter tweaks cheap.
    */
-  ensure(name: string, width: number, rows: number, provenance: 'arrow' | 'derived'): GpuAttribute {
+  ensure(
+    name: string, width: number, rows: number, provenance: 'arrow' | 'derived', format?: AttributeFormat,
+  ): GpuAttribute {
     const existing = this.map.get(name);
-    if (existing && existing.width === width && existing.capacityRows >= rows) {
+    if (existing && existing.width === width && existing.format === format && existing.capacityRows >= rows) {
       existing.rows = rows;
       existing.provenance = provenance;
       return existing;
@@ -86,7 +90,7 @@ export class AttributeSet {
 
     // Round up so small row-count changes do not thrash allocations.
     const capacityRows = Math.max(1, Math.ceil(rows * 1.25));
-    const size = align4(capacityRows * width * 4);
+    const size = align4(capacityRows * rowBytes({ width, format }));
     const buffer = this.device.createBuffer({
       label: `attr:${name}`,
       size,
@@ -95,6 +99,7 @@ export class AttributeSet {
     this.counters.allocations++;
     const attr: GpuAttribute = {
       name, width, buffer, capacityRows, rows, provenance,
+      ...(format ? { format } : {}),
       generation: this.nextGeneration++,
     };
     this.map.set(name, attr);
@@ -148,6 +153,27 @@ export class AttributeSet {
     this.counters.bytesUploaded += needed * 4;
     this.counters.convertMs += upload.convertMs;
     return attr;
+  }
+
+  /**
+   * Copy an attribute back as f32 components, unpacking a packed format. A diagnostic for
+   * tests and the inspector: it waits for the GPU, and nothing on the draw path calls it.
+   */
+  async read(name: string): Promise<Float32Array> {
+    const attr = this.get(name);
+    const bytes = align4(Math.max(4, attr.rows * rowBytes(attr)));
+    const staging = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder({ label: `read:${name}` });
+    encoder.copyBufferToBuffer(attr.buffer, 0, staging, 0, bytes);
+    this.device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    // Copy out before unmapping: the mapped range is invalidated by unmap.
+    const copy = staging.getMappedRange().slice(0);
+    staging.unmap();
+    staging.destroy();
+    return attr.format === 'rgba8'
+      ? unpackRgba8(new Uint32Array(copy), attr.width, attr.rows)
+      : new Float32Array(copy, 0, attr.rows * attr.width);
   }
 
   /** Drop attributes not present in `keep`, freeing their buffers. */

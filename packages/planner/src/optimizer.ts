@@ -30,6 +30,7 @@ import {
 import { compactable } from './expr.js';
 import { type SourceStats, estimateSelectivity, DEFAULT_SELECTIVITY } from './stats.js';
 import type { TargetCaps } from './target.js';
+import { packedColorName } from './packing.js';
 
 export type Policy = 'cost' | 'auto' | 'sql-first' | 'gpu-first';
 
@@ -303,10 +304,15 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
     // The engine's selection mask and compacted ids, one u32 each per row.
     acc.addGpuBytes(sqlRows * 8);
   }
+  // The color channel is one packed u32 a row when the kernel is the first to write it — the
+  // same rule emit applies, from the same function.
+  const colorName = packedColorName(analysis);
+  const packed = colorName && !analysis.order.slice(0, assignment.cpuEnd).some((node) => node.name === colorName)
+    ? colorName : undefined;
   for (let i = assignment.cpuEnd; i < n; i++) {
     const node = analysis.order[i];
     if (node.kind !== 'attribute') continue;
-    acc.addGpuBytes(sqlRows * node.width * 4);
+    acc.addGpuBytes(sqlRows * (node.name === packed ? 4 : node.width * 4));
   }
 
   // --- memory constraint --------------------------------------------------

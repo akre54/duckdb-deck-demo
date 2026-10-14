@@ -649,6 +649,31 @@ release; `v10.0.0-alpha.3` (2026-10-04) is the only release carrying any of it.
 luma's GPU compute modules stay in luma (slide 24 of the 2026-10-08 OpenVis deck asks whether
 they should move out of vis.gl). How the WGSL committee reads the polyfill data point.
 
+## 15. Ideas taken from CesiumJS's buffer primitives
+
+CesiumJS 1.140 (2026-04) added experimental `BufferPointCollection`, `BufferPolylineCollection`
+and `BufferPolygonCollection` ([CesiumGS/cesium#13156](https://github.com/CesiumGS/cesium/issues/13156)):
+fixed-capacity typed-array storage, flyweight accessors, offset+count geometry in shared
+arrays, and dirty-range uploads. Most of it matches what this repo already does (named
+attributes separate from renderers, a discard mask before compaction, `generation` counters
+rather than shared clean flags). Four ideas were worth taking. Each part below is measured
+by a test, not argued.
+
+### 15a. Color as packed RGBA8
+
+Cesium stores color as one RGBA8 `u32`. A kernel-written color channel now does the same:
+`emit` declares it `format: 'rgba8'`, the kernel writes `pack4x8unorm`, and the points shader
+unpacks it. One function, `packedColorName`, decides which attribute packs, and both the
+optimizer's byte estimate and `emit` call it; a test holds the two at the same number.
+
+- `Cd` drops from 12 to 4 bytes a row: 60 MB to 20 MB at 5M rows.
+- Only a color the kernel writes packs. One from SQL or the CPU stage stays f32, because
+  packing it would cost the JS pass this exists to avoid.
+- Color now saturates at [0, 1] on the GPU path, as deck's Uint8 colors already did.
+- §5a point 2 no longer applies to this repo's buffers. Four bytes a row is `unorm8x4`, deck's
+  own layout, so the deck WebGPU pane binds the kernel's color. The draw then failed only on
+  point 1, the position stride.
+
 ## Recommended order of work for noodles
 
 Ranked by payoff per unit of risk. The first three are independent of any renderer decision.

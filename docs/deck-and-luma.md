@@ -117,7 +117,9 @@ details:
 
 1. `ScatterplotLayer` expects fp64-encoded positions (a 24-byte stride). WGSL has no f64, and
    `type: 'float32'` on the binary attribute does not override the layer.
-2. A 3-component color becomes `unorm8x3`, which is not a valid WebGPU vertex format.
+2. A 3-component color becomes `unorm8x3`, which is not a valid WebGPU vertex format. A
+   kernel-written color avoids this: it is packed RGBA8, which binds as `unorm8x4`
+   (FINDINGS §15a).
 3. `luma.attachDevice()` is not implemented in luma 9.4, so deck cannot share an app-owned
    device. The limits half is solved: `featureLevel: 'max'` makes luma's own device request
    every adapter limit. `attach()` and a `requiredLimits` prop landed in luma 10

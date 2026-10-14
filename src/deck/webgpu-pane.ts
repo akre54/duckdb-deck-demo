@@ -25,7 +25,7 @@ import { ScatterplotLayer } from '@deck.gl/layers';
 import { luma, Buffer as LumaBuffer, type Device, type ComputePipeline } from '@luma.gl/core';
 import { webgpuAdapter } from '@luma.gl/webgpu';
 
-import { WORKGROUP, materialize, buildRampLut, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
+import { WORKGROUP, materialize, buildRampLut, rowBytes, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
 import type { OrbitCamera } from '../webgpu/camera.js';
 
 export interface DeckWebgpuStatus {
@@ -166,7 +166,7 @@ export class DeckWebgpuPane {
         for (const name of kernel.writes) {
           const decl = plan.attributes.find((a) => a.name === name);
           if (!decl) continue;
-          this.ensureBuffer(device, name, rows * decl.width * 4);
+          this.ensureBuffer(device, name, rows * rowBytes(decl));
         }
 
         // Verify, do not assume. luma reports WebGPU validation failures by logging them,
@@ -198,13 +198,15 @@ export class DeckWebgpuPane {
       if (!position) throw new Error(`no buffer for position attribute '${posName}'`);
       const size = this.buffers.get(sizeName);
 
-      // Colour is deliberately left as a layer constant rather than a bound buffer.
-      // deck.gl 9.4's WebGPU path derives a `unorm8x3` vertex format for a 3-component
-      // fill colour, and `unorm8x3` is not a valid GPUVertexFormat — WebGPU only defines
-      // unorm8x2 and unorm8x4 — so binding a colour buffer makes render pipeline creation
-      // throw. That is a deck bug, not something to paper over, so it is reported instead.
-      this.status.sharedBuffers = [posName, size ? sizeName : ''].filter(Boolean);
-      const colorBufferExists = this.buffers.has(colName);
+      // Colour binds only when the kernel packed it as RGBA8. deck.gl 9.4's WebGPU path
+      // derives a `unorm8x3` vertex format for a 3-component f32 colour, and `unorm8x3` is not
+      // a valid GPUVertexFormat (WebGPU defines unorm8x2 and unorm8x4), so binding that makes
+      // render pipeline creation throw. A packed u32 per row is exactly `unorm8x4`, the
+      // layout deck's own `instanceFillColors` uses, so that one binds as-is.
+      const colDecl = plan.attributes.find((a) => a.name === colName);
+      const color = colDecl?.format === 'rgba8' ? this.buffers.get(colName) : undefined;
+      this.status.sharedBuffers = [posName, color ? colName : '', size ? sizeName : ''].filter(Boolean);
+      const colorUnbound = !color && this.buffers.has(colName);
 
       const layer = new ScatterplotLayer({
         id: 'deck-webgpu',
@@ -220,13 +222,14 @@ export class DeckWebgpuPane {
             // what makes a kernel-written buffer bindable at all.
             getPosition: { buffer: position, size: width(posName), type: 'float32' },
             ...(size ? { getRadius: { buffer: size, size: 1, type: 'float32' } } : {}),
+            ...(color ? { getFillColor: { buffer: color, size: 4, type: 'unorm8' } } : {}),
           },
         },
         coordinateSystem: 'cartesian',
         radiusUnits: 'pixels',
         radiusMinPixels: 0.5,
         radiusMaxPixels: 64,
-        getFillColor: [140, 200, 242],
+        getFillColor: color ? undefined : [140, 200, 242],
         getRadius: size ? undefined : 2,
         pickable: false,
       });
@@ -242,7 +245,7 @@ export class DeckWebgpuPane {
       this.status.render = this.firstRenderError ? 'failed' : 'ok';
       this.status.detail = this.firstRenderError
         ? `compute succeeded and the buffers bound, but deck's WebGPU draw failed: ${this.firstRenderError}`
-        : `kernel ran on luma's device; ${this.status.sharedBuffers.length} app-owned buffer(s) bound to a ScatterplotLayer with no readback${colorBufferExists ? '. Cd was computed on the GPU but left unbound: deck 9.4 derives an invalid unorm8x3 vertex format for 3-component colours.' : ''}`;
+        : `kernel ran on luma's device; ${this.status.sharedBuffers.length} app-owned buffer(s) bound to a ScatterplotLayer with no readback${colorUnbound ? `. ${colName} was computed on the GPU but left unbound: it is not packed RGBA8, and deck 9.4 derives an invalid unorm8x3 vertex format for 3-component colours.` : ''}`;
     } catch (err) {
       // Which half failed matters, so do not collapse them into one flag.
       if (this.status.compute === 'pending') this.status.compute = 'failed';

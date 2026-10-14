@@ -30,6 +30,7 @@ import {
 import { type CostConstants, DEFAULT_COSTS, type CostBreakdown } from './cost.js';
 import type { SourceStats } from './stats.js';
 import { type TargetCaps, targetCaps } from './target.js';
+import { packedColorName, type AttributeFormat } from './packing.js';
 
 export { PlanError };
 export type { Schema, Stage, Policy, Assignment, Candidate };
@@ -52,6 +53,11 @@ export interface AttributeDecl {
    * be narrowed to f32, where ids above 2^24 would merge.
    */
   type?: 'str' | 'raw';
+  /**
+   * GPU storage format, when it is not f32 per component. `rgba8` is one packed u32 per row
+   * (see `packing.ts`); `width` stays the logical component count.
+   */
+  format?: AttributeFormat;
 }
 
 export interface KernelPlan {
@@ -301,6 +307,7 @@ function emitRaw(
     registerOnly: Set<string>;
     order: AnalyzedNode[];
     next: () => string;
+    packed?: string;
   },
 ): void {
   if (typeof raw.code !== 'string') {
@@ -355,9 +362,14 @@ function emitRaw(
     }
     if (!ctx.writes.includes(w.name)) ctx.writes.push(w.name);
     if (!ctx.derivedOut.some((d) => d.name === w.name)) {
-      ctx.derivedOut.push({ name: w.name, width: w.width, provenance: 'derived' });
+      ctx.derivedOut.push({
+        name: w.name, width: w.width, provenance: 'derived',
+        ...(w.name === ctx.packed ? { format: 'rgba8' as const } : {}),
+      });
     }
-    if (w.width === 1) {
+    if (w.name === ctx.packed) {
+      body.push(`  ${bufName(w.name)}[i] = ${packRgba8(local, w.width, node.nodeId)};`);
+    } else if (w.width === 1) {
       body.push(`  ${bufName(w.name)}[i] = ${local};`);
     } else {
       for (const c of range(w.width)) {
@@ -724,7 +736,12 @@ function emit(
     // A CPU-stage or SQL-stage attribute name reused later must keep its buffer too.
     for (const a of [...arrowAttributes, ...cpuAttributes]) kernelExternal.add(a.name);
 
-    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, kernelExternal);
+    // The color channel packs as RGBA8 unless something upstream of the kernel already gave
+    // it an f32 buffer under the same name.
+    const colorName = packedColorName(analysis);
+    const packed = colorName && !arrowAttributes.some((a) => a.name === colorName) && !cpuAttributes.some((a) => a.name === colorName)
+      ? colorName : undefined;
+    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, kernelExternal, packed);
     kernels.push(kernel);
     for (const p of kernel.params) uniformParams.add(p);
   }
@@ -856,6 +873,8 @@ function buildKernel(
   order: AnalyzedNode[],
   /** Names something outside the kernel reads. Anything else stays in a register. */
   external: Set<string>,
+  /** The attribute stored as packed RGBA8 rather than f32 components, if any. */
+  packed?: string,
 ): KernelPlan {
   /** SSA: attribute name -> current WGSL local. Lets a node overwrite what it reads. */
   const live = new Map<string, { code: string; width: number }>();
@@ -891,7 +910,7 @@ function buildKernel(
     if (node.raw) {
       emitRaw(node, node.raw, {
         resolve, body, live, widths, params, writes, derivedOut, external, registerOnly, order,
-        next: () => `v${ssa++}`,
+        next: () => `v${ssa++}`, packed,
       });
       continue;
     }
@@ -916,9 +935,12 @@ function buildKernel(
     if (!derivedOut.some((d) => d.name === node.name)) {
       derivedOut.push({
         name: node.name, width: emitted.width, provenance: 'derived', internal: analyzed?.internal,
+        ...(node.name === packed ? { format: 'rgba8' as const } : {}),
       });
     }
-    if (emitted.width === 1) {
+    if (node.name === packed) {
+      body.push(`  ${bufName(node.name)}[i] = ${packRgba8(local, emitted.width, node.nodeId)};`);
+    } else if (emitted.width === 1) {
       body.push(`  ${bufName(node.name)}[i] = ${local};`);
     } else {
       for (const c of range(emitted.width)) {
@@ -948,7 +970,8 @@ function buildKernel(
     bindings.push(`@group(0) @binding(${slot++}) var<storage, read> ${bufName(name)}: array<f32>;`);
   }
   for (const name of writes) {
-    bindings.push(`@group(0) @binding(${slot++}) var<storage, read_write> ${bufName(name)}: array<f32>;`);
+    const element = name === packed ? 'u32' : 'f32';
+    bindings.push(`@group(0) @binding(${slot++}) var<storage, read_write> ${bufName(name)}: array<${element}>;`);
   }
 
   const prelude = usesRamp
@@ -991,6 +1014,19 @@ ${body.join('\n')}
 function emitWhere(exprs: Expr[], bind: SqlParams): string {
   if (exprs.length === 0) return '';
   return ` WHERE ${exprs.map((e) => toSql(e, bind).code).join(' AND ')}`;
+}
+
+/**
+ * WGSL that packs a 3- or 4-component color local into one u32. `pack4x8unorm` clamps to
+ * [0, 1], so an out-of-range color saturates exactly as `toUint8Color` does on the CPU path.
+ */
+function packRgba8(local: string, width: number, nodeId: string): string {
+  // `packedColorName` chose this attribute from its final width. An earlier write of another
+  // width would leave the buffer holding two layouts, so refuse rather than mix them.
+  if (width !== 3 && width !== 4) {
+    throw new PlanError(`Node ${nodeId}: color attribute is packed as RGBA8 but this write has width ${width}`);
+  }
+  return width === 4 ? `pack4x8unorm(${local})` : `pack4x8unorm(vec4<f32>(${local}, 1.0))`;
 }
 
 function bufName(attr: string): string {

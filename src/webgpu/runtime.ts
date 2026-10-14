@@ -14,7 +14,7 @@
 import type { Gpu } from './device.js';
 
 import { AttributeSet } from './attributes.js';
-import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, withCompaction, evaluateStage, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
+import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, withCompaction, evaluateStage, rowBytes, type AttributeFormat, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
 import { Kernel } from './compute.js';
 import { OrbitCamera, VIEW_UNIFORM_SIZE } from './camera.js';
 import { PointsPass } from './passes/points.js';
@@ -50,6 +50,7 @@ export interface AttributeReport {
   chunks?: number;
   bytes: number;
   internal?: boolean;
+  format?: AttributeFormat;
 }
 
 export interface BuildResult {
@@ -347,10 +348,10 @@ export class Runtime {
           bytes: this.rows * decl.width * 4,
         });
       } else {
-        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived');
+        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived', decl.format);
         reports.push({
           name: decl.name, width: decl.width, provenance: decl.provenance,
-          bytes: this.rows * decl.width * 4, internal: decl.internal,
+          bytes: this.rows * rowBytes(decl), internal: decl.internal, format: decl.format,
         });
       }
     }
@@ -646,7 +647,7 @@ export class Runtime {
     this.rows = table.numRows;
     for (const decl of plan.attributes) {
       if (decl.provenance !== 'arrow') {
-        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived');
+        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived', decl.format);
         continue;
       }
       const upload = decl.sourceColumns && decl.sourceColumns.length > 1

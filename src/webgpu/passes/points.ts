@@ -62,7 +62,9 @@ export function pointsShader(b: PointsBindings): string {
   const posSlot = slot++;
   decls.push(`@group(0) @binding(${posSlot}) var<storage, read> b_pos: array<f32>;`);
   const colSlot = b.color ? slot++ : -1;
-  if (b.color) decls.push(`@group(0) @binding(${colSlot}) var<storage, read> b_col: array<f32>;`);
+  // A kernel-written color is one packed RGBA8 u32 a row; anything else is f32 components.
+  const packedColor = b.color?.format === 'rgba8';
+  if (b.color) decls.push(`@group(0) @binding(${colSlot}) var<storage, read> b_col: array<${packedColor ? 'u32' : 'f32'}>;`);
   const sizSlot = b.size ? slot++ : -1;
   if (b.size) decls.push(`@group(0) @binding(${sizSlot}) var<storage, read> b_siz: array<f32>;`);
   const opaSlot = b.opacity ? slot++ : -1;
@@ -72,7 +74,9 @@ export function pointsShader(b: PointsBindings): string {
   const idxSlot = b.indexed ? slot++ : -1;
   if (b.indexed) decls.push(`@group(0) @binding(${idxSlot}) var<storage, read> b_idx: array<u32>;`);
 
-  const readColor = b.color ? loadVec('b_col', b.color.width, 3) : 'vec3<f32>(0.55, 0.78, 0.95)';
+  const readColor = !b.color
+    ? 'vec3<f32>(0.55, 0.78, 0.95)'
+    : packedColor ? 'unpack4x8unorm(b_col[i]).rgb' : loadVec('b_col', b.color.width, 3);
   const readSize = b.size ? 'b_siz[i * SIZEW + 0u]'.replace('SIZEW', `${b.size.width}u`) : '1.0';
   const readOpacity = b.opacity ? `b_opa[i * ${b.opacity.width}u + 0u]` : '1.0';
   const maskTest = b.mask

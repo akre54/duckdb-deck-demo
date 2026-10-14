@@ -29,6 +29,7 @@ export {
   attributeConventions, isInternal, HOUDINI_CONVENTIONS,
   type AttributeConventions,
 } from './conventions.js';
+export { packedColorName, rowBytes, unpackRgba8, type AttributeFormat } from './packing.js';
 
 // --- user-defined functions ------------------------------------------------
 export {

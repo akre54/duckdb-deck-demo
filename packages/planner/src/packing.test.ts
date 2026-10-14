@@ -1,0 +1,93 @@
+import { describe, it, expect } from 'vitest';
+import { plan, type Schema } from './planner.js';
+import { analyze } from './analyze.js';
+import { optimize } from './optimizer.js';
+import { packedColorName, rowBytes, unpackRgba8 } from './packing.js';
+import { DEFAULT_COSTS } from './cost.js';
+import { targetCaps } from './target.js';
+import type { Graph } from './types.js';
+
+const schema: Schema = new Map([['lng', 1], ['lat', 1], ['elevation', 1], ['tint', 1]]);
+const source = { id: 'src', type: 'source', dataset: { ref: 'test', estimatedRows: 1000 } } as const;
+
+function scatter(color: Graph['nodes'][number]): Graph {
+  return {
+    params: {},
+    nodes: [
+      source,
+      { id: 'p', type: 'project', input: 'src', mode: 'identity', x: 'lng', y: 'lat', z: '0' },
+      color,
+      { id: 'out', type: 'render', input: color.id, mode: 'points' },
+    ],
+  };
+}
+
+const ramp = scatter({ id: 'c', type: 'colorscale', input: 'p', expr: 'elevation', ramp: 'viridis', domain: ['0', '900'] });
+
+describe('packed RGBA8 color', () => {
+  it('a kernel-written color is declared rgba8 and stored as one u32 a row', () => {
+    const p = plan(ramp, schema, 'auto');
+    const cd = p.attributes.find((a) => a.name === 'Cd')!;
+    expect(cd).toMatchObject({ provenance: 'derived', width: 3, format: 'rgba8' });
+    expect(rowBytes(cd)).toBe(4);
+    const code = p.kernels[0].code;
+    expect(code).toMatch(/var<storage, read_write> b_Cd: array<u32>/);
+    expect(code).toMatch(/b_Cd\[i\] = pack4x8unorm\(vec4<f32>\(v\d+, 1\.0\)\)/);
+    // Position is untouched: still f32 components.
+    expect(code).toMatch(/b_P: array<f32>/);
+  });
+
+  it('a 4-component color packs without an appended alpha', () => {
+    const p = plan(scatter({ id: 'c', type: 'attribute', input: 'p', name: 'Cd', expr: '[elevation, 0.5, 0.25, 1.0]' }), schema, 'gpu-first');
+    expect(p.attributes.find((a) => a.name === 'Cd')).toMatchObject({ width: 4, format: 'rgba8' });
+    expect(p.kernels[0].code).toMatch(/b_Cd\[i\] = pack4x8unorm\(v\d+\)/);
+  });
+
+  it('a color computed in SQL stays f32: packing it would cost a JS pass', () => {
+    const p = plan(scatter({ id: 'c', type: 'attribute', input: 'p', name: 'Cd', expr: '[elevation, 0.5, 0.25]' }), schema, 'sql-first');
+    const cd = p.attributes.find((a) => a.name === 'Cd')!;
+    expect(cd.provenance).toBe('arrow');
+    expect(cd.format).toBeUndefined();
+  });
+
+  it('a scalar or a source column of the color name is not packed', () => {
+    const scalar = plan(scatter({ id: 'c', type: 'attribute', input: 'p', name: 'Cd', expr: 'elevation' }), schema, 'gpu-first');
+    expect(scalar.attributes.find((a) => a.name === 'Cd')!.format).toBeUndefined();
+    const withColumn: Schema = new Map([...schema, ['Cd', 1]]);
+    expect(packedColorName(analyze(ramp, withColumn))).toBeUndefined();
+  });
+
+  it('a raw wgsl write of the color packs too', () => {
+    const p = plan(scatter({
+      id: 'c', type: 'raw', input: 'p', engine: 'gpu', reads: ['tint'],
+      writes: [{ name: 'Cd', width: 3 }], code: 'Cd = vec3<f32>(tint, 0.5, 0.25);',
+    }), schema, 'auto');
+    expect(p.attributes.find((a) => a.name === 'Cd')!.format).toBe('rgba8');
+    expect(p.kernels[0].code).toMatch(/b_Cd\[i\] = pack4x8unorm\(vec4<f32>\(v\d+, 1\.0\)\)/);
+  });
+
+  it('the optimizer prices the packed color at 4 bytes a row, as emit allocates it', () => {
+    // Two implementations of one rule: the byte estimate and the emitted declaration.
+    const analysis = analyze(ramp, schema);
+    const caps = targetCaps('webgpu-native', undefined);
+    const result = optimize(analysis, { costs: DEFAULT_COSTS, caps, params: {}, policy: 'gpu-first' });
+    const chosen = result.candidates.find((c) => c.legal && c.cost && c.assignment.sqlEnd === 0 && c.assignment.cpuEnd === 0)!;
+    const rows = 1000;
+    // P (vec3 f32) + Cd (packed) on the GPU, plus the scalar source columns uploaded.
+    const emitted = plan(ramp, schema, 'gpu-first').attributes
+      .filter((a) => a.provenance === 'derived')
+      .reduce((sum, a) => sum + rows * rowBytes(a), 0);
+    expect(emitted).toBe(rows * (12 + 4));
+    const uploads = rows * 4 * 2; // lng, lat
+    const elevation = rows * 4;
+    expect(chosen.cost!.gpuBytes).toBe(emitted + uploads + elevation);
+  });
+
+  it('unpackRgba8 inverts pack4x8unorm byte order', () => {
+    // r=255, g=128, b=0, a=255 -> 0xff0080ff little-endian.
+    const out = unpackRgba8(new Uint32Array([0xff0080ff]), 3);
+    expect(out[0]).toBe(1);
+    expect(out[1]).toBeCloseTo(128 / 255, 6);
+    expect(out[2]).toBe(0);
+  });
+});
