@@ -46,6 +46,9 @@ export class AttributeSet {
     bytesUploaded: 0,
     /** CPU milliseconds spent in Arrow->Float32 conversion this build. */
     convertMs: 0,
+    /** GPU-to-GPU copies that carried old rows into a grown buffer, and their bytes. */
+    gpuCopies: 0,
+    bytesCopied: 0,
   };
 
   constructor(private readonly device: GPUDevice) {}
@@ -57,6 +60,8 @@ export class AttributeSet {
     this.counters.writeCalls = 0;
     this.counters.bytesUploaded = 0;
     this.counters.convertMs = 0;
+    this.counters.gpuCopies = 0;
+    this.counters.bytesCopied = 0;
   }
 
   list(): GpuAttribute[] {
@@ -126,13 +131,67 @@ export class AttributeSet {
    */
   write(name: string, width: number, rows: number, upload: ColumnUpload): GpuAttribute {
     const attr = this.ensure(name, width, rows, 'arrow');
+    this.upload(attr, 0, rows, upload);
+    attr.upload = upload;
+    return attr;
+  }
+
+  /**
+   * Write rows `fromRow .. fromRow + upload.rows` and leave the rows before them alone: an
+   * append, when `fromRow` is the current row count. Only the new rows cross the bus.
+   *
+   * CesiumJS's buffer primitives upload only a dirty range for the same reason. The cases
+   * here are narrower, because a requery replaces a whole column; this is for a source that
+   * only ever adds rows. Within capacity it is one writeBuffer per chunk. Past capacity the
+   * buffer is reallocated and the old rows are copied GPU to GPU, so they are still not
+   * re-uploaded, and `generation` changes so bind groups rebuild.
+   */
+  writeRows(name: string, width: number, fromRow: number, upload: ColumnUpload): GpuAttribute {
+    const existing = this.map.get(name);
+    if (!existing) {
+      if (fromRow !== 0) throw new Error(`Attribute '${name}': cannot write from row ${fromRow} of an attribute that does not exist`);
+      return this.write(name, width, upload.rows, upload);
+    }
+    if (existing.width !== width || existing.format) {
+      throw new Error(`Attribute '${name}': a row write must match the existing f32 width ${existing.width}`);
+    }
+    if (fromRow > existing.rows) {
+      throw new Error(`Attribute '${name}': row ${fromRow} would leave a gap after row ${existing.rows}`);
+    }
+    const rows = fromRow + upload.rows;
+    let attr = existing;
+    if (rows > existing.capacityRows) {
+      const old = existing.buffer;
+      const keepBytes = fromRow * rowBytes(existing);
+      // Detach first so `ensure` allocates rather than destroying the rows we still need.
+      this.map.delete(name);
+      attr = this.ensure(name, width, rows, 'arrow');
+      if (keepBytes > 0) {
+        const encoder = this.device.createCommandEncoder({ label: `grow:${name}` });
+        encoder.copyBufferToBuffer(old, 0, attr.buffer, 0, keepBytes);
+        this.device.queue.submit([encoder.finish()]);
+        this.counters.gpuCopies++;
+        this.counters.bytesCopied += keepBytes;
+      }
+      // Safe after submit: the copy already queued still completes.
+      old.destroy();
+    }
+    attr.rows = rows;
+    this.upload(attr, fromRow, upload.rows, upload);
+    return attr;
+  }
+
+  /** writeBuffer `rows` rows of `upload` into `attr` starting at `fromRow`. */
+  private upload(attr: GpuAttribute, fromRow: number, rows: number, upload: ColumnUpload): void {
+    const { name, width } = attr;
     const needed = rows * width;
+    const base = fromRow * width * 4;
 
     if (upload.chunks) {
       let element = 0;
       for (const chunk of upload.chunks) {
         if (element + chunk.length > needed) break;
-        this.device.queue.writeBuffer(attr.buffer, element * 4, gpuData(chunk), 0, chunk.length);
+        this.device.queue.writeBuffer(attr.buffer, base + element * 4, gpuData(chunk), 0, chunk.length);
         this.counters.writeCalls++;
         element += chunk.length;
       }
@@ -144,15 +203,13 @@ export class AttributeSet {
       if (data.length < needed) {
         throw new Error(`Attribute '${name}': got ${data.length} values, need ${needed}`);
       }
-      this.device.queue.writeBuffer(attr.buffer, 0, gpuData(data), 0, needed);
+      this.device.queue.writeBuffer(attr.buffer, base, gpuData(data), 0, needed);
       this.counters.writeCalls++;
     }
 
-    attr.upload = upload;
     this.counters.uploads++;
     this.counters.bytesUploaded += needed * 4;
     this.counters.convertMs += upload.convertMs;
-    return attr;
   }
 
   /**

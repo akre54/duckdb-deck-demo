@@ -674,6 +674,20 @@ optimizer's byte estimate and `emit` call it; a test holds the two at the same n
   own layout, so the deck WebGPU pane binds the kernel's color. The draw then failed only on
   point 1, the position stride.
 
+### 15b. Uploading only appended rows
+
+Cesium uploads only the dirty range of a collection. Here a requery replaces whole columns,
+so a dirty range would buy nothing on the paths that exist. It pays off only for a source
+that adds rows, so the piece built is the storage half: `AttributeSet.writeRows(name, width,
+fromRow, upload)`.
+
+- Within capacity it writes only the new rows. 200 rows appended to 1000 upload 2.4 KB, and
+  the buffer and its `generation` stay the same.
+- Past capacity it reallocates and copies the old rows GPU to GPU (`copyBufferToBuffer`), so
+  they still do not cross the bus. `generation` changes, so bind groups rebuild.
+- A gap or a width change throws. No source streams yet; a provider that appends is the
+  missing half.
+
 ## Recommended order of work for noodles
 
 Ranked by payoff per unit of risk. The first three are independent of any renderer decision.
