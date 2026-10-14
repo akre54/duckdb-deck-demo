@@ -296,3 +296,57 @@ describe('divergences that are known and deliberate', () => {
     expect(Number((table.toArray() as { naive: number }[])[0].naive)).toBeCloseTo(0.5, 6);
   });
 });
+
+describe('RTC projection formulas agree across backends', () => {
+  // RTC (relative to center) converts lng/lat to meter offsets from an origin.
+  // Earth circumference: 40,075,000 meters.
+  // These tests verify the formula components compile and agree on all backends.
+
+  it('RTC X component: longitude to meter offsets', async () => {
+    // Formula: ((lng - originLng) / 360.0) * 40075000.0
+    // Using a=lng values from INPUTS, origin = first element
+    const originLng = INPUTS.a[0]; // 1
+    const rtcX = `((a - ${originLng}) / 360.0) * 40075000.0`;
+
+    const js = viaJs(rtcX);
+    const sql = await viaSql(rtcX);
+    const wgsl = await viaWgsl(rtcX);
+
+    expectClose(sql, js, 'rtc-x sql vs js');
+    expectClose(wgsl, js, 'rtc-x wgsl vs js');
+  });
+
+  it('RTC Y component: mercator latitude to meter offsets', async () => {
+    // Formula: (mercator(lat) - mercator(originLat)) * 40075000 / (2π)
+    // Using b=lat values from INPUTS, origin = first element
+    const originLat = INPUTS.b[0]; // 3
+    const rtcY =
+      `(ln(tan(0.7853981634 + b * 0.008726646259971648)) - ` +
+      `ln(tan(0.7853981634 + ${originLat} * 0.008726646259971648))) / 6.283185307 * 40075000.0`;
+
+    const js = viaJs(rtcY);
+    const sql = await viaSql(rtcY);
+    const wgsl = await viaWgsl(rtcY);
+
+    expectClose(sql, js, 'rtc-y sql vs js');
+    expectClose(wgsl, js, 'rtc-y wgsl vs js');
+  });
+
+  it('full RTC position as vector', async () => {
+    // Complete RTC formula: [rtc_x, rtc_y, z_offset]
+    const originLng = INPUTS.a[0];
+    const originLat = INPUTS.b[0];
+    const rtcVec =
+      `[((a - ${originLng}) / 360.0) * 40075000.0, ` +
+      `(ln(tan(0.7853981634 + b * 0.008726646259971648)) - ` +
+      `ln(tan(0.7853981634 + ${originLat} * 0.008726646259971648))) / 6.283185307 * 40075000.0, ` +
+      `c]`;
+
+    const engines = enginesFor(parseExpr(rtcVec));
+    expect(engines.has('sql'), 'RTC vector should be SQL-expressible').toBe(true);
+    expect(engines.has('gpu'), 'RTC vector should be GPU-expressible').toBe(true);
+
+    // Note: viaJs, viaSql, viaWgsl handle scalars not vectors, so this just checks compilation
+    // Full vector agreement will be tested in the projection node implementation
+  });
+});

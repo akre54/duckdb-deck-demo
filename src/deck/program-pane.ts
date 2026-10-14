@@ -89,13 +89,37 @@ const attr = (input: ProgramLayerInput, channel: string) => {
   return name ? input.data!.attributes.get(name) : undefined;
 };
 
-/** Positions as `[lng, lat, metres]`: deck's position attributes are three-wide. */
+/**
+ * Positions for deck.gl: must be fp64-encoded ([x_lo, x_hi, y_lo, y_hi, z_lo, z_hi]).
+ * Kernels write width=6; CPU stage may produce width=2 or width=3, which we expand here.
+ */
 function positions(a: { data: Float32Array; width: number }, rows: number): Float32Array {
-  if (a.width === 3) return a.data;
-  const out = new Float32Array(rows * 3);
+  if (a.width === 6) {
+    // Already fp64-encoded by kernel
+    return a.data;
+  }
+  if (a.width === 3) {
+    // width=3: expand to fp64 [x_lo, 0, y_lo, 0, z_lo, 0]
+    const out = new Float32Array(rows * 6);
+    for (let i = 0; i < rows; i++) {
+      out[i * 6 + 0] = a.data[i * 3 + 0]; // x_lo
+      out[i * 6 + 1] = 0.0;                // x_hi
+      out[i * 6 + 2] = a.data[i * 3 + 1]; // y_lo
+      out[i * 6 + 3] = 0.0;                // y_hi
+      out[i * 6 + 4] = a.data[i * 3 + 2]; // z_lo
+      out[i * 6 + 5] = 0.0;                // z_hi
+    }
+    return out;
+  }
+  // width=2: expand to fp64 with z=0
+  const out = new Float32Array(rows * 6);
   for (let i = 0; i < rows; i++) {
-    out[i * 3] = a.data[i * a.width];
-    out[i * 3 + 1] = a.data[i * a.width + 1];
+    out[i * 6 + 0] = a.data[i * a.width + 0];
+    out[i * 6 + 1] = 0.0;
+    out[i * 6 + 2] = a.data[i * a.width + 1];
+    out[i * 6 + 3] = 0.0;
+    out[i * 6 + 4] = 0.0;
+    out[i * 6 + 5] = 0.0;
   }
   return out;
 }

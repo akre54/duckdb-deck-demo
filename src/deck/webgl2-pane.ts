@@ -139,13 +139,14 @@ export class DeckPane {
       data: {
         length: rows,
         attributes: {
-          getPosition: { value: positions, size: 3 },
+          getPosition: { value: positions, size: 3 }, // size=3 logical components, data is fp64-encoded (6 floats)
           ...(colors ? { getFillColor: { value: colors, size: 4 } } : {}),
           ...(sizeSrc ? { getRadius: { value: sizeSrc.data, size: 1 } } : {}),
         },
       },
       // The COORDINATE_SYSTEM enum is deprecated; the string is the current spelling.
-      coordinateSystem: 'cartesian',
+      coordinateSystem: data.plan.coordinateSystem === 'meter-offsets' ? 'meter-offsets' : 'cartesian',
+      coordinateOrigin: data.plan.coordinateSystem === 'meter-offsets' ? data.plan.coordinateOrigin : undefined,
       radiusUnits: 'pixels',
       radiusMinPixels: 0.5,
       radiusMaxPixels: 64,

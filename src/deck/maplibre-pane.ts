@@ -124,7 +124,7 @@ export class DeckMaplibrePane {
       data: {
         length: n,
         attributes: {
-          getPosition: { value: positions, size: 3 },
+          getPosition: { value: positions, size: 3 }, // size=3 logical components, data is fp64-encoded (6 floats)
           ...(colors ? { getFillColor: { value: colors, size: 4 } } : {}),
           ...(sizes ? { getRadius: { value: sizes, size: 1 } } : {}),
         },

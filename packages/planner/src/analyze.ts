@@ -14,7 +14,7 @@ import {
 } from './expr.js';
 import {
   type Graph, type CoreNode, type RenderNode, type Bin2dNode, type StatsNode,
-  type SourceNode, type RawNode, type ParamSpec, type RampName, type LayerNode, desugar,
+  type SourceNode, type RawNode, type ParamSpec, type RampName, type LayerNode, type ProjectNode, desugar,
 } from './types.js';
 import { LAYER_SPECS, propParams, type LayerKind, type ChannelType, type LayerPropValue } from './layers.js';
 import { type AttributeConventions, attributeConventions, isInternal } from './conventions.js';
@@ -133,6 +133,16 @@ export interface Analysis {
   aggregateNames: string[];
   ramp?: RampName;
   params: Record<string, ParamSpec>;
+  /**
+   * Projection metadata captured before desugaring. Used to propagate coordinate system
+   * information to the physical plan for deck.gl binding.
+   */
+  projectionNode?: {
+    mode: 'mercator' | 'identity' | 'rtc';
+    originLng?: string;
+    originLat?: string;
+    originZ?: string;
+  };
   notes: string[];
 }
 
@@ -188,6 +198,16 @@ export function analyze(
   columnTypes?: ColumnTypes,
 ): Analysis {
   const conventions = attributeConventions(conventionOverrides);
+
+  // Capture projection metadata before desugaring destroys it.
+  const projectNodes = graph.nodes.filter((n): n is ProjectNode => n.type === 'project');
+  const projectionNode = projectNodes.length > 0 ? {
+    mode: projectNodes[0].mode,
+    originLng: projectNodes[0].originLng,
+    originLat: projectNodes[0].originLat,
+    originZ: projectNodes[0].originZ,
+  } : undefined;
+
   const { nodes, notes: sugarNotes, ramp, functions } = desugar(graph, conventions);
   const notes = [...sugarNotes];
   const byId = new Map(nodes.map((n) => [n.id, n]));
@@ -419,6 +439,7 @@ export function analyze(
     aggregateNames,
     ramp,
     params: { ...(graph.params ?? {}) },
+    projectionNode,
     notes,
   };
 }

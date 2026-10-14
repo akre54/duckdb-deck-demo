@@ -213,15 +213,15 @@ export class DeckWebgpuPane {
             // The load-bearing lines: buffers this application allocated and a compute
             // shader filled, handed to deck with no readback.
             //
-            // `type` is not optional here. ScatterplotLayer declares `getPosition` as
-            // float64 for precision, so deck derives a 24-byte stride and rejects a
-            // float32x3 buffer as half the size it expects. Saying float32 explicitly is
-            // what makes a kernel-written buffer bindable at all.
-            getPosition: { buffer: position, size: width(posName), type: 'float32' },
+            // Position buffers are fp64-encoded (6 floats: [x_lo, x_hi, y_lo, y_hi, z_lo, z_hi])
+            // but deck sees 3 logical components (x, y, z). The type='float64' tells deck to
+            // interpret pairs of float32 values as fp64 components.
+            getPosition: { buffer: position, size: 3, type: 'float64' },
             ...(size ? { getRadius: { buffer: size, size: 1, type: 'float32' } } : {}),
           },
         },
-        coordinateSystem: 'cartesian',
+        coordinateSystem: plan.coordinateSystem === 'meter-offsets' ? 'meter-offsets' : 'cartesian',
+        coordinateOrigin: plan.coordinateOrigin,
         radiusUnits: 'pixels',
         radiusMinPixels: 0.5,
         radiusMaxPixels: 64,

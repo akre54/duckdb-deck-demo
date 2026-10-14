@@ -187,12 +187,20 @@ export interface ProjectNode {
    * relational joins are out of scope.
    */
   inputs?: string[];
-  mode: 'mercator' | 'identity';
+  mode: 'mercator' | 'identity' | 'rtc';
   x: string;
   y: string;
   z?: string;
   /** World-unit scale applied after projection, so the orbit camera sees sane numbers. */
   worldScale?: string;
+  /**
+   * RTC (relative to center) origin expressions. When mode is 'rtc', positions are emitted as
+   * float32 meter offsets from this origin, providing ~6cm precision within ±10km.
+   * Can be constants or parameter references (e.g., '{{centerLng}}').
+   */
+  originLng?: string;
+  originLat?: string;
+  originZ?: string;
 }
 
 /** GPU binning into a 2D grid, consumed by the heatmap raster pass. */
@@ -592,13 +600,34 @@ export function desugar(
       case 'project': {
         const scale = node.worldScale ?? '1.0';
         const z = node.z ?? '0.0';
-        const expr = node.mode === 'mercator'
+
+        let expr: string;
+        if (node.mode === 'mercator') {
           // Web Mercator, normalized to [-0.5, 0.5] on both axes so the orbit camera
           // starts with the whole world inside the near/far planes.
-          ? `[((${node.x}) / 360.0) * (${scale}), ` +
-            `(ln(tan(0.7853981634 + (${node.y}) * 0.008726646259971648)) / 6.283185307) * (${scale}), ` +
-            `(${z}) * (${scale})]`
-          : `[(${node.x}) * (${scale}), (${node.y}) * (${scale}), (${z}) * (${scale})]`;
+          expr = `[((${node.x}) / 360.0) * (${scale}), ` +
+                 `(ln(tan(0.7853981634 + (${node.y}) * 0.008726646259971648)) / 6.283185307) * (${scale}), ` +
+                 `(${z}) * (${scale})]`;
+        } else if (node.mode === 'rtc') {
+          // RTC (relative to center): meter offsets from origin.
+          // Earth circumference: 40,075,000 meters.
+          // Float32 at ±10km gives ~6cm precision (24 mantissa bits).
+          const oLng = node.originLng ?? '0.0';
+          const oLat = node.originLat ?? '0.0';
+          const oZ = node.originZ ?? '0.0';
+
+          // X: longitude delta scaled to meters
+          // Y: mercator Y difference scaled to meters (preserves geodetic properties)
+          // Z: elevation offset scaled
+          expr = `[((${node.x}) - (${oLng})) / 360.0 * 40075000.0, ` +
+                 `(ln(tan(0.7853981634 + (${node.y}) * 0.008726646259971648)) - ` +
+                 ` ln(tan(0.7853981634 + (${oLat}) * 0.008726646259971648))) / 6.283185307 * 40075000.0, ` +
+                 `((${z}) - (${oZ})) * (${scale})]`;
+        } else {
+          // identity
+          expr = `[(${node.x}) * (${scale}), (${node.y}) * (${scale}), (${z}) * (${scale})]`;
+        }
+
         out.push({ id: node.id, type: 'attribute', input: node.input, name: conv.position, expr });
         notes.push(`${node.id}: project(${node.mode}) desugared to attribute '${conv.position}'`);
         break;

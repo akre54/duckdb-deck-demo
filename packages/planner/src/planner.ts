@@ -155,6 +155,10 @@ export interface PhysicalPlan {
   conventions: AttributeConventions;
   ramp?: RampName;
   bin2d?: Bin2dNode;
+  /** Coordinate system for deck.gl binding. */
+  coordinateSystem?: 'normalized' | 'meter-offsets';
+  /** Origin point for meter-offsets mode [lng, lat, z]. */
+  coordinateOrigin?: [number, number, number];
   assignments: { nodeId: string; type: string; engine: 'sql' | 'cpu' | 'gpu' | 'scalar' | 'render' | 'source'; why: string }[];
   notes: string[];
   maskAttribute?: string;
@@ -679,7 +683,7 @@ function emit(
     // A CPU-stage or SQL-stage attribute name reused later must keep its buffer too.
     for (const a of [...arrowAttributes, ...cpuAttributes]) kernelExternal.add(a.name);
 
-    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, kernelExternal);
+    const kernel = buildKernel(gpuStage, widthOfName, derivedAttributes, order, kernelExternal, analysis.conventions);
     kernels.push(kernel);
     for (const p of kernel.params) uniformParams.add(p);
   }
@@ -764,6 +768,35 @@ function emit(
     why: `mode=${analysis.render.mode}`,
   });
 
+  // Coordinate system metadata for deck.gl binding
+  let coordinateSystem: 'normalized' | 'meter-offsets' | undefined;
+  let coordinateOrigin: [number, number, number] | undefined;
+
+  if (analysis.projectionNode?.mode === 'rtc') {
+    coordinateSystem = 'meter-offsets';
+
+    // Evaluate origin expressions
+    const evalOrigin = (expr?: string): number => {
+      if (!expr) return 0;
+      const parsed = parseExpr(expr);
+      if (parsed.kind === 'literal') return parsed.value;
+      if (parsed.kind === 'param') {
+        const pValue = declaredParams[parsed.name]?.value;
+        return typeof pValue === 'number' ? pValue : 0;
+      }
+      // Complex expressions: default to 0 (would require SQL evaluation)
+      return 0;
+    };
+
+    coordinateOrigin = [
+      evalOrigin(analysis.projectionNode.originLng),
+      evalOrigin(analysis.projectionNode.originLat),
+      evalOrigin(analysis.projectionNode.originZ),
+    ];
+  } else if (analysis.projectionNode?.mode === 'mercator') {
+    coordinateSystem = 'normalized';
+  }
+
   return {
     sql,
     sqlParams: [...rowBind.order],
@@ -780,6 +813,8 @@ function emit(
     conventions: analysis.conventions,
     ramp: analysis.ramp,
     bin2d: analysis.bin2d,
+    coordinateSystem,
+    coordinateOrigin,
     assignments,
     notes,
     maskAttribute,
@@ -810,6 +845,7 @@ function buildKernel(
   order: AnalyzedNode[],
   /** Names something outside the kernel reads. Anything else stays in a register. */
   external: Set<string>,
+  conventions: AttributeConventions,
 ): KernelPlan {
   /** SSA: attribute name -> current WGSL local. Lets a node overwrite what it reads. */
   const live = new Map<string, { code: string; width: number }>();
@@ -867,12 +903,26 @@ function buildKernel(
     }
 
     if (!writes.includes(node.name)) writes.push(node.name);
+    // Position attributes require fp64 encoding for deck.gl (width=6: [x_lo, x_hi, y_lo, y_hi, z_lo, z_hi])
+    const isPosition = node.name === conventions.position;
+    const bufferWidth = isPosition ? 6 : emitted.width;
+
     if (!derivedOut.some((d) => d.name === node.name)) {
       derivedOut.push({
-        name: node.name, width: emitted.width, provenance: 'derived', internal: analyzed?.internal,
+        name: node.name, width: bufferWidth, provenance: 'derived', internal: analyzed?.internal,
       });
     }
-    if (emitted.width === 1) {
+
+    if (isPosition) {
+      // fp64 encoding: simplified [value, 0.0] pairs per component (sufficient for ±10km RTC range)
+      body.push(`  // fp64 encoding for deck.gl position`);
+      body.push(`  ${bufName(node.name)}[i * 6u + 0u] = ${local}[0];  // x_lo`);
+      body.push(`  ${bufName(node.name)}[i * 6u + 1u] = 0.0;           // x_hi`);
+      body.push(`  ${bufName(node.name)}[i * 6u + 2u] = ${local}[1];  // y_lo`);
+      body.push(`  ${bufName(node.name)}[i * 6u + 3u] = 0.0;           // y_hi`);
+      body.push(`  ${bufName(node.name)}[i * 6u + 4u] = ${local}[2];  // z_lo`);
+      body.push(`  ${bufName(node.name)}[i * 6u + 5u] = 0.0;           // z_hi`);
+    } else if (emitted.width === 1) {
       body.push(`  ${bufName(node.name)}[i] = ${local};`);
     } else {
       for (const c of range(emitted.width)) {
