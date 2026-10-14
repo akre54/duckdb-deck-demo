@@ -194,8 +194,9 @@ describe('OrbitCamera', () => {
     const cam = new OrbitCamera();
     const packed = cam.pack(1600, 900);
     expect(packed.length).toBe(VIEW_UNIFORM_SIZE / 4);
-    expect(VIEW_UNIFORM_SIZE).toBe(96);
-    // mat4 occupies 0..15, eye is 16..19, viewport is 20..23.
+    expect(VIEW_UNIFORM_SIZE).toBe(192);
+    // mat4 occupies 0..15, eye is 16..19, viewport is 20..23, then the relative-to-eye
+    // matrix 24..39, target hi 40..43 and target lo 44..47.
     expect([...packed.slice(16, 19)]).toEqual(cam.eye().map((v) => Math.fround(v)));
     expect(packed[19]).toBe(1);
     expect(packed[20]).toBe(1600);
@@ -218,6 +219,25 @@ describe('OrbitCamera', () => {
     const clip = transform(vp as Float32Array, [...cam.state.target, 1]);
     expect(clip[0] / clip[3]).toBeCloseTo(0, 4);
     expect(clip[1] / clip[3]).toBeCloseTo(0, 4);
+  });
+
+  it('the relative-to-eye matrix projects as the plain one does, about the target', () => {
+    const cam = new OrbitCamera();
+    cam.state.target = [0.25, 0.1, -0.1];
+    const packed = cam.pack(800, 600);
+    const vp = packed.slice(0, 16) as Float32Array;
+    const rte = packed.slice(24, 40) as Float32Array;
+    const hi = [...packed.slice(40, 43)];
+    const lo = [...packed.slice(44, 47)];
+    // lo is itself an f32, so hi + lo is the target to ~1e-15, not bit-exact.
+    hi.forEach((h, c) => expect(Math.abs(h + lo[c] - cam.state.target[c])).toBeLessThan(1e-14));
+    for (const p of [[0.3, 0.1, -0.05], [0.25, 0.1, -0.1], [-0.2, 0.0, 0.3]] as [number, number, number][]) {
+      const plain = transform(vp, [...p, 1]);
+      const rel = transform(rte, [p[0] - cam.state.target[0], p[1] - cam.state.target[1], p[2] - cam.state.target[2], 1]);
+      expect(rel[0] / rel[3]).toBeCloseTo(plain[0] / plain[3], 5);
+      expect(rel[1] / rel[3]).toBeCloseTo(plain[1] / plain[3], 5);
+      expect(rel[2] / rel[3]).toBeCloseTo(plain[2] / plain[3], 5);
+    }
   });
 
   it('keeps the target inside the depth range at the default framing', () => {

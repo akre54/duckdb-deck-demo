@@ -12,6 +12,8 @@ import earthquakesJson from '../demo/editor/examples/earthquakes.json';
 import networkJson from '../demo/editor/examples/network.json';
 import tripsJson from '../demo/editor/examples/trips.json';
 import arrivalsJson from '../demo/editor/examples/arrivals.json';
+import hexesJson from '../demo/editor/examples/hexes.json';
+import { triangulate } from '../src/deck/triangulate.js';
 
 // JSON imports infer literal unions that do not overlap `ParamValue`; the files are documents.
 const earthquakes = earthquakesJson as unknown as EditorDoc;
@@ -309,5 +311,37 @@ describe('keyframe interpolation (ported from Noodles)', () => {
     expect(evaluateTrack(track, 4)).toBe(10); // hold
     expect(evaluateTrack(track, 9)).toBe(20);
     expect(bezierEasing(0.5, { left: [0, 0], right: [1, 1] })).toBeCloseTo(0.5, 3);
+  });
+});
+
+describe('hex cells with holes', () => {
+  const hexes = hexesJson as unknown as EditorDoc;
+
+  it('groups vertices into cells and rings, with holes only where value is high', async () => {
+    const { lowered, program, values } = await compileDoc(hexes);
+    expect(lowered.errors).toEqual([]);
+    expect(program.errors).toEqual([]);
+    const d = await data(program, 'hexes', values);
+    const cells = d.starts!.length;
+    const holes = d.rings!.length - cells;
+    expect(cells).toBeGreaterThan(50);
+    expect(holes).toBeGreaterThan(0);
+    expect(holes).toBeLessThan(cells);
+    // Six vertices a ring, so every ring start is six rows after the last.
+    expect([...d.rings!].every((r, i, all) => i === 0 || r - all[i - 1] === 6)).toBe(true);
+    // A hexagon is 4 triangles; its hole adds 8 more for the annulus (12 vertices, 2 rings).
+    const position = program.layers.find((l) => l.id === 'hexes')!.plan.layer!.bindings
+      .find((b) => b.channel === 'position')!.attribute;
+    const P = d.attributes.get(position)!;
+    const tri = triangulate(P.data, P.width, d.rows, d.starts!, d.rings!);
+    expect(tri.indices.length / 3).toBe(cells * 4 + holes * 8);
+  });
+
+  it('the range filter removes whole cells in SQL, not single vertices', async () => {
+    const { program, values } = await compileDoc(hexes);
+    const all = await data(program, 'hexes', { ...values, busy__min: 0 });
+    const some = await data(program, 'hexes', values);
+    expect(some.starts!.length).toBeLessThan(all.starts!.length);
+    expect(some.rows % 6).toBe(0);
   });
 });

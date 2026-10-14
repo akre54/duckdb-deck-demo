@@ -30,6 +30,7 @@ import {
 import { compactable } from './expr.js';
 import { type SourceStats, estimateSelectivity, DEFAULT_SELECTIVITY } from './stats.js';
 import type { TargetCaps } from './target.js';
+import { packedColorName, positionFormat } from './packing.js';
 
 export type Policy = 'cost' | 'auto' | 'sql-first' | 'gpu-first';
 
@@ -228,6 +229,21 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
     sqlRows = estimateGroups(analysis.groupBy, stats, sqlRows);
   }
 
+  // Bytes a row of an attribute node occupies on the GPU, by the rules emit applies
+  // (`packing.ts`). A position takes the layout of whichever stage produces it first.
+  const position = analysis.channels.position;
+  const firstPosition = analysis.order.findIndex((node) => node.name === position);
+  const positionLayout = firstPosition >= 0
+    ? positionFormat(analysis, caps, stageOf(assignment, firstPosition)) : undefined;
+  const colorName = packedColorName(analysis);
+  const packed = colorName && !analysis.order.slice(0, assignment.cpuEnd).some((node) => node.name === colorName)
+    ? colorName : undefined;
+  const rowBytesOf = (node: AnalyzedNode, stage: Stage): number => {
+    if (stage === 'gpu' && node.name === packed) return 4;
+    if (positionLayout && node.name === position && node.width >= 2) return node.width * 8;
+    return node.width * 4;
+  };
+
   // --- SQL stage ----------------------------------------------------------
   const sqlOps = sum(analysis.order.slice(0, assignment.sqlEnd).map((node) => node.ops));
   // Columns scanned: source columns any surviving node reads.
@@ -261,7 +277,7 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
   for (let i = 0; i < assignment.sqlEnd; i++) {
     const node = analysis.order[i];
     if (node.kind !== 'attribute') continue;
-    const bytes = sqlRows * node.width * 4;
+    const bytes = sqlRows * rowBytesOf(node, 'sql');
     acc.addBuild('upload arrow columns', uploadMs(costs, bytes, chunks * node.width));
     acc.addGpuBytes(bytes);
     if (node.width > 1) {
@@ -276,7 +292,7 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
   for (let i = assignment.sqlEnd; i < assignment.cpuEnd; i++) {
     const node = analysis.order[i];
     if (node.kind !== 'attribute') continue;
-    const bytes = sqlRows * node.width * 4;
+    const bytes = sqlRows * rowBytesOf(node, 'cpu');
     acc.addBuild('upload cpu results', uploadMs(costs, bytes, 1));
     acc.addGpuBytes(bytes);
   }
@@ -306,7 +322,7 @@ function evaluate(analysis: Analysis, assignment: Assignment, ctx: OptimizeConte
   for (let i = assignment.cpuEnd; i < n; i++) {
     const node = analysis.order[i];
     if (node.kind !== 'attribute') continue;
-    acc.addGpuBytes(sqlRows * node.width * 4);
+    acc.addGpuBytes(sqlRows * rowBytesOf(node, 'gpu'));
   }
 
   // --- memory constraint --------------------------------------------------

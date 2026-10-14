@@ -46,6 +46,31 @@ export interface PointsChannels {
 /** style uniform: [sizeScale, opacity, minPx, maxPx]. */
 export const STYLE_UNIFORM_SIZE = 16;
 
+/** The View uniform as `OrbitCamera.pack` lays it out. */
+export const VIEW_STRUCT_WGSL = `
+struct View {
+  viewProj: mat4x4<f32>,
+  eye: vec4<f32>,
+  viewport: vec4<f32>,
+  viewProjRte: mat4x4<f32>,
+  targetHi: vec4<f32>,
+  targetLo: vec4<f32>,
+};`;
+
+/**
+ * Relative-to-eye projection, the precision half of a `hilo` position (planner
+ * `packing.ts`). Each half has the matching half of the camera target subtracted before the
+ * two are added, so the large common part cancels exactly and the small difference keeps the
+ * low bits. A plain f32 position passes `lo = 0` and gets the same path.
+ *
+ * Exported so a test can run exactly this code in a compute shader and compare it to f64.
+ */
+export const PROJECT_RTE_WGSL = `
+fn projectRte(hi: vec3<f32>, lo: vec3<f32>) -> vec4<f32> {
+  let rel = (hi - view.targetHi.xyz) + (lo - view.targetLo.xyz);
+  return view.viewProjRte * vec4<f32>(rel, 1.0);
+}`;
+
 function loadVec(name: string, width: number, want: number): string {
   if (width >= want) {
     return `vec${want}<f32>(${Array.from({ length: want }, (_, c) => `${name}[i * ${width}u + ${c}u]`).join(', ')})`;
@@ -62,7 +87,9 @@ export function pointsShader(b: PointsBindings): string {
   const posSlot = slot++;
   decls.push(`@group(0) @binding(${posSlot}) var<storage, read> b_pos: array<f32>;`);
   const colSlot = b.color ? slot++ : -1;
-  if (b.color) decls.push(`@group(0) @binding(${colSlot}) var<storage, read> b_col: array<f32>;`);
+  // A kernel-written color is one packed RGBA8 u32 a row; anything else is f32 components.
+  const packedColor = b.color?.format === 'rgba8';
+  if (b.color) decls.push(`@group(0) @binding(${colSlot}) var<storage, read> b_col: array<${packedColor ? 'u32' : 'f32'}>;`);
   const sizSlot = b.size ? slot++ : -1;
   if (b.size) decls.push(`@group(0) @binding(${sizSlot}) var<storage, read> b_siz: array<f32>;`);
   const opaSlot = b.opacity ? slot++ : -1;
@@ -72,19 +99,23 @@ export function pointsShader(b: PointsBindings): string {
   const idxSlot = b.indexed ? slot++ : -1;
   if (b.indexed) decls.push(`@group(0) @binding(${idxSlot}) var<storage, read> b_idx: array<u32>;`);
 
-  const readColor = b.color ? loadVec('b_col', b.color.width, 3) : 'vec3<f32>(0.55, 0.78, 0.95)';
+  const readColor = !b.color
+    ? 'vec3<f32>(0.55, 0.78, 0.95)'
+    : packedColor ? 'unpack4x8unorm(b_col[i]).rgb' : loadVec('b_col', b.color.width, 3);
   const readSize = b.size ? 'b_siz[i * SIZEW + 0u]'.replace('SIZEW', `${b.size.width}u`) : '1.0';
   const readOpacity = b.opacity ? `b_opa[i * ${b.opacity.width}u + 0u]` : '1.0';
   const maskTest = b.mask
     ? `if (b_msk[i * ${b.mask.width}u + 0u] < 0.5) { out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0); return out; }`
     : '';
 
-  return `
-struct View {
-  viewProj: mat4x4<f32>,
-  eye: vec4<f32>,
-  viewport: vec4<f32>,
-};
+  // A `hilo` position is `width` high halves then `width` low halves per row.
+  const hilo = b.position.format === 'hilo';
+  const pw = b.position.width;
+  const half = (offset: number) => `vec3<f32>(${[0, 1, 2].map((c) => (c < pw ? `b_pos[i * ${pw * 2}u + ${offset + c}u]` : '0.0')).join(', ')})`;
+  const readHi = hilo ? half(0) : loadVec('b_pos', pw, 3);
+  const readLo = hilo ? half(pw) : 'vec3<f32>(0.0)';
+
+  return `${VIEW_STRUCT_WGSL}
 @group(0) @binding(0) var<uniform> view: View;
 // x: size scale, y: global opacity, z: min radius px, w: max radius px
 @group(0) @binding(1) var<uniform> style: vec4<f32>;
@@ -112,7 +143,8 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut
 
   ${maskTest}
 
-  let p = ${loadVec('b_pos', b.position.width, 3)};
+  let p = ${readHi};
+  let pLo = ${readLo};
   // Arrow nulls arrive as NaN. Push those instances behind the camera rather than
   // letting the rasterizer see undefined geometry.
   if (p.x != p.x || p.y != p.y || p.z != p.z) {
@@ -123,7 +155,7 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut
   out.color = ${readColor};
   out.alpha = clamp(${readOpacity} * style.y, 0.0, 1.0);
 
-  let center = view.viewProj * vec4<f32>(p, 1.0);
+  let center = projectRte(p, pLo);
   if (center.w <= 0.0) {
     out.clip = vec4<f32>(0.0, 0.0, -2.0, 1.0);
     return out;
@@ -134,6 +166,8 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut
   out.clip = vec4<f32>(center.xy + offset, center.zw);
   return out;
 }
+
+${PROJECT_RTE_WGSL}
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {

@@ -30,6 +30,13 @@ export interface ColumnUpload {
   data?: Float32Array;
   /** Per-chunk views in row order, for the 'chunked' tier. */
   chunks?: Float32Array[];
+  /**
+   * The same values as `data` in the `hilo` layout (planner `packing.ts`): per row, the f32
+   * high halves then the low halves. Present when a vector was read with `hiLo`, which is how
+   * a DOUBLE position keeps its precision on the GPU. `data` stays the f32 view, so the CPU
+   * consumers that read it are unaffected.
+   */
+  hiLo?: Float32Array;
   chunkCount: number;
   /** Rows that were null in Arrow and are NaN on the GPU. */
   nullCount: number;
@@ -143,7 +150,12 @@ export function readColumn(table: Table, name: string): ColumnUpload {
  * kernel that produces the same vec3 writes it packed in the first place. Worth knowing
  * before deciding to push position math into SQL.
  */
-export function readVectorColumns(table: Table, names: string[]): ColumnUpload {
+export function readVectorColumns(
+  table: Table,
+  names: string[],
+  options: { hiLo?: boolean } = {},
+): ColumnUpload {
+  if (options.hiLo) return readVectorHiLo(table, names);
   if (names.length === 1) return readColumn(table, names[0]);
   const started = performance.now();
   const parts = names.map((n) => readColumn(table, n));
@@ -172,6 +184,62 @@ export function readVectorColumns(table: Table, names: string[]): ColumnUpload {
     nullCount: parts.reduce((s, p) => s + p.nullCount, 0),
     convertMs: performance.now() - started,
     arrowType: `interleaved(${parts.map((p) => p.arrowType).join(', ')})`,
+    rows,
+  };
+}
+
+/**
+ * `readVectorColumns` with the high/low split, in the same single pass over each column.
+ *
+ * Reads the native values rather than going through `readColumn`, which would narrow to f32
+ * first and throw the low half away before it could be kept.
+ */
+function readVectorHiLo(table: Table, names: string[]): ColumnUpload {
+  const started = performance.now();
+  const rows = table.numRows;
+  const width = names.length;
+  const data = new Float32Array(rows * width);
+  const hiLo = new Float32Array(rows * width * 2);
+  let nullCount = 0;
+  let chunkCount = 0;
+  const types: string[] = [];
+
+  for (let c = 0; c < width; c++) {
+    const vector = table.getChild(names[c]) as Vector | null;
+    if (!vector) throw new Error(`Column '${names[c]}' not present in query result`);
+    types.push(String(vector.type));
+    if (NON_NUMERIC.test(String(vector.type))) {
+      throw new Error(`Column '${names[c]}' is ${String(vector.type)}, which has no numeric form`);
+    }
+    chunkCount = Math.max(chunkCount, vector.data.length);
+    let row = 0;
+    for (const chunk of vector.data) {
+      const values = chunk.values as ArrayLike<number> | BigInt64Array | BigUint64Array;
+      const big = values instanceof BigInt64Array || values instanceof BigUint64Array;
+      // Gate on the null count, not the bitmap's existence; see `readColumn`.
+      const bitmap = chunk.nullCount > 0 && chunk.nullBitmap && chunk.nullBitmap.length > 0
+        ? chunk.nullBitmap
+        : undefined;
+      for (let i = 0; i < chunk.length; i++, row++) {
+        let v: number;
+        if (bitmap && !bitSet(bitmap, chunk.offset + i)) { v = NaN; nullCount++; }
+        else v = big ? Number((values as BigInt64Array)[chunk.offset + i]) : (values as ArrayLike<number>)[chunk.offset + i];
+        const hi = Math.fround(v);
+        data[row * width + c] = hi;
+        hiLo[row * width * 2 + c] = hi;
+        hiLo[row * width * 2 + width + c] = v - hi;
+      }
+    }
+  }
+
+  return {
+    tier: 'cast',
+    data,
+    hiLo,
+    chunkCount,
+    nullCount,
+    convertMs: performance.now() - started,
+    arrowType: `hilo(${types.join(', ')})`,
     rows,
   };
 }
@@ -219,6 +287,32 @@ export function runStarts(ids: ArrayLike<unknown>, keep?: ArrayLike<number>): Ui
     if (id !== prev) {
       starts.push(j);
       prev = id;
+    }
+  }
+  return Uint32Array.from(starts);
+}
+
+/**
+ * Ring starts for polygon layers: a new run wherever the polygon id or the ring id changes,
+ * over the rows that `keep` retains. Without ring ids every polygon is one ring and this is
+ * `runStarts(pathIds)`.
+ */
+export function ringStarts(
+  pathIds: ArrayLike<unknown>,
+  ringIds: ArrayLike<unknown> | undefined,
+  keep?: ArrayLike<number>,
+): Uint32Array {
+  if (!ringIds) return runStarts(pathIds, keep);
+  const n = keep ? keep.length : pathIds.length;
+  const starts: number[] = [];
+  let prevPath: unknown = Symbol('none');
+  let prevRing: unknown = Symbol('none');
+  for (let j = 0; j < n; j++) {
+    const i = keep ? keep[j] : j;
+    if (pathIds[i] !== prevPath || ringIds[i] !== prevRing) {
+      starts.push(j);
+      prevPath = pathIds[i];
+      prevRing = ringIds[i];
     }
   }
   return Uint32Array.from(starts);

@@ -258,6 +258,12 @@ export interface LayerNode {
   props?: Record<string, LayerPropValue>;
   /** Vertex layers: the column grouping rows into paths. Read raw, never cast. */
   pathId?: string;
+  /**
+   * Polygon layers: the column splitting a polygon's vertices into rings. Rows sort by it after
+   * `pathId`; the first ring is the outer boundary and the rest are holes. Read raw. Without
+   * it every polygon is a single ring.
+   */
+  ringId?: string;
   /** Row order of the output. Vertex layers need it; others may use it for draw order. */
   orderBy?: string[];
 }

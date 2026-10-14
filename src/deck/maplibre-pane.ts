@@ -16,7 +16,7 @@
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import { ScatterplotLayer } from '@deck.gl/layers';
 
-import { evaluateStage, toUint8Color, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
+import { evaluateStage, toUint8Color, joinHiLo, type PhysicalPlan, type ColumnUpload } from '@noodles.gl/planner';
 import type { DeckMetrics } from './webgl2-pane.js';
 
 /**
@@ -110,9 +110,20 @@ export class DeckMaplibrePane {
     const keep = mask ? keptRows(mask.data, mask.width, rows) : undefined;
     const n = keep ? keep.length : rows;
 
+    // A position SQL computed as DOUBLE arrives with its low half (`hilo`, planner
+    // `packing.ts`). Recombined it is a Float64Array, which deck's WebGL2 path splits into its
+    // own fp64 attribute, so the precision reaches the map instead of stopping at f32. Only
+    // when no CPU or GPU stage rewrote the position; their arithmetic is f32 already.
+    const posName = plan.channels.position;
+    const rewritten = [...plan.cpuStage, ...plan.gpuStage]
+      .some((st) => st.name === posName || st.raw?.writes.some((w) => w.name === posName));
+    const hiLo = !rewritten && plan.attributes.find((a) => a.name === posName)?.format === 'hilo'
+      ? sources.get(posName)?.hiLo
+      : undefined;
+    const posData = hiLo ? joinHiLo(hiLo, pos.width, rows) : pos.data;
     const positions = this.coordinates === 'normalized-mercator'
-      ? inverseMercator(pos.data, pos.width, rows, keep)
-      : pick(widen(pos.data, pos.width, rows), 3, keep);
+      ? inverseMercator(posData, pos.width, rows, keep)
+      : pick(widen(posData, pos.width, rows), 3, keep);
     const colors = colorSrc
       ? pick(toUint8Color(colorSrc.data, colorSrc.width, rows), 4, keep)
       : undefined;
@@ -169,7 +180,7 @@ function keptRows(mask: Float32Array, width: number, rows: number): Uint32Array 
   return out.subarray(0, n);
 }
 
-function pick<T extends Float32Array | Uint8Array>(src: T, width: number, keep?: Uint32Array): T {
+function pick<T extends Float32Array | Float64Array | Uint8Array>(src: T, width: number, keep?: Uint32Array): T {
   if (!keep) return src;
   const out = new (src.constructor as new (n: number) => T)(keep.length * width);
   for (let j = 0; j < keep.length; j++) {
@@ -179,9 +190,9 @@ function pick<T extends Float32Array | Uint8Array>(src: T, width: number, keep?:
   return out;
 }
 
-function widen(src: Float32Array, width: number, rows: number): Float32Array {
+function widen<T extends Float32Array | Float64Array>(src: T, width: number, rows: number): T {
   if (width === 3) return src;
-  const out = new Float32Array(rows * 3);
+  const out = new (src.constructor as new (n: number) => T)(rows * 3);
   for (let i = 0; i < rows; i++) {
     for (let c = 0; c < 3; c++) out[i * 3 + c] = c < width ? src[i * width + c] : 0;
   }
@@ -189,9 +200,11 @@ function widen(src: Float32Array, width: number, rows: number): Float32Array {
 }
 
 /** The inverse of `project`'s normalized Web Mercator (see `desugar` in the planner). */
-function inverseMercator(src: Float32Array, width: number, rows: number, keep?: Uint32Array): Float32Array {
+function inverseMercator<T extends Float32Array | Float64Array>(
+  src: T, width: number, rows: number, keep?: Uint32Array,
+): T {
   const n = keep ? keep.length : rows;
-  const out = new Float32Array(n * 3);
+  const out = new (src.constructor as new (n: number) => T)(n * 3);
   for (let j = 0; j < n; j++) {
     const i = keep ? keep[j] : j;
     out[j * 3] = src[i * width] * 360;

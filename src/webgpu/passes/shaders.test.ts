@@ -88,6 +88,12 @@ describe('attribute width handling', () => {
     expect(code).toContain('vec3<f32>(b_col[i])');
   });
 
+  it('binds a packed RGBA8 colour as u32 and unpacks it', () => {
+    const code = pointsShader(bindings({ color: { ...attribute('Cd', 3), format: 'rgba8' } }));
+    expect(code).toMatch(/var<storage, read> b_col: array<u32>/);
+    expect(code).toContain('unpack4x8unorm(b_col[i]).rgb');
+  });
+
   it('reads only the first component of size and opacity', () => {
     const code = pointsShader(bindings({ size: attribute('pscale', 1), opacity: attribute('Alpha', 1) }));
     expect(code).toContain('b_siz[i * 1u + 0u]');

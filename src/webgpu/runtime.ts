@@ -14,7 +14,7 @@
 import type { Gpu } from './device.js';
 
 import { AttributeSet } from './attributes.js';
-import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, withCompaction, evaluateStage, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
+import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, withCompaction, evaluateStage, rowBytes, type AttributeDecl, type AttributeFormat, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
 import { Kernel } from './compute.js';
 import { OrbitCamera, VIEW_UNIFORM_SIZE } from './camera.js';
 import { PointsPass } from './passes/points.js';
@@ -50,6 +50,7 @@ export interface AttributeReport {
   chunks?: number;
   bytes: number;
   internal?: boolean;
+  format?: AttributeFormat;
 }
 
 export interface BuildResult {
@@ -65,6 +66,14 @@ export interface BuildResult {
   statsCatalogMs: number;
   /** Raw uint32/int columns like __rowid, for picking tests. */
   raw?: Map<string, unknown[]>;
+}
+
+/** An arrow-sourced attribute's column(s), split hi/lo when its format asks for it. */
+function readAttribute(table: Parameters<typeof readColumn>[0], decl: AttributeDecl): ColumnUpload {
+  if (decl.sourceColumns && decl.sourceColumns.length > 1) {
+    return readVectorColumns(table, decl.sourceColumns, { hiLo: decl.format === 'hilo' });
+  }
+  return readColumn(table, decl.sourceColumns?.[0] ?? decl.name);
 }
 
 /** Does a stage node's expression reference this parameter? */
@@ -336,21 +345,19 @@ export class Runtime {
     const reports: AttributeReport[] = [];
     for (const decl of plan.attributes) {
       if (decl.provenance === 'arrow') {
-        const upload = decl.sourceColumns && decl.sourceColumns.length > 1
-          ? readVectorColumns(table, decl.sourceColumns)
-          : readColumn(table, decl.sourceColumns?.[0] ?? decl.name);
-        this.attributes.write(decl.name, decl.width, this.rows, upload);
+        const upload = readAttribute(table, decl);
+        this.attributes.write(decl.name, decl.width, this.rows, upload, decl.format);
         this.sourceUploads.set(decl.name, upload);
         reports.push({
           name: decl.name, width: decl.width, provenance: 'arrow', tier: upload.tier,
           arrowType: upload.arrowType, nullCount: upload.nullCount, chunks: upload.chunkCount,
-          bytes: this.rows * decl.width * 4,
+          bytes: this.rows * rowBytes(decl), format: decl.format,
         });
       } else {
-        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived');
+        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived', decl.format);
         reports.push({
           name: decl.name, width: decl.width, provenance: decl.provenance,
-          bytes: this.rows * decl.width * 4, internal: decl.internal,
+          bytes: this.rows * rowBytes(decl), internal: decl.internal, format: decl.format,
         });
       }
     }
@@ -511,6 +518,7 @@ export class Runtime {
     for (const [name, { data, width }] of evaluated.values) {
       const decl = plan.attributes.find((a) => a.name === name);
       if (decl?.provenance !== 'cpu') continue;
+      // A `hilo` position from the CPU stage gets a zero low half (`AttributeSet.write`).
       this.attributes.write(name, width, this.rows, {
         tier: 'cast',
         data,
@@ -519,7 +527,7 @@ export class Runtime {
         convertMs: 0,
         arrowType: 'cpu stage',
         rows: this.rows,
-      });
+      }, decl.format);
     }
     return performance.now() - started;
   }
@@ -646,13 +654,11 @@ export class Runtime {
     this.rows = table.numRows;
     for (const decl of plan.attributes) {
       if (decl.provenance !== 'arrow') {
-        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived');
+        this.attributes.ensure(decl.name, decl.width, this.rows, 'derived', decl.format);
         continue;
       }
-      const upload = decl.sourceColumns && decl.sourceColumns.length > 1
-        ? readVectorColumns(table, decl.sourceColumns)
-        : readColumn(table, decl.sourceColumns?.[0] ?? decl.name);
-      this.attributes.write(decl.name, decl.width, this.rows, upload);
+      const upload = readAttribute(table, decl);
+      this.attributes.write(decl.name, decl.width, this.rows, upload, decl.format);
       this.sourceUploads.set(decl.name, upload);
     }
     // A requery changes the row count, so anything the CPU stage produced is now the wrong

@@ -2,8 +2,9 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { initGpu, type Gpu } from '../../src/webgpu/device.js';
 import { Runtime } from '../../src/webgpu/runtime.js';
 import { DeckWebgpuPane } from '../../src/deck/webgpu-pane.js';
+import { DeckMaplibrePane, type MapLike } from '../../src/deck/maplibre-pane.js';
 import { readColumn, evaluateStage, relationSource, sqlSource, targetCaps, type Graph } from '@noodles.gl/planner';
-import { duck, readBuffer, readBufferU32, expectNoGpuError } from './harness.js';
+import { duck, readBufferU32, expectNoGpuError } from './harness.js';
 
 /**
  * The pipeline end to end on real engines: DuckDB produces Arrow, the upload path lands it on
@@ -89,11 +90,16 @@ async function settle(from: Runtime = rt): Promise<void> {
   await gpu.device.queue.onSubmittedWorkDone();
 }
 
-/** Read an attribute buffer back as a plain array. */
+/** Read an attribute back as plain f32 components, unpacking a packed color. */
 async function attribute(name: string, from: Runtime = rt): Promise<number[]> {
-  const attr = from.attributes.get(name);
-  return [...(await readBuffer(gpu.device, attr.buffer, attr.rows * attr.width))];
+  return [...(await from.attributes.read(name))];
 }
+
+/**
+ * A kernel-written color is stored as RGBA8 (planner `packing.ts`), so it reads back
+ * quantized: within half a step of the f32 value, plus float noise.
+ */
+const RGBA8 = 1 / 255;
 
 function closeTo(actual: number[], expected: number[], label: string, tolerance = 2e-3): void {
   expect(actual, `${label} length`).toHaveLength(expected.length);
@@ -301,7 +307,7 @@ describe('placement does not change the picture', () => {
     for (const policy of ['auto', 'sql-first'] as const) {
       closeTo(results[policy].P, results['cost'].P, `${policy} vs cost P`);
       closeTo(results[policy].pscale, results['cost'].pscale, `${policy} vs cost pscale`);
-      closeTo(results[policy].Cd, results['cost'].Cd, `${policy} vs cost Cd`);
+      closeTo(results[policy].Cd, results['cost'].Cd, `${policy} vs cost Cd`, RGBA8);
     }
   });
 
@@ -348,6 +354,10 @@ describe('placement does not change the picture', () => {
     await settle(withGpu);
     const gpuP = await attribute('P', withGpu);
     const gpuCd = await attribute('Cd', withGpu);
+    // The kernel's color is one packed u32 a row, a third of three f32 components.
+    const packed = withGpu.attributes.get('Cd');
+    expect(packed.format).toBe('rgba8');
+    expect(packed.buffer.size).toBe(Math.ceil(packed.capacityRows * 4 / 4) * 4);
     withGpu.destroy();
 
     const noCompute = await newRuntime();
@@ -359,7 +369,7 @@ describe('placement does not change the picture', () => {
     // No kernel to dispatch, but a frame keeps the two paths symmetric.
     await settle(noCompute);
     closeTo(await attribute('P', noCompute), gpuP, 'cpu vs gpu P');
-    closeTo(await attribute('Cd', noCompute), gpuCd, 'cpu vs gpu Cd');
+    closeTo(await attribute('Cd', noCompute), gpuCd, 'cpu vs gpu Cd', RGBA8);
     noCompute.destroy();
   });
 });
@@ -534,11 +544,12 @@ describe('custom logic runs on the real engines', () => {
     );
     const elevation = (table.toArray() as { elevation: number }[]).map((r) => Number(r.elevation));
     // Row order is the query's, and the kernel wrote in that order.
+    // Packed RGBA8 saturates at 1, as deck's Uint8 colors do, so red clamps.
     const expected = elevation.flatMap((e) => {
       const t = e / 900;
-      return [t * 3, t, 1 - t];
+      return [Math.min(1, t * 3), t, 1 - t];
     });
-    closeTo(cd.slice(0, expected.length), expected, 'raw wgsl Cd');
+    closeTo(cd.slice(0, expected.length), expected, 'raw wgsl Cd', RGBA8);
   });
 
   it('a raw wgsl node still fuses into one dispatch', async () => {
@@ -764,6 +775,30 @@ describe('source providers', () => {
     expect(deckDevice.features.has('subgroups')).toBe(gpu.device.features.has('subgroups'));
     canvas.remove();
   });
+
+  it('deck draws the kernel’s buffers: hilo positions and packed RGBA8 color', async () => {
+    // FINDINGS §5a's two layout blockers, removed from our side. deck 9.4 derives `unorm8x3`
+    // for a 3-component f32 color (not a WebGPU vertex format) and wants fp64 positions at a
+    // 24-byte stride. The kernel now writes color as one RGBA8 u32 a row (`unorm8x4`), and on
+    // the deck-webgpu target it writes position as `[hi.xyz, lo.xyz]`, deck's fp64 layout.
+    const local = await newRuntime();
+    local.setTarget('deck-webgpu');
+    // gpu-first so P is a kernel write too: the pane uploads source columns and binds
+    // kernel outputs, and has no route for a CPU-stage attribute.
+    const built = await local.build(scatter(), 'gpu-first');
+    expect(built.plan.attributes.find((a) => a.name === 'Cd')?.format).toBe('rgba8');
+    expect(built.plan.attributes.find((a) => a.name === 'P')?.format).toBe('hilo');
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = 64;
+    document.body.appendChild(canvas);
+    const pane = new DeckWebgpuPane(canvas);
+    await pane.update(built.plan, local.sourceUploads, local.params(), built.rows);
+    expect(pane.status, pane.status.detail).toMatchObject({ compute: 'ok', render: 'ok' });
+    expect(pane.status.sharedBuffers).toEqual(expect.arrayContaining(['P', 'Cd', 'pscale']));
+    pane.destroy();
+    canvas.remove();
+    local.destroy();
+  });
 });
 
 function concat(chunks: Float32Array[]): Float32Array {
@@ -773,3 +808,44 @@ function concat(chunks: Float32Array[]): Float32Array {
   for (const c of chunks) { out.set(c, at); at += c.length; }
   return out;
 }
+
+describe('hilo positions on the real pipeline', () => {
+  it('a SQL-computed position uploads as hi/lo and draws without a validation error', async () => {
+    const local = await newRuntime();
+    const built = await local.build(scatter(), 'sql-first');
+    const P = local.attributes.get('P');
+    expect(P.format).toBe('hilo');
+    expect(P.buffer.size).toBeGreaterThanOrEqual(built.rows * 24);
+    await expectNoGpuError(gpu.device, async () => {
+      local.frame();
+    });
+    // The halves recombine to what DuckDB computed in DOUBLE, past f32.
+    const { table } = await (await duck()).run(built.plan.sql, built.plan.sqlParams.map((p) => local.params()[p]));
+    const x = (table.getChild('P_0')!.toArray() as Float64Array);
+    const got = await local.attributes.read('P');
+    let worst = 0;
+    for (let i = 0; i < 64; i++) worst = Math.max(worst, Math.abs(got[i * 3] - x[i]));
+    expect(worst).toBeLessThan(1e-12);
+    local.destroy();
+  });
+
+  it('the map pane hands deck f64 positions when SQL produced them', async () => {
+    // No basemap: the pane only needs somewhere to add its overlay.
+    const map: MapLike = { addControl() {}, removeControl() {} };
+    const bytes = async (policy: 'sql-first' | 'gpu-first') => {
+      const local = await newRuntime();
+      const built = await local.build(scatter(), policy);
+      const pane = new DeckMaplibrePane(map, { coordinates: 'normalized-mercator' });
+      pane.update(built.plan, local.sourceUploads, local.params(), built.rows);
+      const m = pane.metrics();
+      pane.destroy();
+      local.destroy();
+      return { m, rows: built.rows };
+    };
+    // Positions are three components a row: 24 bytes as Float64Array, 12 as Float32Array.
+    const sql = await bytes('sql-first');
+    const gpuFirst = await bytes('gpu-first');
+    const others = (r: { m: { bytes: number; rows: number } }, perRow: number) => r.m.bytes - r.m.rows * perRow;
+    expect(others(sql, 24)).toBe(others(gpuFirst, 12));
+  });
+});

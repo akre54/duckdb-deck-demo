@@ -112,12 +112,17 @@ columns into luma Buffers, runs the plan's kernel through luma's compute pipelin
 the output buffers as `data.attributes.getPosition = { buffer }`. No CPU work is done per
 attribute.
 
-The draw fails in deck 9.4 for three reasons. [FINDINGS.md](../FINDINGS.md) §5a has the
+The draw failed in deck 9.4 for three reasons. Points 1 and 2 are now handled by the
+buffer layouts the planner chooses for this target, and deck draws the kernel's buffers. [FINDINGS.md](../FINDINGS.md) §5a has the
 details:
 
 1. `ScatterplotLayer` expects fp64-encoded positions (a 24-byte stride). WGSL has no f64, and
-   `type: 'float32'` on the binary attribute does not override the layer.
-2. A 3-component color becomes `unorm8x3`, which is not a valid WebGPU vertex format.
+   `type: 'float32'` on the binary attribute does not override the layer. On the deck-webgpu
+   target the kernel now writes that layout itself, `[hi.xyz, lo.xyz]` per row, and deck
+   binds it as-is (FINDINGS §15c).
+2. A 3-component color becomes `unorm8x3`, which is not a valid WebGPU vertex format. A
+   kernel-written color avoids this: it is packed RGBA8, which binds as `unorm8x4`
+   (FINDINGS §15a).
 3. `luma.attachDevice()` is not implemented in luma 9.4, so deck cannot share an app-owned
    device. The limits half is solved: `featureLevel: 'max'` makes luma's own device request
    every adapter limit. `attach()` and a `requiredLimits` prop landed in luma 10

@@ -43,6 +43,13 @@ export interface TargetCaps {
    * turns it on — see `withCompaction`.
    */
   compaction: boolean;
+  /**
+   * The renderer reads positions as hi/lo f32 pairs, a 24-byte stride for a vec3. deck's
+   * `ScatterplotLayer` declares `getPosition` as float64, and on WebGPU deck emulates that as
+   * `[hi.xyz, lo.xyz]` per row; a float32x3 buffer is rejected as half the size. With this set,
+   * every producer of the position channel writes that layout (`positionFormat`).
+   */
+  fp64Positions: boolean;
   /** Shown in the EXPLAIN pane when a capability, not a cost, forced a placement. */
   note: string;
 }
@@ -88,6 +95,7 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
         gpuBudgetBytes: budget,
         maxStorageBuffersPerStage: storageBuffers,
         compaction: false,
+        fp64Positions: false,
         note: 'compute + app-owned buffers',
       };
     case 'deck-webgpu':
@@ -104,6 +112,7 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
         // that device (no `attach()`), so the two are separate devices on the same adapter.
         maxStorageBuffersPerStage: storageBuffers,
         compaction: false,
+        fp64Positions: true,
         note: 'luma webgpuAdapter: compute + app-owned buffers, device created at the adapter’s limits',
       };
     case 'deck-webgl2':
@@ -115,6 +124,8 @@ export function targetCaps(id: TargetId, device: DeviceLimits | undefined): Targ
         gpuBudgetBytes: budget,
         maxStorageBuffersPerStage: storageBuffers,
         compaction: false,
+        // deck on WebGL2 has real 64-bit attributes and splits a Float64Array itself.
+        fp64Positions: false,
         note: 'no compute shaders on WebGL2, so the GPU stage is unavailable',
       };
   }

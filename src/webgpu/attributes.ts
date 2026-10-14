@@ -8,13 +8,17 @@
  * rather than a re-upload.
  */
 
-import type { ColumnUpload } from '@noodles.gl/planner';
+import {
+  rowBytes, unpackRgba8, splitHiLo, joinHiLo, materialize, type AttributeFormat, type ColumnUpload,
+} from '@noodles.gl/planner';
 import { gpuData } from './gpu-compat.js';
 
 export interface GpuAttribute {
   name: string;
-  /** Components per row: 1 = f32, 3 = vec3<f32>, etc. */
+  /** Components per row: 1 = f32, 3 = vec3<f32>, etc. Logical, whatever the storage format. */
   width: number;
+  /** Absent for f32 components. `rgba8` is one packed u32 per row; see planner `packing.ts`. */
+  format?: AttributeFormat;
   buffer: GPUBuffer;
   /** Rows the buffer can hold; >= the current row count. */
   capacityRows: number;
@@ -44,6 +48,9 @@ export class AttributeSet {
     bytesUploaded: 0,
     /** CPU milliseconds spent in Arrow->Float32 conversion this build. */
     convertMs: 0,
+    /** GPU-to-GPU copies that carried old rows into a grown buffer, and their bytes. */
+    gpuCopies: 0,
+    bytesCopied: 0,
   };
 
   constructor(private readonly device: GPUDevice) {}
@@ -55,6 +62,8 @@ export class AttributeSet {
     this.counters.writeCalls = 0;
     this.counters.bytesUploaded = 0;
     this.counters.convertMs = 0;
+    this.counters.gpuCopies = 0;
+    this.counters.bytesCopied = 0;
   }
 
   list(): GpuAttribute[] {
@@ -75,9 +84,11 @@ export class AttributeSet {
    * Get or allocate an attribute buffer. Reuses the existing buffer when the width
    * matches and capacity is sufficient — the case that keeps parameter tweaks cheap.
    */
-  ensure(name: string, width: number, rows: number, provenance: 'arrow' | 'derived'): GpuAttribute {
+  ensure(
+    name: string, width: number, rows: number, provenance: 'arrow' | 'derived', format?: AttributeFormat,
+  ): GpuAttribute {
     const existing = this.map.get(name);
-    if (existing && existing.width === width && existing.capacityRows >= rows) {
+    if (existing && existing.width === width && existing.format === format && existing.capacityRows >= rows) {
       existing.rows = rows;
       existing.provenance = provenance;
       return existing;
@@ -86,7 +97,7 @@ export class AttributeSet {
 
     // Round up so small row-count changes do not thrash allocations.
     const capacityRows = Math.max(1, Math.ceil(rows * 1.25));
-    const size = align4(capacityRows * width * 4);
+    const size = align4(capacityRows * rowBytes({ width, format }));
     const buffer = this.device.createBuffer({
       label: `attr:${name}`,
       size,
@@ -95,6 +106,7 @@ export class AttributeSet {
     this.counters.allocations++;
     const attr: GpuAttribute = {
       name, width, buffer, capacityRows, rows, provenance,
+      ...(format ? { format } : {}),
       generation: this.nextGeneration++,
     };
     this.map.set(name, attr);
@@ -119,15 +131,72 @@ export class AttributeSet {
    * Upload a column. For the 'chunked' tier this issues one writeBuffer per Arrow
    * record batch, letting the GPU copy engine do the concatenation instead of JS.
    */
-  write(name: string, width: number, rows: number, upload: ColumnUpload): GpuAttribute {
-    const attr = this.ensure(name, width, rows, 'arrow');
-    const needed = rows * width;
+  write(name: string, width: number, rows: number, upload: ColumnUpload, format?: AttributeFormat): GpuAttribute {
+    if (format === 'rgba8') throw new Error(`Attribute '${name}': rgba8 is written by a kernel, not uploaded`);
+    const attr = this.ensure(name, width, rows, 'arrow', format);
+    this.upload(attr, 0, rows, format === 'hilo' ? hiLoUpload(upload, width, rows) : upload);
+    attr.upload = upload;
+    return attr;
+  }
+
+  /**
+   * Write rows `fromRow .. fromRow + upload.rows` and leave the rows before them alone: an
+   * append, when `fromRow` is the current row count. Only the new rows cross the bus.
+   *
+   * CesiumJS's buffer primitives upload only a dirty range for the same reason. The cases
+   * here are narrower, because a requery replaces a whole column; this is for a source that
+   * only ever adds rows. Within capacity it is one writeBuffer per chunk. Past capacity the
+   * buffer is reallocated and the old rows are copied GPU to GPU, so they are still not
+   * re-uploaded, and `generation` changes so bind groups rebuild.
+   */
+  writeRows(name: string, width: number, fromRow: number, upload: ColumnUpload): GpuAttribute {
+    const existing = this.map.get(name);
+    if (!existing) {
+      if (fromRow !== 0) throw new Error(`Attribute '${name}': cannot write from row ${fromRow} of an attribute that does not exist`);
+      return this.write(name, width, upload.rows, upload);
+    }
+    if (existing.width !== width || existing.format) {
+      throw new Error(`Attribute '${name}': a row write must match the existing f32 width ${existing.width}`);
+    }
+    if (fromRow > existing.rows) {
+      throw new Error(`Attribute '${name}': row ${fromRow} would leave a gap after row ${existing.rows}`);
+    }
+    const rows = fromRow + upload.rows;
+    let attr = existing;
+    if (rows > existing.capacityRows) {
+      const old = existing.buffer;
+      const keepBytes = fromRow * rowBytes(existing);
+      // Detach first so `ensure` allocates rather than destroying the rows we still need.
+      this.map.delete(name);
+      attr = this.ensure(name, width, rows, 'arrow');
+      if (keepBytes > 0) {
+        const encoder = this.device.createCommandEncoder({ label: `grow:${name}` });
+        encoder.copyBufferToBuffer(old, 0, attr.buffer, 0, keepBytes);
+        this.device.queue.submit([encoder.finish()]);
+        this.counters.gpuCopies++;
+        this.counters.bytesCopied += keepBytes;
+      }
+      // Safe after submit: the copy already queued still completes.
+      old.destroy();
+    }
+    attr.rows = rows;
+    this.upload(attr, fromRow, upload.rows, upload);
+    return attr;
+  }
+
+  /** writeBuffer `rows` rows of `upload` into `attr` starting at `fromRow`. */
+  private upload(attr: GpuAttribute, fromRow: number, rows: number, upload: ColumnUpload): void {
+    const { name } = attr;
+    // f32 elements a row: the component count, or twice it for `hilo`.
+    const perRow = rowBytes(attr) / 4;
+    const needed = rows * perRow;
+    const base = fromRow * perRow * 4;
 
     if (upload.chunks) {
       let element = 0;
       for (const chunk of upload.chunks) {
         if (element + chunk.length > needed) break;
-        this.device.queue.writeBuffer(attr.buffer, element * 4, gpuData(chunk), 0, chunk.length);
+        this.device.queue.writeBuffer(attr.buffer, base + element * 4, gpuData(chunk), 0, chunk.length);
         this.counters.writeCalls++;
         element += chunk.length;
       }
@@ -139,15 +208,35 @@ export class AttributeSet {
       if (data.length < needed) {
         throw new Error(`Attribute '${name}': got ${data.length} values, need ${needed}`);
       }
-      this.device.queue.writeBuffer(attr.buffer, 0, gpuData(data), 0, needed);
+      this.device.queue.writeBuffer(attr.buffer, base, gpuData(data), 0, needed);
       this.counters.writeCalls++;
     }
 
-    attr.upload = upload;
     this.counters.uploads++;
     this.counters.bytesUploaded += needed * 4;
     this.counters.convertMs += upload.convertMs;
-    return attr;
+  }
+
+  /**
+   * Copy an attribute back as f32 components, unpacking a packed format. A diagnostic for
+   * tests and the inspector: it waits for the GPU, and nothing on the draw path calls it.
+   */
+  async read(name: string): Promise<Float32Array | Float64Array> {
+    const attr = this.get(name);
+    const bytes = align4(Math.max(4, attr.rows * rowBytes(attr)));
+    const staging = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder({ label: `read:${name}` });
+    encoder.copyBufferToBuffer(attr.buffer, 0, staging, 0, bytes);
+    this.device.queue.submit([encoder.finish()]);
+    await staging.mapAsync(GPUMapMode.READ);
+    // Copy out before unmapping: the mapped range is invalidated by unmap.
+    const copy = staging.getMappedRange().slice(0);
+    staging.unmap();
+    staging.destroy();
+    if (attr.format === 'rgba8') return unpackRgba8(new Uint32Array(copy), attr.width, attr.rows);
+    // Doubles, so the low half is visible: hi + lo summed in f32 would round it away.
+    if (attr.format === 'hilo') return joinHiLo(new Float32Array(copy), attr.width, attr.rows);
+    return new Float32Array(copy, 0, attr.rows * attr.width);
   }
 
   /** Drop attributes not present in `keep`, freeing their buffers. */
@@ -164,6 +253,15 @@ export class AttributeSet {
     for (const a of this.map.values()) a.buffer.destroy();
     this.map.clear();
   }
+}
+
+/**
+ * An upload in the `hilo` layout. A vector read with `hiLo` already has it; anything else (a
+ * CPU-stage result, a single-precision column) is f32, so its low half is zero.
+ */
+function hiLoUpload(upload: ColumnUpload, width: number, rows: number): ColumnUpload {
+  const data = upload.hiLo ?? splitHiLo(materialize(upload), width, rows);
+  return { ...upload, chunks: undefined, data };
 }
 
 export function align4(n: number): number {

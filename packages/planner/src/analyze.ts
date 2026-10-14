@@ -95,6 +95,8 @@ export interface LayerAnalysis {
   kind: LayerKind;
   bindings: LayerBinding[];
   pathId?: string;
+  /** Polygon layers: the column splitting each polygon into rings. */
+  ringId?: string;
   orderBy: string[];
   props: Record<string, LayerPropValue>;
   /** Parameters read by props. They route as `prop`: deck applies them, the plan never sees them. */
@@ -502,6 +504,10 @@ function resolveLayer(layer: LayerNode, conv: AttributeConventions, widths: Sche
   if (spec.vertices && !layer.pathId) {
     throw new PlanError(`Layer ${layer.id}: '${layer.kind}' draws paths, so it needs 'pathId'`);
   }
+  if (layer.ringId && !spec.rings) {
+    throw new PlanError(`Layer ${layer.id}: '${layer.kind}' has no rings, so 'ringId' does not apply`);
+  }
+  const ringId = spec.rings ? layer.ringId : undefined;
   const props = { ...(layer.props ?? {}) };
   const readParams = [...new Set(Object.values(props).flatMap(propParams))];
   return {
@@ -509,9 +515,12 @@ function resolveLayer(layer: LayerNode, conv: AttributeConventions, widths: Sche
     kind: layer.kind,
     bindings,
     pathId: layer.pathId,
-    // Vertex order within a path is the whole point of a path, so the id always leads.
+    ringId,
+    // Vertex order within a path is the whole point of a path, so the id always leads; a
+    // polygon's ring id comes next, so each ring's vertices are contiguous.
     orderBy: spec.vertices
-      ? [layer.pathId!, ...(layer.orderBy ?? []).filter((c) => c !== layer.pathId)]
+      ? [layer.pathId!, ...(ringId ? [ringId] : []),
+        ...(layer.orderBy ?? []).filter((c) => c !== layer.pathId && c !== ringId)]
       : [...(layer.orderBy ?? [])],
     props,
     propParams: readParams,
@@ -536,6 +545,7 @@ export function externalAttributes(analysis: Analysis): Set<string> {
   if (analysis.layer) {
     for (const b of analysis.layer.bindings) out.add(b.attribute);
     if (analysis.layer.pathId) out.add(analysis.layer.pathId);
+    if (analysis.layer.ringId) out.add(analysis.layer.ringId);
     for (const c of analysis.layer.orderBy) out.add(c);
   }
   // Row ID column must survive all transformations

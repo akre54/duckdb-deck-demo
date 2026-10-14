@@ -134,6 +134,10 @@ Point 3 turned into a useful demonstration rather than a blocker: the optimizer 
 
 *Update (2026-10-04):* the limits half of point 3 is fixed on 9.4. `featureLevel: 'max'` makes luma request every adapter limit (§12a), the pane now passes it, and `targetCaps('deck-webgpu')` reads the device's limit, so the filter stays in the kernel on a 10-buffer adapter. `attach()` is still missing in 9.4 (§14).
 
+*Update, 2026-10-14:* points 1 and 2 are solved on our side for the deck-webgpu target: the
+kernel writes color as packed RGBA8 (`unorm8x4`) and position in deck's fp64 hi/lo layout, and
+deck 9.4 draws them (§15c).
+
 **Revised recommendation.** The seam is real and the compute path works today, but the last inch — deck drawing a kernel-written buffer — needs three small fixes in deck/luma, not an architectural change. Those are the concrete asks: accept `float32` positions on a `BinaryAttribute`, emit `unorm8x4` instead of `unorm8x3`, and expose `requiredLimits` (or implement `attach()`) on the WebGPU adapter.
 
 *Update, 2026-10-08:* `requiredLimits` ([luma.gl#3312](https://github.com/visgl/luma.gl/pull/3312))
@@ -649,6 +653,114 @@ release; `v10.0.0-alpha.3` (2026-10-04) is the only release carrying any of it.
 luma's GPU compute modules stay in luma (slide 24 of the 2026-10-08 OpenVis deck asks whether
 they should move out of vis.gl). How the WGSL committee reads the polyfill data point.
 
+## 15. Ideas taken from CesiumJS's buffer primitives
+
+CesiumJS 1.140 (2026-04) added experimental `BufferPointCollection`, `BufferPolylineCollection`
+and `BufferPolygonCollection` ([CesiumGS/cesium#13156](https://github.com/CesiumGS/cesium/issues/13156)):
+fixed-capacity typed-array storage, flyweight accessors, offset+count geometry in shared
+arrays, and dirty-range uploads. Most of it matches what this repo already does (named
+attributes separate from renderers, a discard mask before compaction, `generation` counters
+rather than shared clean flags). Four ideas were worth taking. Each part below is measured
+by a test, not argued.
+
+### 15a. Color as packed RGBA8
+
+Cesium stores color as one RGBA8 `u32`. A kernel-written color channel now does the same:
+`emit` declares it `format: 'rgba8'`, the kernel writes `pack4x8unorm`, and the points shader
+unpacks it. One function, `packedColorName`, decides which attribute packs, and both the
+optimizer's byte estimate and `emit` call it; a test holds the two at the same number.
+
+- `Cd` drops from 12 to 4 bytes a row: 60 MB to 20 MB at 5M rows.
+- Only a color the kernel writes packs. One from SQL or the CPU stage stays f32, because
+  packing it would cost the JS pass this exists to avoid.
+- Color now saturates at [0, 1] on the GPU path, as deck's Uint8 colors already did.
+- §5a point 2 no longer applies to this repo's buffers. Four bytes a row is `unorm8x4`, deck's
+  own layout, so the deck WebGPU pane binds the kernel's color. The draw then failed only on
+  point 1, the position stride.
+
+### 15b. Uploading only appended rows
+
+Cesium uploads only the dirty range of a collection. Here a requery replaces whole columns,
+so a dirty range would buy nothing on the paths that exist. It pays off only for a source
+that adds rows, so the piece built is the storage half: `AttributeSet.writeRows(name, width,
+fromRow, upload)`.
+
+- Within capacity it writes only the new rows. 200 rows appended to 1000 upload 2.4 KB, and
+  the buffer and its `generation` stay the same.
+- Past capacity it reallocates and copies the old rows GPU to GPU (`copyBufferToBuffer`), so
+  they still do not cross the bus. `generation` changes, so bind groups rebuild.
+- A gap or a width change throws. No source streams yet; a provider that appends is the
+  missing half.
+
+### 15c. Positions as hi/lo halves, drawn relative to eye
+
+Cesium splits each double position into two floats (`EncodedCartesian3`) and subtracts the
+camera from each half before projecting. The position channel now has that format,
+`hilo`: per row `[hi.xyz, lo.xyz]`, 24 bytes for a vec3. `positionFormat` decides when it
+applies, and the optimizer and `emit` both call it.
+
+- **SQL-computed position: real precision.** It is selected as DOUBLE, not FLOAT, and split
+  during the interleave pass SQL vectors already needed. `ColumnUpload.data` stays the f32
+  view, so CPU consumers read exactly what they did before.
+- **Kernel-written position.** It stays f32 on `webgpu-native`. On `deck-webgpu`
+  (`TargetCaps.fp64Positions`) the kernel writes the `hilo` layout with a zero low half: no
+  precision gained, but it is deck's fp64 attribute layout byte for byte.
+- **Points shader.** It projects relative to the eye. `OrbitCamera.pack` adds a second matrix
+  built from `eye - target` (small numbers only) and the target's own hi/lo halves.
+- **Measured** (`precision.browser.test.ts`, which runs the shader's own `projectRte`): points
+  2e-8 apart near x = 0.31, viewed from 1e-6 away, sit 12.9 px apart. Hi/lo positions land
+  within 0.00002 px of an f64 reference. The same points as f32 are off by up to 9.6 px.
+- **MapLibre pane.** When SQL produced the position, the pane recombines the halves into a
+  Float64Array, so deck's WebGL2 path does its own fp64 split.
+
+The result that matters most: **§5a's two layout blockers are now removed from our side.**
+On the deck-webgpu target, deck 9.4's WebGPU `ScatterplotLayer` draws a kernel-written
+position, color and radius with no WebGPU validation error and no readback (browser test "deck draws
+the kernel's buffers"). The test checks for errors across two frames; the inspector's side
+by side view shows the same points, colored, in both panes. The upstream fixes (deck.gl#10776, #10753) are still the right ones for other
+producers, but this repo no longer waits on them.
+
+Costs and limits:
+
+- `P` from SQL is 24 bytes a row instead of 12. The optimizer prices that, so on a tight
+  budget it pushes position math out of SQL.
+- Kernel arithmetic stays f32. A kernel reading a `hilo` position sums the halves, so
+  precision survives only when SQL computes the position and no later stage rewrites it.
+- The orbit camera clamps its distance at 0.02, where f32 error is below a pixel. The
+  precision matters at deep zoom (a test camera, or a map), not at the demo's own framing.
+- A layer output keeps f32 positions, because its consumers evaluate on the CPU.
+
+### 15d. Polygon layers in Cesium's layout
+
+`BufferPolygonCollection` stores each polygon as an offset and count into one shared vertex
+array, holes as the vertex where each inner ring starts, and a triangle index range the
+caller fills (with earcut). The row model already had the first part for paths, so a polygon
+is one more grouping:
+
+- **Planner.** The `polygon` layer kind is a vertex layer with `ringId` beside `pathId`, both
+  read raw. Rows sort by polygon, then ring, then vertex. The first ring is the outline and
+  the rest are holes.
+- **Program runtime.** `evaluateLayer` returns `starts` (one per polygon) and `rings` (one per
+  ring) from the same run-length pass paths use (`ringStarts`).
+- **Deck adapter.** It triangulates with earcut (`src/deck/triangulate.ts`) and gives
+  `SolidPolygonLayer` binary `startIndices`, `indices` and `_normalize: false`, so deck does
+  no tessellation of its own. Triangulation runs once per evaluated `LayerData` (the pane's
+  identity cache), and its time is reported. An optional outline is a `PathLayer` of closed
+  loops over the same vertex array, cut at ring starts instead of polygon starts.
+- **Tested end to end.** Real DuckDB returns rows out of order and the plan's ORDER BY fixes
+  them. The triangulated area of a 4x4 square with a 2x2 hole plus a triangle is 14. Pixels
+  read back from deck show the ring filled and the hole empty. The editor example
+  (`hexes.json`) draws hexagon cells with holes where a cell's value is high.
+
+Limits:
+
+- Flat only. Extruded side walls would need deck's per-vertex ring breaks (`vertexValid`),
+  which its binary path derives only when it tessellates itself.
+- Earcut runs in lng/lat, where deck would project to mercator first. That is invisible for
+  polygons small next to the earth's curvature.
+- A filter is per row, so one that keeps some of a polygon's vertices leaves a partial
+  polygon. Filter on a per-polygon value, as the example does.
+
 ## Recommended order of work for noodles
 
 Ranked by payoff per unit of risk. The first three are independent of any renderer decision.
@@ -678,6 +790,6 @@ Stated plainly, because the numbers above are easy to over-read.
 - **Cardinality estimation assumes uniformity and independence.** The 0.5% accuracy above is a property of uniformly-generated synthetic data, not of the estimator. Skewed or correlated columns are where it will be wrong, and the explain pane exists to show that rather than hide it.
 - The cost model does not model: DuckDB's own parallelism or its choice of scan strategy, GPU occupancy or cache behavior, overdraw (a render term proportional to instances ignores that zoomed-out points overlap), or the possibility that a plan changes what is *visible* rather than only what it costs.
 - Change rates are declared in the graph, not measured from real interaction. A planner that watched actual slider traffic would need no `changeRate` field.
-- Strings are SQL-only (no string functions in the op table yet). No picking, no transitions, no polygon marks. The MapLibre basemap (`src/deck/maplibre-pane.ts`) uses the WebGL2 attribute path only, so it has no GPU stage; the orbit view's geo is still a hand-rolled mercator.
+- Strings are SQL-only (no string functions in the op table yet). No picking, no transitions. Polygons are flat only. The MapLibre basemap (`src/deck/maplibre-pane.ts`) uses the WebGL2 attribute path only, so it has no GPU stage; the orbit view's geo is still a hand-rolled mercator.
 - Heatmap weights are quantized to 1/256 and accumulated as `u32`, because WebGPU has no float atomics. Weights below ~0.004 contribute nothing.
 - Single machine, single GPU, synthetic data. The 5M-row case allocates 206 MB of attribute buffers, which needed an explicit `maxStorageBufferBindingSize` request.

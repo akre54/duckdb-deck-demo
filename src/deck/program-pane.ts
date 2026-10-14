@@ -4,7 +4,9 @@
  * One factory per layer kind, each fed deck's binary-attribute fast path: typed arrays the
  * program runtime produced, never a per-row accessor inside deck. Vertex layers (path, trips)
  * use deck's binary path format — flat vertex arrays plus `startIndices` — which is exactly
- * the row model the planner emits: one row per vertex, ordered by path id.
+ * the row model the planner emits: one row per vertex, ordered by path id. A polygon layer is
+ * the same with a ring id: `SolidPolygonLayer` gets the vertex array, polygon starts and the
+ * triangle indices computed here (`triangulate`), so deck does no tessellation of its own.
  *
  * The one thing this module is careful about is identity. A layer's binary `data` object is
  * built once per `LayerData` and reused, so when only a prop changes — the trips layer's
@@ -15,12 +17,13 @@
 
 import { MapboxOverlay } from '@deck.gl/mapbox';
 import type { Layer } from '@deck.gl/core';
-import { ScatterplotLayer, ArcLayer, PathLayer, ColumnLayer, TextLayer } from '@deck.gl/layers';
+import { ScatterplotLayer, ArcLayer, PathLayer, ColumnLayer, TextLayer, SolidPolygonLayer } from '@deck.gl/layers';
 import { TripsLayer } from '@deck.gl/geo-layers';
 
 import { toUint8Color, type LayerKind, type ResolvedProp } from '@noodles.gl/planner';
 import type { LayerData } from '../program/execute.js';
 import type { MapLike } from './maplibre-pane.js';
+import { triangulate } from './triangulate.js';
 
 export interface ProgramLayerInput {
   id: string;
@@ -37,14 +40,28 @@ export interface ProgramPaneMetrics {
   /** Binary data objects built on the last render; 0 when only props changed. */
   rebuilt: number;
   buildMs: number;
+  /** Polygon triangles across the layers rebuilt on the last render, and earcut's time. */
+  triangles: number;
+  triangulateMs: number;
 }
 
-type Binary = { length: number; startIndices?: Uint32Array; attributes: Record<string, unknown>; texts?: { position: number[]; text: string }[] };
+type Binary = {
+  length: number;
+  startIndices?: Uint32Array;
+  attributes: Record<string, unknown>;
+  texts?: { position: number[]; text: string }[];
+  /** Polygon layers: ring outlines as closed paths over the same vertex array. */
+  outline?: { length: number; startIndices: Uint32Array; attributes: Record<string, unknown> };
+  triangles?: number;
+  triangulateMs?: number;
+};
 
 export class DeckProgramPane {
   private readonly overlay: MapboxOverlay;
   private readonly built = new WeakMap<LayerData, Binary>();
-  private metricsValue: ProgramPaneMetrics = { layers: 0, instances: 0, rebuilt: 0, buildMs: 0 };
+  private metricsValue: ProgramPaneMetrics = {
+    layers: 0, instances: 0, rebuilt: 0, buildMs: 0, triangles: 0, triangulateMs: 0,
+  };
 
   constructor(private readonly map: MapLike) {
     this.overlay = new MapboxOverlay({ interleaved: false, layers: [] });
@@ -59,6 +76,8 @@ export class DeckProgramPane {
     const started = performance.now();
     let rebuilt = 0;
     let instances = 0;
+    let triangles = 0;
+    let triangulateMs = 0;
     const layers: Layer[] = [];
     for (const input of inputs) {
       if (!input.data || input.data.rows === 0) continue;
@@ -67,13 +86,16 @@ export class DeckProgramPane {
         binary = toBinary(input);
         this.built.set(input.data, binary);
         rebuilt++;
+        triangles += binary.triangles ?? 0;
+        triangulateMs += binary.triangulateMs ?? 0;
       }
       instances += input.data.rows;
-      const layer = buildLayer(input, binary);
-      if (layer) layers.push(layer);
+      layers.push(...buildLayers(input, binary));
     }
     this.overlay.setProps({ layers });
-    this.metricsValue = { layers: layers.length, instances, rebuilt, buildMs: performance.now() - started };
+    this.metricsValue = {
+      layers: layers.length, instances, rebuilt, buildMs: performance.now() - started, triangles, triangulateMs,
+    };
   }
 
   destroy(): void {
@@ -144,6 +166,24 @@ function toBinary(input: ProgramLayerInput): Binary {
       else put('getTimestamps', scalar('timestamp'), 1);
       return { length: starts.length, startIndices: starts, attributes: at };
     }
+    case 'polygon': {
+      const starts = d.starts ?? new Uint32Array([0]);
+      const rings = d.rings ?? starts;
+      const p = pos('position');
+      put('getPolygon', p, 3);
+      put('getFillColor', colors(attr(input, 'color'), n), 4, true);
+      const tri = p ? triangulate(p, 3, n, starts, rings) : undefined;
+      if (tri) at.indices = tri.indices;
+      return {
+        length: starts.length,
+        startIndices: starts,
+        attributes: at,
+        // The same vertex array, cut at every ring instead of every polygon.
+        outline: p ? { length: rings.length, startIndices: rings, attributes: { getPath: { value: p, size: 3 } } } : undefined,
+        triangles: tri ? tri.indices.length / 3 : 0,
+        triangulateMs: tri?.ms ?? 0,
+      };
+    }
     case 'text': {
       // Text has no binary path worth taking at label counts: deck lays out glyphs per string
       // on the CPU regardless. Capped, because thousands of labels are unreadable anyway.
@@ -168,6 +208,40 @@ const rgb = (v: ResolvedProp | undefined, fallback: [number, number, number]): [
   if (Array.isArray(v) && v.length >= 3) return [num(v[0], fallback[0]), num(v[1], fallback[1]), num(v[2], fallback[2]), 255];
   return [...fallback, 255];
 };
+
+/**
+ * The deck layers for one program layer, built fresh: what the pane draws, without the pane's
+ * identity cache or a map. Exported so a test can render them on a bare `Deck`.
+ */
+export function programLayers(input: ProgramLayerInput): Layer[] {
+  return buildLayers(input, toBinary(input));
+}
+
+/** A layer kind's deck layers: one, or for a stroked polygon a fill and its ring outlines. */
+function buildLayers(input: ProgramLayerInput, binary: Binary): Layer[] {
+  if (input.kind !== 'polygon') {
+    const layer = buildLayer(input, binary);
+    return layer ? [layer] : [];
+  }
+  const p = input.props;
+  const fill = buildLayer(input, binary);
+  const layers = fill ? [fill] : [];
+  if (p.stroked === true && binary.outline) {
+    layers.push(new PathLayer({
+      id: `${input.id}:outline`,
+      opacity: num(p.opacity, 1),
+      pickable: false,
+      data: binary.outline as never,
+      _pathType: 'loop',
+      widthUnits: 'pixels',
+      widthMinPixels: num(p.lineWidthMinPixels, 1),
+      getWidth: 1,
+      getColor: rgb(p.lineColor, [255, 255, 255]),
+      updateTriggers: { getColor: String(p.lineColor) },
+    } as never));
+  }
+  return layers;
+}
 
 function buildLayer(input: ProgramLayerInput, binary: Binary): Layer | undefined {
   const p = input.props;
@@ -240,6 +314,17 @@ function buildLayer(input: ProgramLayerInput, binary: Binary): Layer | undefined
         jointRounded: true,
         capRounded: true,
         ...constant('getColor', rgb(p.color, [253, 128, 93])),
+      } as never);
+    case 'polygon':
+      return new SolidPolygonLayer({
+        ...common,
+        data: binary as never,
+        // The rows are already rings in order and `indices` is the triangulation, so deck must
+        // neither re-wind nor re-tessellate them.
+        _normalize: false,
+        filled: true,
+        extruded: false,
+        ...constant('getFillColor', rgb(p.fillColor, [80, 160, 220])),
       } as never);
     case 'text':
       return new TextLayer({

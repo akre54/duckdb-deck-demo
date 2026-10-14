@@ -4,6 +4,8 @@ import {
   type Graph, type ProgramPlan, type LayerPlan, type CompileOptions,
 } from '@noodles.gl/planner';
 import { MaterializingCatalog } from '../src/program/catalog.js';
+import { queryLayer, evaluateLayer } from '../src/program/execute.js';
+import { triangulate } from '../src/deck/triangulate.js';
 import { openNodeDuck, type NodeDuck } from './duckdb-node.js';
 
 /**
@@ -276,6 +278,69 @@ describe('generate and cross join: interpolating arcs', () => {
     expect(p.routes.steps.map((r) => r.route).sort()).toEqual(['rematerialize', 'requery']);
     const rows = await layerRows(p, 'trail');
     expect(rows.map((r) => [Number(r.P_0), Number(r.P_1), Number(r.t)])).toEqual([[0, 0, 100], [5, 10, 150], [10, 20, 200]]);
+  });
+});
+
+describe('polygons: rows are vertices, grouped into polygons and rings', () => {
+  // A 4x4 square with a 2x2 hole, and a triangle. Inserted out of order, so the ORDER BY the
+  // planner emits is what makes each ring contiguous and each polygon's outline come first.
+  const polygons: Graph = {
+    nodes: [
+      {
+        id: 'raw', type: 'sql',
+        query: `SELECT * FROM (VALUES
+          (2, 0, 2, 11.0, 2.0), (1, 1, 0, 1.0, 1.0), (1, 0, 0, 0.0, 0.0), (1, 0, 1, 4.0, 0.0),
+          (1, 1, 1, 1.0, 3.0), (2, 0, 0, 10.0, 0.0), (1, 0, 2, 4.0, 4.0), (1, 1, 2, 3.0, 3.0),
+          (1, 0, 3, 0.0, 4.0), (2, 0, 1, 12.0, 0.0), (1, 1, 3, 3.0, 1.0)) AS t(poly, ring, k, lng, lat)`,
+      },
+      { id: 'pos', type: 'project', input: 'raw', mode: 'identity', x: 'lng', y: 'lat' },
+      { id: 'shapes', type: 'layer', kind: 'polygon', input: 'pos', pathId: 'poly', ringId: 'ring', orderBy: ['k'] },
+      { id: 'deck', type: 'deck', inputs: ['shapes'] },
+    ],
+  };
+
+  it('orders by polygon, then ring, then vertex, and reads the ids raw', async () => {
+    const program = await compileProgram(polygons, new MaterializingCatalog(duck), { caps });
+    expect(program.errors).toEqual([]);
+    const lp = layer(program, 'shapes');
+    expect(lp.plan.sql).toMatch(/ORDER BY "poly", "ring", "k"$/);
+    expect(lp.plan.attributes.find((a) => a.name === 'ring')).toMatchObject({ type: 'raw' });
+  });
+
+  it('starts, rings and triangles describe the shapes exactly', async () => {
+    const program = await compileProgram(polygons, new MaterializingCatalog(duck), { caps });
+    const lp = layer(program, 'shapes');
+    const data = evaluateLayer(lp, await queryLayer(duck, lp, {}), {});
+    expect([...data.starts!]).toEqual([0, 8]);
+    expect([...data.rings!]).toEqual([0, 4, 8]);
+
+    const P = data.attributes.get('P')!;
+    const tri = triangulate(P.data, P.width, data.rows, data.starts!, data.rings!);
+    expect(tri.skipped).toBe(0);
+    // Area is the check that the hole is a hole: 16 - 4 for the square, 2 for the triangle.
+    let area = 0;
+    for (let t = 0; t < tri.indices.length; t += 3) {
+      const [a, b, c] = [0, 1, 2].map((k) => tri.indices[t + k] * P.width);
+      area += Math.abs((P.data[b] - P.data[a]) * (P.data[c + 1] - P.data[a + 1]) - (P.data[c] - P.data[a]) * (P.data[b + 1] - P.data[a + 1])) / 2;
+    }
+    expect(area).toBeCloseTo(14, 6);
+    // Every triangle stays inside its own polygon's rows.
+    for (let t = 0; t < tri.indices.length; t += 3) {
+      const owners = new Set([0, 1, 2].map((k) => (tri.indices[t + k] < 8 ? 1 : 2)));
+      expect(owners.size).toBe(1);
+    }
+  });
+
+  it('a ringId on a layer without rings is an error on that node', async () => {
+    const bad: Graph = {
+      nodes: [
+        polygons.nodes[0], polygons.nodes[1],
+        { id: 'lines', type: 'layer', kind: 'path', input: 'pos', pathId: 'poly', ringId: 'ring' },
+      ],
+    };
+    const program = await compileProgram(bad, new MaterializingCatalog(duck), { caps });
+    expect(program.errors[0]).toMatchObject({ nodeId: 'lines' });
+    expect(program.errors[0].message).toMatch(/no rings/);
   });
 });
 
