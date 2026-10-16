@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { desugar, buildRampLut, statExpr, statParamName, RAMP_STOPS, type Graph, type RampName } from './types.js';
-import { parseExpr, columnsOf, paramsOf } from './expr.js';
+import { parseExpr, columnsOf, paramsOf, simplifyExpr } from './expr.js';
+import { inlineFunctions } from './functions.js';
 import { toJs } from './backends/js.js';
 
 /**
@@ -24,7 +25,9 @@ function evalNode(
   const out = desugar(g(nodes));
   const node = out.nodes.find((n) => n.id === nodeId);
   if (!node || node.type !== 'attribute') throw new Error(`no attribute node ${nodeId}`);
-  const expr = typeof node.expr === 'string' ? parseExpr(node.expr) : node.expr;
+  // Resolved as `analyze` resolves it: sugar may call the geo prelude (`project` does).
+  const parsed = typeof node.expr === 'string' ? parseExpr(node.expr, { functions: out.functions }) : node.expr;
+  const expr = simplifyExpr(inlineFunctions(parsed, out.functions));
   const emitted = toJs(expr, (name) => ({ width: 1, component: () => `c.${name}` }));
   const rampAt = (t: number, ch: number) => Math.min(Math.max(t, 0), 1) * (ch + 1);
   const fn = new Function('c', 'p', 'rampAt', `return [${emitted.components.join(',')}];`) as (

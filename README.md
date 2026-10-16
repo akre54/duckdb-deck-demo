@@ -27,8 +27,8 @@ suggested next changes and open research.
 ```bash
 npm install
 npm run dev        # the inspector at /, the node editor at /editor/, the GPU graph at /graph/
-npm test           # 753 node tests, including real DuckDB through duckdb-wasm's Node build
-npm run test:gpu   # 93 browser tests, real WebGPU + real DuckDB
+npm test           # node tests, including real DuckDB through duckdb-wasm's Node build
+npm run test:gpu   # browser tests, real WebGPU + real DuckDB
 ```
 
 You need Chrome or Edge 113+, or Safari 26+. [FINDINGS.md](FINDINGS.md) has the measured
@@ -419,7 +419,7 @@ src/luma/           LumaFilter, LumaGroupBy, lumaCompactor over luma.gl's GPU Da
                     describeCommandGraph, a command graph as a graph-view description
 src/program/        ProgramRuntime, the memo catalog, per-layer query and CPU stage
 src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, and the program pane
-docs/               how the planner integrates with deck.gl and luma.gl
+docs/               how the planner integrates with deck.gl and luma.gl; the geometry tier
 demo/               the inspector app: main.ts, ui/, graphs/, data/ (not published)
 demo/editor/        the node editor: React Flow network, parameter pane, timeline, examples
 demo/graph/         the GPU command graph viewer over live luma.gl queries
@@ -438,8 +438,8 @@ fails to compile instead of becoming a dependency a consumer has to install.
 ## Tests
 
 ```bash
-npm test          # 680 tests, node
-npm run test:gpu  # 66 tests, Chromium, real WebGPU + real DuckDB
+npm test          # node tests
+npm run test:gpu  # browser tests, Chromium, real WebGPU + real DuckDB
 npm run bench     # throughput, reported not asserted
 ```
 
