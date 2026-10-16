@@ -14,7 +14,8 @@ import '@xyflow/react/dist/style.css';
 ```
 
 The main entry has no dependencies and no DOM, so a producer can build and validate a
-description without React. `./react` needs `react` and `@xyflow/react` (optional peers).
+description without React. `./react` needs `react` and `@xyflow/react`, and `./layouts` needs
+`@dagrejs/dagre` and `d3-force`; all four are optional peers.
 
 ## The description
 
@@ -74,9 +75,16 @@ can't make them readable.
 - **Density:** `density="compact"` draws a pass as a one-line name (cut from the front, since
   pass names share long prefixes and differ at the end), one metric and the heat bar, and a
   resource as a one-line pill, at about a third of the regular card's area. For phones.
-- **Wrap:** `wrap` lays a graph too wide to read when fitted onto rows, like text: the columns
-  fill a row as wide as the viewer at a readable zoom, then continue on the next. An edge into the
-  next row is routed in steps around the row's end. `layoutGraph` takes the same `wrapWidth`.
+- **Layouts:** `layout` picks how nodes are placed.
+  - `layered` (the default) is `layoutGraph`'s columns.
+  - `wrap` is the same columns wrapped onto rows, like text, when the graph is too wide to read
+    fitted. The columns fill a row as wide as the viewer at a readable zoom, then continue on the
+    next, and an edge into the next row is routed in steps around the row's end.
+  - Any `LayoutFunction` (`(description, options) => GraphLayout`, the signature of
+    `layoutGraph`). `@noodles.gl/graph-view/layouts` has two: `dagreLayout` (dagre's layered
+    layout, which minimizes crossings; needs `@dagrejs/dagre`) and `forceLayout` (d3-force pulled
+    left to right by layer, with straight edges; needs `d3-force`). They live in their own entry
+    so neither dependency reaches an app that does not use them. After noodles.gl PR #268.
 - **Previews:** `preview(node)` returns a `NodePreview` (a table of values, RGBA pixels, or
   text), asked for on hover and kept open on tap. It is plain data, so a producer reads its own
   resources and the viewer only draws them. `@noodles.gl/gpu-runtime/luma`'s

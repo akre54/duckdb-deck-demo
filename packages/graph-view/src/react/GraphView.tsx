@@ -5,7 +5,7 @@ import {
 } from '@xyflow/react';
 import type { GraphDescription, GraphEdge, GraphNode } from '../schema.js';
 import type { NodePreview } from '../preview.js';
-import { layoutGraph, type NodeSize } from '../layout.js';
+import { layoutGraph, type LayoutFunction, type NodeSize } from '../layout.js';
 import { collapseData } from '../collapse.js';
 import { formatMetric } from '../format.js';
 import { EdgeTip, Legend, Popup, PreviewView } from './Popup.js';
@@ -30,10 +30,13 @@ export interface GraphViewProps {
    */
   density?: 'regular' | 'compact';
   /**
-   * Wrap a graph too wide to read when fitted onto rows, like text, so a long pass chain continues
-   * on the next row instead of off the right edge. Rows are as wide as the viewer at a readable zoom.
+   * How nodes are placed. `layered` (the default) is `layoutGraph`'s columns. `wrap` is the same
+   * columns wrapped onto rows, like text, when the graph is too wide to read fitted, so a long pass
+   * chain continues on the next row; rows are as wide as the viewer at a readable zoom. Or any
+   * `LayoutFunction`, such as `dagreLayout` or `forceLayout` from `@noodles.gl/graph-view/layouts`,
+   * which this entry does not import so it adds no dependency.
    */
-  wrap?: boolean;
+  layout?: 'layered' | 'wrap' | LayoutFunction;
   /**
    * Read a node's contents when it is hovered (or tapped): a buffer's values, a texture's image.
    * Asked again on every hover, since GPU contents change between frames.
@@ -93,7 +96,7 @@ type Tip = { x: number; y: number; key: string; content: ReactNode };
 export function GraphView(props: GraphViewProps) {
   const {
     description, collapse = false, kindColors = DEFAULT_KIND_COLORS, metricKeys, heatMetric = 'gpu',
-    density = 'regular', wrap = false, preview, selected, onSelect, className, style,
+    density = 'regular', layout: arrange = 'layered', preview, selected, onSelect, className, style,
   } = props;
   const sizes = DENSITY[density];
   const sizeOf = (n: GraphNode) => (n.role === 'data' ? sizes.data : sizes.work);
@@ -104,9 +107,11 @@ export function GraphView(props: GraphViewProps) {
   // Wrap only a graph that would not fit at a readable zoom, at the width that zoom leaves.
   const gaps = density === 'compact' ? { columnGap: 40, rowGap: 12 } : {};
   const room = width ? (width - 2 * PAD) / sizes.minZoom : 0;
-  const structure = `${density}:${structureKey(shown)}`;
-  const flat = useMemo(() => layoutGraph(shown, { size: sizeOf, ...gaps }), [structure]);
-  const wrapWidth = wrap && room && flat.width > room ? Math.round(room / 40) * 40 : undefined;
+  const place: LayoutFunction = typeof arrange === 'function' ? arrange : layoutGraph;
+  const arrangement = typeof arrange === 'function' ? `fn${layoutId(arrange)}` : arrange;
+  const structure = `${density}:${arrangement}:${structureKey(shown)}`;
+  const flat = useMemo(() => place(shown, { size: sizeOf, ...gaps }), [structure, place]);
+  const wrapWidth = arrange === 'wrap' && room && flat.width > room ? Math.round(room / 40) * 40 : undefined;
   const layout = useMemo(
     () => (wrapWidth ? layoutGraph(shown, { size: sizeOf, ...gaps, wrapWidth }) : flat),
     [structure, wrapWidth, flat],
@@ -191,7 +196,7 @@ export function GraphView(props: GraphViewProps) {
       id,
       source: e.from,
       target: e.to,
-      type: wrapped ? 'smoothstep' : 'default',
+      type: layout.edgeShape === 'straight' ? 'straight' : wrapped ? 'smoothstep' : 'default',
       interactionWidth: 14,
       // On a compact card the labels (resource names, often several) outweigh the cards.
       label: density === 'compact' ? undefined : e.label,
@@ -241,6 +246,17 @@ export function GraphView(props: GraphViewProps) {
       {tip && bounds && <Popup x={tip.x} y={tip.y} bounds={bounds}>{tip.content}</Popup>}
     </div>
   );
+}
+
+/**
+ * A number per layout function, for the remount key. Not its name: a production build renames
+ * functions, and two layouts with the same short name would not reframe when switched.
+ */
+const layoutIds = new WeakMap<LayoutFunction, number>();
+let layoutCount = 0;
+function layoutId(fn: LayoutFunction): number {
+  if (!layoutIds.has(fn)) layoutIds.set(fn, ++layoutCount);
+  return layoutIds.get(fn)!;
 }
 
 /** In on the left edge's middle, out on the right's, matching the cards' hidden `Handle`s. */

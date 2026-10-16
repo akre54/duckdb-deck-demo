@@ -13,6 +13,6 @@ export {
 } from './schema.js';
 export { type NodePreview } from './preview.js';
 export { validateGraph } from './validate.js';
-export { layoutGraph, type LayoutOptions, type GraphLayout, type NodeSize } from './layout.js';
+export { layoutGraph, type LayoutOptions, type LayoutFunction, type GraphLayout, type NodeSize } from './layout.js';
 export { collapseData } from './collapse.js';
 export { formatMetric } from './format.js';

@@ -62,8 +62,9 @@ const PLANNER_FILES = walk(`${PLANNER}/src`).filter(notTest);
 const PLANNER_LIB = PLANNER_FILES.filter((f) => f !== `${PLANNER}/src/fixtures.ts`);
 /** The graph viewer package: a headless entry, and React components under `react/`. */
 const GRAPH_VIEW_FILES = walk(`${GRAPH_VIEW}/src`, /\.tsx?$/).filter(notTest);
-const GRAPH_VIEW_HEADLESS = GRAPH_VIEW_FILES.filter((f) => !f.startsWith(`${GRAPH_VIEW}/src/react/`));
 const GRAPH_VIEW_REACT = GRAPH_VIEW_FILES.filter((f) => f.startsWith(`${GRAPH_VIEW}/src/react/`));
+const GRAPH_VIEW_LAYOUTS = GRAPH_VIEW_FILES.filter((f) => f.startsWith(`${GRAPH_VIEW}/src/layouts/`));
+const GRAPH_VIEW_HEADLESS = GRAPH_VIEW_FILES.filter((f) => !GRAPH_VIEW_REACT.includes(f) && !GRAPH_VIEW_LAYOUTS.includes(f));
 
 /** The package a bare specifier names: `@scope/name` or `name`. */
 const packageOf = (specifier: string) =>
@@ -185,14 +186,18 @@ describe('the graph viewer package stands alone', () => {
     expect(GRAPH_VIEW_REACT.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('no relative import escapes the package, and the headless entry never reaches into react/', () => {
+  it('no relative import escapes the package, and the headless entry never reaches into react/ or layouts/', () => {
     const violations: string[] = [];
     for (const file of GRAPH_VIEW_FILES) {
       for (const specifier of importsOf(file)) {
         const target = resolveLocal(file, specifier);
         if (!target) continue;
         if (!target.startsWith(`${GRAPH_VIEW}/src/`)) violations.push(`${file} -> ${specifier}`);
-        if (GRAPH_VIEW_HEADLESS.includes(file) && target.startsWith(`${GRAPH_VIEW}/src/react/`)) {
+        if (GRAPH_VIEW_HEADLESS.includes(file) && (target.startsWith(`${GRAPH_VIEW}/src/react/`) || target.startsWith(`${GRAPH_VIEW}/src/layouts/`))) {
+          violations.push(`${file} -> ${specifier}`);
+        }
+        // The viewer takes a layout function; it must not import one and so pull in its dependency.
+        if (GRAPH_VIEW_REACT.includes(file) && target.startsWith(`${GRAPH_VIEW}/src/layouts/`)) {
           violations.push(`${file} -> ${specifier}`);
         }
       }
@@ -210,6 +215,18 @@ describe('the graph viewer package stands alone', () => {
         .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
       if (/\b(?:document|window|HTMLElement|React)\b/.test(code)) violations.push(`${file}: DOM or React`);
     }
+    expect(violations).toEqual([]);
+  });
+
+  it('the layouts entry imports only dagre and d3-force', () => {
+    const allowed = new Set(['@dagrejs/dagre', 'd3-force']);
+    const violations: string[] = [];
+    for (const file of GRAPH_VIEW_LAYOUTS) {
+      for (const specifier of importsOf(file)) {
+        if (!specifier.startsWith('.') && !allowed.has(packageOf(specifier))) violations.push(`${file} -> ${specifier}`);
+      }
+    }
+    expect(GRAPH_VIEW_LAYOUTS.length).toBeGreaterThanOrEqual(3);
     expect(violations).toEqual([]);
   });
 
@@ -351,6 +368,7 @@ describe('entry points', () => {
       [LIB_FILES, 'src/luma', 'src/luma/index.ts'],
       [GRAPH_VIEW_HEADLESS, `${GRAPH_VIEW}/src`, `${GRAPH_VIEW}/src/index.ts`],
       [GRAPH_VIEW_REACT, `${GRAPH_VIEW}/src/react`, `${GRAPH_VIEW}/src/react/index.ts`],
+      [GRAPH_VIEW_LAYOUTS, `${GRAPH_VIEW}/src/layouts`, `${GRAPH_VIEW}/src/layouts/index.ts`],
     ] as const) {
       const barrelSource = readFileSync(join(ROOT, barrel), 'utf8');
       const modules = files.filter(

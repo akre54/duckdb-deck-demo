@@ -20,6 +20,7 @@ import { GPUCommandGraphInspector } from '@luma.gl/gpgpu/gpu-core';
 import { parseExpr } from '@noodles.gl/planner';
 import { formatMetric, type GraphDescription } from '@noodles.gl/graph-view';
 import { GraphView, NodeDetails } from '@noodles.gl/graph-view/react';
+import { dagreLayout, forceLayout } from '@noodles.gl/graph-view/layouts';
 import type { CompiledGPUCommandGraph } from '@luma.gl/gpgpu/gpu-core';
 import { LumaFilter, LumaGroupBy, describeCommandGraph, previewCommandGraphResource } from '../../src/luma/index.js';
 import { DensityGraph } from './density.js';
@@ -110,7 +111,7 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
   const narrow = useNarrow();
   const [collapse, setCollapse] = useState(narrow);
   const [compact, setCompact] = useState(narrow);
-  const [wrap, setWrap] = useState(true);
+  const [arrange, setArrange] = useState<keyof typeof LAYOUTS>('wrap');
   const [tab, setTab] = useState<'node' | 'json'>('node');
   const [selected, setSelected] = useState<string>();
   const [description, setDescription] = useState<GraphDescription>();
@@ -153,7 +154,11 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
         <label>cut <input type="range" min={0} max={1} step={0.01} value={cut} onChange={(e) => setCut(Number(e.target.value))} /> {cut.toFixed(2)}</label>
         <label><input type="checkbox" checked={collapse} onChange={(e) => setCollapse(e.target.checked)} /> passes only</label>
         <label><input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} /> compact</label>
-        <label><input type="checkbox" checked={wrap} onChange={(e) => setWrap(e.target.checked)} /> wrap</label>
+        <label>layout{' '}
+          <select value={arrange} onChange={(e) => setArrange(e.target.value as keyof typeof LAYOUTS)}>
+            {Object.entries(LAYOUTS).map(([k, l]) => <option key={k} value={k}>{l.label}</option>)}
+          </select>
+        </label>
         <span style={{ marginLeft: narrow ? 0 : 'auto', color: '#8a92a6', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
           {narrow ? '1M rows' : `${ROWS.toLocaleString('en-US')} rows · ${features.length ? features.join(', ') : 'no optional features'}`}
           {totals.map(([k, m]) => ` · ${k} ${formatMetric(m)}`).join('')}
@@ -164,7 +169,7 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
           ? (
             <GraphView
               description={description} collapse={collapse} selected={selected} onSelect={setSelected}
-              density={compact ? 'compact' : 'regular'} wrap={wrap}
+              density={compact ? 'compact' : 'regular'} layout={LAYOUTS[arrange].layout}
               preview={(n) => previewCommandGraphResource(query.graph.commandGraph, n)}
             />
           )
@@ -190,6 +195,14 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
     </div>
   );
 }
+
+/** The layout menu: the viewer's own columns, wrapped or not, and the two that bring a dependency. */
+const LAYOUTS = {
+  layered: { label: 'layered', layout: 'layered' },
+  wrap: { label: 'layered, wrapped', layout: 'wrap' },
+  dagre: { label: 'dagre', layout: dagreLayout },
+  force: { label: 'force (d3)', layout: forceLayout },
+} as const;
 
 /** Whether the screen is phone-sized, tracking rotation and resizes. Matches the CSS breakpoint. */
 function useNarrow(): boolean {
