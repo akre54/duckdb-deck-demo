@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import {
-  OPERATOR_INDEX, nameOf, nodePath, isExpr, isRef, bindingOf, keyframeAt,
+  OPERATOR_INDEX, nameOf, nodePath, isExpr, isRef, bindingOf, keyframeAt, paramLabel,
   type DocNode, type ParamDef, type ParamValue, type EditorDoc, type RelColumn,
 } from '@noodles.gl/planner';
 import { store, useEditor } from '../store.js';
@@ -196,7 +196,7 @@ function NodeInfo({ node }: { node: DocNode; engine: Engine }) {
             <dt>cpu stage</dt><dd>{layer.evalMs.toFixed(1)} ms</dd>
             <dt>policy</dt><dd>{layer.plan.plan.explain.method}</dd>
             <dt>bindings</dt><dd>{layer.plan.plan.layer?.bindings.map((b) => `${b.channel}←${b.attribute}`).join(', ')}</dd>
-            {layer.plan.plan.sqlParams.length > 0 && <><dt>binds</dt><dd>{layer.plan.plan.sqlParams.join(', ')}</dd></>}
+            {layer.plan.plan.sqlParams.length > 0 && <><dt>binds</dt><dd>{layer.plan.plan.sqlParams.map((p) => paramLabel(layer.plan.plan, p)).join(', ')}</dd></>}
           </dl>
           <pre className="code">{layer.plan.plan.sql}</pre>
         </div>

@@ -24,7 +24,7 @@
 import {
   type Graph, type ProgramPlan, type LayerPlan, type SqlEngine, type TargetCaps, type CostConstants,
   type RelColumn, type ResolvedProp, type GraphNode,
-  compileProgram, resolveProps, resolveView, targetCaps, inputsOf, rowwiseSql, quoteIdent,
+  compileProgram, resolveProps, resolveView, targetCaps, inputsOf, rowwiseSql, quoteIdent, withDerived,
 } from '@noodles.gl/planner';
 import { MaterializingCatalog } from './catalog.js';
 import { queryLayer, evaluateLayer, type QueriedLayer, type LayerData } from './execute.js';
@@ -303,7 +303,8 @@ export class ProgramRuntime {
     const layer = this.states.get(nodeId);
     if (layer) {
       const lp = layer.plan;
-      const binds = lp.plan.sqlParams.map((p) => this.values[p]);
+      const bound = withDerived(lp.plan, this.values);
+      const binds = lp.plan.sqlParams.map((p) => bound[p]);
       return this.read(`SELECT * FROM (${lp.plan.sql}) LIMIT ${limit}`, `SELECT count(*) AS n FROM (${lp.plan.sql})`, binds, lp.plan.sql,
         'the layer query, before its CPU stage');
     }

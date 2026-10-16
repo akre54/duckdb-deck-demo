@@ -132,7 +132,8 @@ code, .mono { font-family: var(--mono); }
 .prow .plabel { text-align: right; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: ew-resize; user-select: none; }
 .prow .plabel.static { cursor: default; }
 .prow.wide { grid-template-columns: 1fr 16px; }
-.prow.wide .plabel { text-align: left; cursor: default; }
+.prow.wide .plabel { text-align: left; cursor: default; grid-column: 1 / -1; }
+.prow.wide .widget { grid-column: 1; }
 .prow .widget { display: flex; gap: 5px; align-items: center; min-width: 0; }
 .prow input[type="text"], .prow input[type="number"], .prow select, .prow textarea {
   background: var(--bg); border: 1px solid var(--line-2); border-radius: 4px; padding: 2px 5px; min-width: 0; width: 100%;

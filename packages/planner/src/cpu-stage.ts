@@ -17,6 +17,7 @@ import { toJs } from './backends/js.js';
 import { widthOf } from './expr.js';
 import { buildRampLut } from './types.js';
 import type { ColumnUpload } from './arrow.js';
+import { withDerived } from './hoist.js';
 
 export interface CpuAttributes {
   rows: number;
@@ -127,8 +128,10 @@ ${lines.join('\n')}
   ) => void;
 
   const lut = plan.ramp ? buildRampLut(plan.ramp) : undefined;
+  // Here rather than in every caller: the loop reads hoisted subexpressions as `p.__hoist_…`.
+  const bound = withDerived(plan, params);
   const tEval = performance.now();
-  fn(contiguous, outputs, params, rows, lut);
+  fn(contiguous, outputs, bound, rows, lut);
   const evalMs = performance.now() - tEval;
 
   // Carry the arrow-sourced attributes through so callers can bind them too.

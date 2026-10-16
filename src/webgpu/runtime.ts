@@ -14,7 +14,7 @@
 import type { Gpu } from './device.js';
 
 import { AttributeSet } from './attributes.js';
-import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, withCompaction, evaluateStage, rowBytes, type AttributeDecl, type AttributeFormat, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
+import { readColumn, readVectorColumns, readValues, plan as buildPlan, WORKGROUP, PlanError, parseExpr, buildRampLut, statsSql, parseStatsRow, DEFAULT_COSTS, targetCaps, withCompaction, evaluateStage, derivedValues, HOIST_PREFIX, rowBytes, type AttributeDecl, type AttributeFormat, type ColumnUpload, type PhysicalPlan, type Policy, type Schema, type Graph, type SourceStats, type CostConstants, type TargetCaps, type TargetId } from '@noodles.gl/planner';
 import { Kernel } from './compute.js';
 import { OrbitCamera, VIEW_UNIFORM_SIZE } from './camera.js';
 import { PointsPass } from './passes/points.js';
@@ -313,6 +313,7 @@ export class Runtime {
       next[name] = this.paramValues[name] ?? spec.value;
     }
     this.paramValues = next;
+    this.refreshDerived(plan);
 
     // --- stats first: their results become bindable parameters ---------------
     const tStats = performance.now();
@@ -561,7 +562,16 @@ export class Runtime {
   // -------------------------------------------------------------------------
 
   params(): Record<string, number> {
-    return { ...this.paramValues };
+    return Object.fromEntries(Object.entries(this.paramValues).filter(([name]) => !name.startsWith(HOIST_PREFIX)));
+  }
+
+  /**
+   * Recompute the plan's hoisted subexpressions into `paramValues`, where every bind, uniform
+   * write and CPU loop below already reads. Derived names are hashes of their expressions, so
+   * a stale one from an earlier plan can never be mistaken for a current one.
+   */
+  private refreshDerived(plan: PhysicalPlan): void {
+    Object.assign(this.paramValues, derivedValues(plan, this.paramValues));
   }
 
   /**
@@ -575,11 +585,14 @@ export class Runtime {
     const plan = this.current?.plan;
     if (!plan) return 'unused';
     if (plan.params[name]?.kind === 'structural') return 'rebuild';
-    if (plan.sqlParams.includes(name)) return 'requery';
-    if (plan.cpuStage.some((s) => s.expr && exprUsesParam({ expr: s.expr }, name))) return 'cpu';
-    if (plan.uniformParams.includes(name)) return 'uniform';
+    // The parameter itself and every hoisted value computed from it: the most expensive
+    // route any of them takes is the one a change costs.
+    const names = [name, ...(plan.derived ?? []).filter((d) => d.sources.includes(name)).map((d) => d.name)];
+    if (names.some((n) => plan.sqlParams.includes(n))) return 'requery';
+    if (plan.cpuStage.some((s) => s.expr && names.some((n) => exprUsesParam({ expr: s.expr }, n)))) return 'cpu';
+    if (names.some((n) => plan.uniformParams.includes(n))) return 'uniform';
     // Cheapest of all: only the compaction reads it, so the kernel's outputs stand.
-    if (plan.compaction?.params.includes(name)) return 'compact';
+    if (names.some((n) => plan.compaction?.params.includes(n))) return 'compact';
     return 'unused';
   }
 
@@ -592,6 +605,7 @@ export class Runtime {
     value: number,
   ): Promise<ParamRoute> {
     this.paramValues[name] = value;
+    if (this.current) this.refreshDerived(this.current.plan);
     const route = this.classify(name);
     switch (route) {
       case 'uniform':

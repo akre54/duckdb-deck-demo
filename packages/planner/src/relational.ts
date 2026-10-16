@@ -23,6 +23,7 @@ import type {
   Graph, GraphNode,
 } from './types.js';
 import { analyze, PlanError, type ColumnType, type AnalyzedNode } from './analyze.js';
+import { GEO_PRELUDE } from './geo.js';
 
 /** One column of a relation, as DuckDB describes it. */
 export interface RelColumn {
@@ -318,7 +319,8 @@ export function rowwiseSql(
     ],
     output: '__out',
   };
-  const analysis = analyze(sub, schema, undefined, types);
+  // Parameters are inlined as literals below, and DuckDB folds a literal subexpression itself.
+  const analysis = analyze(sub, schema, undefined, types, { hoist: false });
   const used = new Set<string>();
   const vectors = [...shape.vectors];
   const vectorNames = new Set(vectors.map((v) => v.name));
@@ -392,7 +394,8 @@ export function rowwiseSql(
 /** Parse check for editor feedback: the error text for an expression, or undefined. */
 export function exprError(src: string): string | undefined {
   try {
-    parseExpr(src);
+    // The prelude is in every graph's scope (`desugar`), so the editor must accept it too.
+    parseExpr(src, { functions: GEO_PRELUDE });
     return undefined;
   } catch (err) {
     return (err as Error).message;

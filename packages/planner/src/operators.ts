@@ -24,6 +24,7 @@ import type { GraphNode, LayerNode, DeckNode } from './types.js';
 import type { LayerKind, LayerPropValue } from './layers.js';
 import type { ParamValue } from './doc.js';
 import type { RampName } from './types.js';
+import { parseGeometry } from './geometry.js';
 
 export type PortType = 'table' | 'layer' | 'number';
 
@@ -54,7 +55,7 @@ export interface ParamDef {
   /** Column pickers: the input port whose columns are listed. */
   of?: string;
   columnType?: 'num' | 'str' | 'any';
-  language?: 'sql' | 'vex' | 'expr';
+  language?: 'sql' | 'vex' | 'expr' | 'geometry';
   bind?: 'value' | 'prop' | 'structural';
   /** Expected changes per second while being dragged; the optimizer's amortization input. */
   changeRate?: number;
@@ -130,6 +131,26 @@ const opacity: ParamDef = { name: 'opacity', label: 'Opacity', kind: 'float', de
 const rampParam: ParamDef = { name: 'ramp', label: 'Color ramp', kind: 'menu', default: 'viridis', options: RAMPS, folder: 'Channels', help: 'Used by ramp() in any channel expression.' };
 
 interface ChannelParam { channel: string; param: string }
+
+/** Lower Manhattan, as a default any lng/lat data near New York lands partly inside. */
+const DEFAULT_REGION = 'POLYGON((-74.02 40.70, -73.97 40.71, -73.97 40.76, -74.01 40.76, -74.02 40.70))';
+const geometryParam: ParamDef = {
+  name: 'geometry', label: 'Geometry', kind: 'code', language: 'geometry', default: DEFAULT_REGION,
+  help: 'WKT or GeoJSON, lng/lat degrees. Expanded into the expression, so a change replans.',
+};
+
+/**
+ * The geometry parameter as an expression string literal, checked here so a bad ring or a
+ * swapped axis is an error on the node rather than from the planner. Structural: the
+ * literal's vertices become constants in the tree (docs/geometry.md, case 1a).
+ */
+function geometryLiteral(ctx: LowerCtx, dims: number[], what: string): string {
+  const text = ctx.str('geometry');
+  let g;
+  try { g = parseGeometry(text); } catch (err) { ctx.error((err as Error).message); }
+  if (!dims.includes(g.dim)) ctx.error(`${what} needs ${dims.includes(2) ? 'a polygon' : 'a geometry'}, got a ${g.type}`);
+  return `'${text.replace(/'/g, "''")}'`;
+}
 
 /**
  * A layer: channel expressions, then the layer node. A channel that names an attribute binds
@@ -533,8 +554,53 @@ export const OPERATORS: OpDef[] = [
     ],
     lower(ctx) {
       const [x1, y1, x2, y2] = ['lng1', 'lat1', 'lng2', 'lat2'].map((p) => `(${ctx.expr(p)})`);
-      const hav = `12742.0 * asin(sqrt(pow(sin((${y2} - ${y1}) * 0.00872664626), 2.0) + cos(${y1} * 0.01745329252) * cos(${y2} * 0.01745329252) * pow(sin((${x2} - ${x1}) * 0.00872664626), 2.0)))`;
-      return { nodes: [{ id: ctx.id, type: 'attribute', input: ctx.input('in'), name: ctx.str('name') || 'km', expr: hav }], outputs: { out: ctx.id } };
+      // The geo prelude's `distance` (geo.ts). This used to be spelled out here with
+      // `pow(sin(Δ), 2.0)`, which WGSL leaves undefined for a negative base — half of all
+      // point pairs — and with a 6371 km radius where turf and DuckDB use 6371.0088.
+      const km = `distance([${x1}, ${y1}], [${x2}, ${y2}])`;
+      return { nodes: [{ id: ctx.id, type: 'attribute', input: ctx.input('in'), name: ctx.str('name') || 'km', expr: km }], outputs: { out: ctx.id } };
+    },
+  },
+  {
+    type: 'region', label: 'Region Filter', category: 'rows',
+    description: 'Keep rows inside, outside or near a polygon. Runs in SQL, on the GPU or the CPU, wherever the planner puts it.',
+    inputs: [table()], outputs: [out()],
+    params: [
+      { name: 'mode', label: 'Keep', kind: 'menu', default: 'inside', options: [
+        { value: 'inside', label: 'Inside' }, { value: 'outside', label: 'Outside' }, { value: 'near', label: 'Within a distance' },
+      ] },
+      geometryParam,
+      { name: 'metres', label: 'Distance (m)', kind: 'float', default: 500, min: 0, max: 50000, step: 10, when: { param: 'mode', is: ['near'] }, changeRate: 4, port: true },
+      { name: 'lng', label: 'Longitude', kind: 'expr', default: 'lng', of: 'in', folder: 'Point' },
+      { name: 'lat', label: 'Latitude', kind: 'expr', default: 'lat', of: 'in', folder: 'Point' },
+    ],
+    lower(ctx) {
+      const mode = ctx.str('mode');
+      // Near is measured to any geometry; inside and outside need an area.
+      const g = geometryLiteral(ctx, mode === 'near' ? [0, 1, 2] : [2], 'Region Filter');
+      const p = `[(${ctx.expr('lng')}), (${ctx.expr('lat')})]`;
+      const predicate = mode === 'near' ? `st_dwithin(${g}, ${p}, ${ctx.bind('metres')})`
+        : mode === 'outside' ? `!st_intersects(${g}, ${p})` : `st_intersects(${g}, ${p})`;
+      return { nodes: [{ id: ctx.id, type: 'filter', input: ctx.input('in'), predicate }], outputs: { out: ctx.id } };
+    },
+  },
+  {
+    type: 'geo-distance', label: 'Distance to Geometry', category: 'rows',
+    description: 'Distance from each row\'s point to a line, polygon or set of points: zero inside a polygon.',
+    inputs: [table()], outputs: [out()],
+    params: [
+      { ...geometryParam, default: 'LINESTRING(-74.02 40.70, -73.99 40.73, -73.97 40.76)' },
+      { name: 'units', label: 'Units', kind: 'menu', default: 'm', options: [{ value: 'm', label: 'Metres' }, { value: 'km', label: 'Kilometres' }] },
+      { name: 'name', label: 'Output', kind: 'string', default: 'dist' },
+      { name: 'lng', label: 'Longitude', kind: 'expr', default: 'lng', of: 'in', folder: 'Point' },
+      { name: 'lat', label: 'Latitude', kind: 'expr', default: 'lat', of: 'in', folder: 'Point' },
+    ],
+    lower(ctx) {
+      const name = ctx.str('name') || 'dist';
+      if (!BARE.test(name)) ctx.error(`'${name}' is not a valid attribute name`);
+      const metres = `st_distance(${geometryLiteral(ctx, [0, 1, 2], 'Distance to Geometry')}, [(${ctx.expr('lng')}), (${ctx.expr('lat')})])`;
+      const expr = ctx.str('units') === 'km' ? `${metres} / 1000.0` : metres;
+      return { nodes: [{ id: ctx.id, type: 'attribute', input: ctx.input('in'), name, expr }], outputs: { out: ctx.id } };
     },
   },
 

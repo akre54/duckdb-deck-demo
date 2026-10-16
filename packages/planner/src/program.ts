@@ -41,6 +41,7 @@ import type { TargetCaps } from './target.js';
 import type { SourceStats } from './stats.js';
 import type { AttributeConventions } from './conventions.js';
 import { hashOf } from './hash.js';
+import { sourceParams } from './hoist.js';
 import { propParam, type LayerKind } from './layers.js';
 import { quoteIdent } from './backends/sql.js';
 import {
@@ -524,11 +525,14 @@ export async function compileProgram(
   for (const rel of relations.values()) for (const p of rel.params) addRoute(p, 'rematerialize', rel.id);
   for (const lp of layers) {
     const pp = lp.plan;
-    for (const p of pp.sqlParams) addRoute(p, 'requery', lp.id);
+    // A hoisted parameter is routed under what it is computed from: moving `lat0` is what
+    // recomputes it, and `routes` is keyed by what a user can move.
+    const sources = (names: Iterable<string>) => sourceParams(pp, names);
+    for (const p of sources(pp.sqlParams)) addRoute(p, 'requery', lp.id);
     for (const s of pp.stats) for (const p of s.params) addRoute(p, 'requery', lp.id);
-    for (const p of pp.uniformParams) addRoute(p, 'uniform', lp.id);
+    for (const p of sources(pp.uniformParams)) addRoute(p, 'uniform', lp.id);
     for (const s of pp.cpuStage) {
-      for (const p of s.expr ? paramsOfTree(s.expr) : []) addRoute(p, 'cpu', lp.id);
+      for (const p of s.expr ? sources(paramsOfTree(s.expr)) : []) addRoute(p, 'cpu', lp.id);
     }
     for (const p of pp.layer?.propParams ?? []) addRoute(p, 'prop', lp.id);
   }

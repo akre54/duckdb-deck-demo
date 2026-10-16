@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseExpr, enginesFor, columnsOf, paramsOf, isAggregate, widthOf } from './expr.js';
+import { parseExpr, enginesFor, columnsOf, paramsOf, isAggregate, simplifyExpr, widthOf } from './expr.js';
 import { toSql, toSqlColumns } from './backends/sql.js';
 import { toWgsl, type Resolver } from './backends/wgsl.js';
 
@@ -180,5 +180,32 @@ describe('width inference', () => {
     ['x > 1 ? P : P', 3],
   ])('%s -> %i components', (src, want) => {
     expect(widthOf(parseExpr(src), env)).toBe(want);
+  });
+});
+
+describe('simplifyExpr', () => {
+  const simp = (src: string) => simplifyExpr(parseExpr(src));
+
+  it.each([
+    ['[a, b].y', 'b'],
+    ['[a, b, c].zx', '[c, a]'],
+    ['[a, b, c].rgb', '[a, b, c]'],
+    ['[a, b, c].zy.x', 'c'],
+    ['sin([a + 1, b].x) * 2', 'sin(a + 1) * 2'],
+    ['x > 0 ? [a, b].y : 0', 'x > 0 ? b : 0'],
+  ])('%s -> %s', (src, want) => {
+    expect(simp(src)).toEqual(parseExpr(want));
+  });
+
+  it('leaves swizzles it cannot resolve alone', () => {
+    // A vector column, and a channel past the literal's width: the second must still reach
+    // `widthOf`'s error rather than silently becoming something.
+    expect(simp('P.x')).toEqual(parseExpr('P.x'));
+    expect(simp('[a, b].z')).toEqual(parseExpr('[a, b].z'));
+  });
+
+  it('is what makes a point built from scalars SQL-feasible', () => {
+    expect(enginesFor(parseExpr('[lng, lat].x * 2')).has('sql')).toBe(false);
+    expect(enginesFor(simp('[lng, lat].x * 2')).has('sql')).toBe(true);
   });
 });

@@ -402,6 +402,45 @@ export function paramsOf(e: Expr): string[] {
   return [...seen];
 }
 
+const CHANNEL_INDEX: Record<string, number> = { x: 0, y: 1, z: 2, w: 3, r: 0, g: 1, b: 2, a: 3 };
+
+/**
+ * Resolve swizzles whose target is a vector literal: `[a, b].y` → `b`, `[a, b].yx` → `[b, a]`.
+ *
+ * This exists for inlined functions. A function taking a point is written `p.x`, so calling
+ * it with `[lng, lat]` inlines as `[lng, lat].x`, and any swizzle rules out SQL (`enginesFor`).
+ * Without this pass every geo function would be GPU-only even when all it touches is two
+ * scalar columns. A swizzle of anything else — a vec column, a call — is left alone, as is a
+ * channel past the literal's width, so the width errors still fire where they did before.
+ */
+export function simplifyExpr(e: Expr): Expr {
+  switch (e.kind) {
+    case 'num':
+    case 'str':
+    case 'col':
+    case 'param':
+      return e;
+    case 'unary':
+      return { ...e, operand: simplifyExpr(e.operand) };
+    case 'binary':
+      return { ...e, left: simplifyExpr(e.left), right: simplifyExpr(e.right) };
+    case 'call':
+      return { ...e, args: e.args.map(simplifyExpr) };
+    case 'vec':
+      return { ...e, components: e.components.map(simplifyExpr) };
+    case 'cond':
+      return { ...e, test: simplifyExpr(e.test), then: simplifyExpr(e.then), else: simplifyExpr(e.else) };
+    case 'swizzle': {
+      const target = simplifyExpr(e.target);
+      // `[a, b, c].zy.x`: the inner swizzle has already become `[c, b]`, so this folds too.
+      if (target.kind !== 'vec' || !SWIZZLE_OK.test(e.channels)) return { ...e, target };
+      const picked = [...e.channels].map((ch) => target.components[CHANNEL_INDEX[ch]]);
+      if (picked.some((c) => c === undefined)) return { ...e, target };
+      return picked.length === 1 ? picked[0] : { kind: 'vec', components: picked };
+    }
+  }
+}
+
 /**
  * Which engines can evaluate this whole tree. This is what makes the planner's
  * engine assignment a lookup rather than a heuristic.
