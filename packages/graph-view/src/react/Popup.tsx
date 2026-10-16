@@ -96,21 +96,25 @@ export function EdgeTip({ edge, from, to }: { edge: GraphEdge; from: string; to:
   );
 }
 
-/** Which color means what, and that width is bytes. */
-export function Legend({ colors }: { colors: Record<string, string> }) {
+/**
+ * Which color means what, and that width is bytes. Compact, it is one short row: on a phone the
+ * stacked box covered a node.
+ */
+export function Legend({ colors, compact = false }: { colors: Record<string, string>; compact?: boolean }) {
   return (
     <div style={{
-      position: 'absolute', right: 10, bottom: 10, zIndex: 5, pointerEvents: 'none',
-      background: '#10131acc', border: '1px solid #2a2f3a', borderRadius: 6, padding: '5px 8px',
-      font: `10px/1.5 ${MONO}`, color: '#cbd5e1',
+      position: 'absolute', right: compact ? 6 : 10, bottom: compact ? 6 : 10, zIndex: 5, pointerEvents: 'none',
+      background: '#10131acc', border: '1px solid #2a2f3a', borderRadius: 6, padding: compact ? '2px 6px' : '5px 8px',
+      font: `${compact ? 9 : 10}px/1.5 ${MONO}`, color: '#cbd5e1',
+      ...(compact ? { display: 'flex', gap: 8, alignItems: 'center' } : {}),
     }}>
       {Object.entries(colors).map(([kind, color]) => (
         <div key={kind} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <svg width="22" height="6"><line x1="0" y1="3" x2="22" y2="3" stroke={color} strokeWidth="2" strokeDasharray={kind === 'dependency' ? '4 3' : undefined} /></svg>
+          <svg width={compact ? 12 : 22} height="6"><line x1="0" y1="3" x2={compact ? 12 : 22} y2="3" stroke={color} strokeWidth="2" strokeDasharray={kind === 'dependency' ? '4 3' : undefined} /></svg>
           {kind}
         </div>
       ))}
-      <div style={{ color: '#9ca3af' }}>width: bytes (log)</div>
+      <div style={{ color: '#9ca3af' }}>{compact ? 'width: bytes' : 'width: bytes (log)'}</div>
     </div>
   );
 }

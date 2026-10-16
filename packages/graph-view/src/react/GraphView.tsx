@@ -237,7 +237,7 @@ export function GraphView(props: GraphViewProps) {
         <Background gap={16} color="#1f2430" />
         <Controls showInteractive={false} />
       </ReactFlow>
-      {Object.keys(usedKinds).length > 0 && <Legend colors={usedKinds} />}
+      {Object.keys(usedKinds).length > 0 && <Legend colors={usedKinds} compact={density === 'compact'} />}
       {tip && bounds && <Popup x={tip.x} y={tip.y} bounds={bounds}>{tip.content}</Popup>}
     </div>
   );
@@ -278,6 +278,14 @@ const hidden: CSSProperties = { opacity: 0, pointerEvents: 'none' };
  */
 const tail = (name: string, max: number) => (max && name.length > max ? `…${name.slice(name.length - max + 1)}` : name);
 
+/**
+ * What a card says the node is: its group (for a GPU graph, the operation that contributed the
+ * pass, such as `GPUScan`), or its kind when it has none. A pass's id names the operation too,
+ * but after a long prefix the card cuts off.
+ */
+const typeOf = (node: GraphNode) => node.group ?? node.kind;
+const titleOf = (node: GraphNode) => (node.group ? `${node.group} (${node.kind})` : node.kind);
+
 const HeatBar = ({ heat, margin }: { heat?: number; margin: string }) =>
   heat === undefined ? null : (
     <div style={{ height: 3, margin, background: '#232733', borderRadius: 2 }}>
@@ -304,9 +312,13 @@ const CompactWorkCard = ({ data, selected }: NodeProps<CardNode>) => {
     }}>
       <Handle type="target" position={Position.Left} style={hidden} />
       <span style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden' }}>{tail(node.label ?? node.id, DENSITY.compact.nameChars)}</span>
-      <span style={{ display: 'flex', justifyContent: 'space-between', color: '#9ca3af' }}>
-        <span>{metric ? key : node.kind}</span>
-        <span style={{ color: '#e5e7eb' }}>{metric ? formatMetric({ ...metric, p95: undefined }) : ''}</span>
+      <span style={{ display: 'flex', justifyContent: 'space-between', gap: 6, color: '#9ca3af' }}>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', minWidth: 0 }} title={titleOf(node)}>{typeOf(node)}</span>
+        <span style={{ color: '#e5e7eb', flex: 'none' }}>
+          {metric ? formatMetric({ ...metric, p95: undefined }) : ''}
+          {/* The heat metric goes unnamed, as on every other card; any other one says which it is. */}
+          {metric && key !== data.heatMetric ? <span style={{ color: '#9ca3af' }}> {key}</span> : null}
+        </span>
       </span>
       <HeatBar heat={data.heat} margin="2px 0 0" />
       <Handle type="source" position={Position.Right} style={hidden} />
@@ -333,7 +345,7 @@ const RegularWorkCard = ({ data, selected }: NodeProps<CardNode>) => {
         }} title={node.id}>
           {node.label ?? node.id}
         </span>
-        <span style={{ opacity: 0.8, flex: 'none' }}>{node.kind}</span>
+        <span style={{ opacity: 0.8, flex: 'none' }} title={titleOf(node)}>{typeOf(node)}</span>
       </div>
       <div style={{ padding: '4px 8px' }}>
         {keys.filter((k) => node.metrics?.[k]).map((k) => (
