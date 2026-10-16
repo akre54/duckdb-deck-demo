@@ -598,8 +598,8 @@ requery.
 
 ## 14. Upstream status: what is in flight, what to ask for, and in what order
 
-Most of the gaps in §5a, §12 and §13 are luma or deck work. Status as of 2026-10-08. The drafts and
-what became of them are in [docs/upstream/](docs/upstream/README.md). Nothing here is in a 9.4
+Most of the gaps in §5a, §12 and §13 are luma or deck work. Status as of 2026-10-08. Where each item
+stands now is in [docs/upstream.md](docs/upstream.md). Nothing here is in a 9.4
 release; `v10.0.0-alpha.3` (2026-10-04) is the only release carrying any of it.
 
 **Landed.**

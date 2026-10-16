@@ -399,8 +399,8 @@ onto rows.
   and draws it with React Flow. See its [README](packages/graph-view/README.md) for the schema.
 - **`describeCommandGraph`** (`@noodles.gl/gpu-runtime/luma`) is the luma producer. luma doesn't
   publish what each pass reads and writes, so for now this function reads it from a private field.
-  [`docs/upstream/luma-command-graph-topology.md`](docs/upstream/luma-command-graph-topology.md)
-  is the request to make it public.
+  A [draft luma issue](https://github.com/akre54/duckdb-deck-demo/blob/8f5cc62ac653bec28900152129ab7beb88db3426/docs/upstream/luma-command-graph-topology.md)
+  asks to make it public; [`docs/upstream.md`](docs/upstream.md) tracks it.
 - **`LumaFilter` and `LumaGroupBy`** take an optional `inspector` and expose `commandGraph`.
 
 Per-pass GPU times arrive in 65.5 µs steps, because Chrome quantizes timestamp queries unless

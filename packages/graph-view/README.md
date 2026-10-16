@@ -92,4 +92,4 @@ can't make them readable.
 
 A prototype for the discussion with luma.gl about a GPU graph debugger. The schema is the part
 meant to be argued over. What luma needs to expose for a producer to fill it without reading
-private fields is written up in `docs/upstream/luma-command-graph-topology.md`.
+private fields is written up in [a draft luma issue](https://github.com/akre54/duckdb-deck-demo/blob/8f5cc62ac653bec28900152129ab7beb88db3426/docs/upstream/luma-command-graph-topology.md).
