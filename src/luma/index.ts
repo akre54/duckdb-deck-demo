@@ -10,3 +10,4 @@ export {
   LumaFilter, LumaGroupBy, lumaCompactor, toLumaExpr,
   type LumaFilterProps, type LumaGroupByProps, type LumaAggregate, type LumaTopology,
 } from './dataframe.js';
+export { describeCommandGraph, type DescribeCommandGraphOptions } from './graph-description.js';

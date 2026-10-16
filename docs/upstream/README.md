@@ -12,6 +12,7 @@ drafts.
 | [deck-timing-comment.md](deck-timing-comment.md) | [deck.gl#10778](https://github.com/visgl/deck.gl/pull/10778), re #10279 | **posted 2026-10-01**, no reply |
 | [luma-group-by-float-sums.md](luma-group-by-float-sums.md) | new luma issue | **superseded**: went straight to PR [luma.gl#3391](https://github.com/visgl/luma.gl/pull/3391) |
 | [luma-expression-ops.md](luma-expression-ops.md) | new luma issue | **not filed**; raised as D5 on [luma.gl#2550](https://github.com/visgl/luma.gl/issues/2550). File it if ibgreen says "new issue" |
+| [luma-command-graph-topology.md](luma-command-graph-topology.md) | new luma issue | **draft, not posted** (2026-10-16); per-node resource uses and dependency edges for the `/graph/` viewer |
 
 Two drafts were deleted rather than kept: the follow-up comment on luma.gl#3169 (that PR merged on
 2026-10-02, and its questions became D2 on #2550) and the review-order note to ibgreen (it became

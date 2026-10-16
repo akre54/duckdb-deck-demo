@@ -17,6 +17,9 @@ import { resolve } from 'node:path';
 const plannerAliases = [
   { find: '@noodles.gl/planner/fixtures', replacement: resolve('packages/planner/src/fixtures.ts') },
   { find: '@noodles.gl/planner', replacement: resolve('packages/planner/src/index.ts') },
+  // Same reason for the graph viewer package.
+  { find: '@noodles.gl/graph-view/react', replacement: resolve('packages/graph-view/src/react/index.ts') },
+  { find: '@noodles.gl/graph-view', replacement: resolve('packages/graph-view/src/index.ts') },
 ];
 
 /**
@@ -29,7 +32,7 @@ const base = process.env.VITE_BASE ?? '/';
 export default defineConfig({
   root: 'demo',
   base,
-  // React only for the node editor (demo/editor); the inspector stays framework-free.
+  // React only for the node editor and the graph viewer; the inspector stays framework-free.
   plugins: [react()],
   resolve: { alias: plannerAliases },
   server: {
@@ -48,9 +51,13 @@ export default defineConfig({
   build: {
     outDir: '../dist-demo',
     emptyOutDir: true,
-    // Two pages: the planner inspector, and the node editor.
+    // Three pages: the planner inspector, the node editor, and the GPU command graph viewer.
     rollupOptions: {
-      input: { inspector: resolve('demo/index.html'), editor: resolve('demo/editor/index.html') },
+      input: {
+        inspector: resolve('demo/index.html'),
+        editor: resolve('demo/editor/index.html'),
+        graph: resolve('demo/graph/index.html'),
+      },
     },
   },
 });

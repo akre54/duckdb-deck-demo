@@ -34,7 +34,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "npm run typecheck && npm run build --workspace @noodles.gl/planner && tsc -p tsconfig.build.json",
+    "build": "npm run typecheck && npm run build --workspace @noodles.gl/planner && npm run build --workspace @noodles.gl/graph-view && tsc -p tsconfig.build.json",
     "build:demo": "vite build",
     "preview": "vite preview",
     "test": "vitest run --config vitest.config.ts",
@@ -46,6 +46,7 @@
     "perf:gpu": "VITE_PERF=1 vitest run --config vitest.browser.config.ts tests/browser/engines.browser.test.ts tests/browser/groupby.browser.test.ts"
   },
   "dependencies": {
+    "@noodles.gl/graph-view": "*",
     "@noodles.gl/planner": "*"
   },
   "peerDependencies": {
@@ -125,6 +126,7 @@
     "node": ">=20"
   },
   "workspaces": [
-    "packages/planner"
+    "packages/planner",
+    "packages/graph-view"
   ]
 }

@@ -19,12 +19,13 @@ import { join, relative, dirname, resolve } from 'node:path';
 
 const ROOT = resolve(__dirname, '..');
 const PLANNER = 'packages/planner';
+const GRAPH_VIEW = 'packages/graph-view';
 
-function walk(dir: string): string[] {
+function walk(dir: string, ext = /\.ts$/): string[] {
   return readdirSync(join(ROOT, dir)).flatMap((entry) => {
     const rel = join(dir, entry);
-    if (statSync(join(ROOT, rel)).isDirectory()) return walk(rel);
-    return rel.endsWith('.ts') ? [rel] : [];
+    if (statSync(join(ROOT, rel)).isDirectory()) return walk(rel, ext);
+    return ext.test(rel) ? [rel] : [];
   });
 }
 
@@ -59,6 +60,14 @@ const LIB_FILES = walk('src').filter(notTest);
 /** The planner package's shipped source. `fixtures.ts` is shipped but test-only. */
 const PLANNER_FILES = walk(`${PLANNER}/src`).filter(notTest);
 const PLANNER_LIB = PLANNER_FILES.filter((f) => f !== `${PLANNER}/src/fixtures.ts`);
+/** The graph viewer package: a headless entry, and React components under `react/`. */
+const GRAPH_VIEW_FILES = walk(`${GRAPH_VIEW}/src`, /\.tsx?$/).filter(notTest);
+const GRAPH_VIEW_HEADLESS = GRAPH_VIEW_FILES.filter((f) => !f.startsWith(`${GRAPH_VIEW}/src/react/`));
+const GRAPH_VIEW_REACT = GRAPH_VIEW_FILES.filter((f) => f.startsWith(`${GRAPH_VIEW}/src/react/`));
+
+/** The package a bare specifier names: `@scope/name` or `name`. */
+const packageOf = (specifier: string) =>
+  specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0];
 
 // ---------------------------------------------------------------------------
 
@@ -165,6 +174,80 @@ describe('the planner package stands alone', () => {
   });
 });
 
+describe('the graph viewer package stands alone', () => {
+  /**
+   * A producer such as luma should be able to build a description from the main entry without
+   * installing React. One tsconfig cannot hold the headless files to no DOM while the React files
+   * need it, so the split is asserted here.
+   */
+  it('has source to check', () => {
+    expect(GRAPH_VIEW_HEADLESS.length).toBeGreaterThanOrEqual(5);
+    expect(GRAPH_VIEW_REACT.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('no relative import escapes the package, and the headless entry never reaches into react/', () => {
+    const violations: string[] = [];
+    for (const file of GRAPH_VIEW_FILES) {
+      for (const specifier of importsOf(file)) {
+        const target = resolveLocal(file, specifier);
+        if (!target) continue;
+        if (!target.startsWith(`${GRAPH_VIEW}/src/`)) violations.push(`${file} -> ${specifier}`);
+        if (GRAPH_VIEW_HEADLESS.includes(file) && target.startsWith(`${GRAPH_VIEW}/src/react/`)) {
+          violations.push(`${file} -> ${specifier}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('the headless entry imports no package and touches no DOM', () => {
+    const violations: string[] = [];
+    for (const file of GRAPH_VIEW_HEADLESS) {
+      for (const specifier of importsOf(file)) {
+        if (!specifier.startsWith('.')) violations.push(`${file} -> ${specifier}`);
+      }
+      const code = readFileSync(join(ROOT, file), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+      if (/\b(?:document|window|HTMLElement|React)\b/.test(code)) violations.push(`${file}: DOM or React`);
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('the react entry imports only react and @xyflow/react', () => {
+    const allowed = new Set(['react', '@xyflow/react']);
+    const violations: string[] = [];
+    for (const file of GRAPH_VIEW_REACT) {
+      for (const specifier of importsOf(file)) {
+        if (!specifier.startsWith('.') && !allowed.has(packageOf(specifier))) violations.push(`${file} -> ${specifier}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it('is wired as a workspace the root package depends on', () => {
+    const root = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as {
+      workspaces?: string[];
+      dependencies?: Record<string, string>;
+    };
+    expect(root.workspaces).toContain(GRAPH_VIEW);
+    expect(root.dependencies).toHaveProperty('@noodles.gl/graph-view');
+  });
+
+  it('the runtime reaches it only from src/luma, and for types only', () => {
+    // The adapter emits plain JSON. Importing a value would make the luma entry pull in the
+    // package at runtime for nothing.
+    const violations: string[] = [];
+    for (const file of LIB_FILES) {
+      const source = readFileSync(join(ROOT, file), 'utf8');
+      for (const line of source.split('\n')) {
+        if (!line.includes("'@noodles.gl/graph-view")) continue;
+        if (!file.startsWith('src/luma/') || !/^\s*import type\b/.test(line)) violations.push(`${file}: ${line.trim()}`);
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
 describe('layer boundaries', () => {
   it('the runtime layers reach the planner only by package name', () => {
     // A relative path into `packages/` would work locally and break the moment the planner is
@@ -244,7 +327,7 @@ describe('entry points', () => {
     }));
   };
 
-  const allEntries = [...entries('.', 'src'), ...entries(PLANNER, 'src')];
+  const allEntries = [...entries('.', 'src'), ...entries(PLANNER, 'src'), ...entries(GRAPH_VIEW, 'src')];
 
   it('has entries to check', () => {
     expect(allEntries.length).toBeGreaterThanOrEqual(5);
@@ -266,13 +349,15 @@ describe('entry points', () => {
       [LIB_FILES, 'src/webgpu', 'src/webgpu/index.ts'],
       [LIB_FILES, 'src/program', 'src/program/index.ts'],
       [LIB_FILES, 'src/luma', 'src/luma/index.ts'],
+      [GRAPH_VIEW_HEADLESS, `${GRAPH_VIEW}/src`, `${GRAPH_VIEW}/src/index.ts`],
+      [GRAPH_VIEW_REACT, `${GRAPH_VIEW}/src/react`, `${GRAPH_VIEW}/src/react/index.ts`],
     ] as const) {
       const barrelSource = readFileSync(join(ROOT, barrel), 'utf8');
       const modules = files.filter(
         (f) => f.startsWith(`${dir}/`) && !f.endsWith('index.ts'),
       );
       const missing = modules.filter((m) => {
-        const name = m.slice(dir.length + 1).replace(/\.ts$/, '');
+        const name = m.slice(dir.length + 1).replace(/\.tsx?$/, '');
         return !barrelSource.includes(`./${name}.js`);
       });
       expect(missing, `${barrel} is missing re-exports`).toEqual([]);

@@ -7,6 +7,10 @@ engine runs each node. Read [README.md](README.md) for what it does and
 ## Layout
 
 ```
+packages/graph-view/ @noodles.gl/graph-view — a graph description (JSON), layoutGraph,
+                    collapseData; React Flow viewer under ./react. The main entry imports
+                    nothing and touches no DOM (boundaries test), so a producer can emit a
+                    description without React.
 packages/planner/   @noodles.gl/planner — headless. Expression IR + three backends,
                     analyze/optimize/emit, statistics, cost model, target capabilities,
                     attribute conventions, source providers, wrangle parser, Arrow upload,
@@ -17,12 +21,14 @@ src/webgpu/         device, attributes, kernels, camera, calibration, render pas
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
 src/luma/           LumaFilter + lumaCompactor: luma.gl's GPU Dataframe as the runtime's
                     compaction engine (FINDINGS §12); LumaGroupBy, its dense group-by
-                    (FINDINGS §13). The only entry besides deck that imports luma
+                    (FINDINGS §13); describeCommandGraph, a compiled command graph as a
+                    graph-view description. The only entry besides deck that imports luma
 src/program/        ProgramRuntime, MaterializingCatalog (the memo), queryLayer/evaluateLayer
 src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, program-pane.ts
                     (see docs/deck-and-luma.md)
 demo/               the inspector app (not published)
-demo/editor/        the node editor: React (the only React in the repo), examples/*.json
+demo/editor/        the node editor: React, examples/*.json
+demo/graph/         the GPU command graph viewer: live luma queries, inspector timings
 tests/             boundary guard, budgets, benchmarks, browser/
 ```
 
@@ -33,8 +39,8 @@ and to its built `dist` when the root package compiles — that is why `tsconfig
 ## Commands
 
 ```bash
-npm test           # 738 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
-npm run test:gpu   # 91 browser tests, Chromium, real WebGPU + real DuckDB
+npm test           # 753 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
+npm run test:gpu   # 93 browser tests, Chromium, real WebGPU + real DuckDB
 npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
 npm run dev        # the inspector on :5173, the node editor at /editor/
@@ -134,6 +140,17 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 - **luma only uses subgroups if the device requested them.** It checks `device.features`, and
   a feature not in `requiredFeatures` is absent. `initGpu` asks for `subgroups`; a test that
   builds its own device must too, or it measures luma's slow path (366 vs 55 ms above).
+- **luma's private fields are read in exactly two places.** `commandGraphOf` (the compiled
+  graph behind a GPU Dataframe query) and `resourceUsesOf` (each pass's reads and writes) in
+  `src/luma`. Both throw a clear error if luma renames the field, and
+  `graph-description.browser.test.ts` fails on a real compile. Don't add a third; extend the
+  upstream request in `docs/upstream/luma-command-graph-topology.md` instead.
+- **One `GPUCommandGraphInspector` keys graphs by id, and a repeated id replaces the earlier
+  registration.** Two `LumaFilter`s shared `noodles-luma-filter`, and the first one's timings
+  went nowhere, with no error. Graph ids carry a counter (`graphId`) for this reason.
+- **React Flow hides a node it has not measured.** The graph viewer rebuilds nodes on every
+  metrics update and has no `onNodesChange`, so a node without an explicit `width` and
+  `height` stayed `visibility: hidden` after the first update. Keep the sizes on the nodes.
 - **An expression is SQL-feasible only if its vectors are at the top level.** `enginesFor`
   checks this; a new construct that nests a vector must keep that check true.
 
