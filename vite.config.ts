@@ -19,6 +19,7 @@ const plannerAliases = [
   { find: '@noodles.gl/planner', replacement: resolve('packages/planner/src/index.ts') },
   // Same reason for the graph viewer package.
   { find: '@noodles.gl/graph-view/react', replacement: resolve('packages/graph-view/src/react/index.ts') },
+  { find: '@noodles.gl/graph-view/layouts', replacement: resolve('packages/graph-view/src/layouts/index.ts') },
   { find: '@noodles.gl/graph-view', replacement: resolve('packages/graph-view/src/index.ts') },
 ];
 

@@ -22,12 +22,24 @@ export interface LayoutOptions {
   bandGap?: number;
 }
 
+/**
+ * Anything that places a description's nodes: `layoutGraph`, or one of the layouts in
+ * `@noodles.gl/graph-view/layouts`. The viewer takes one as its `layout`.
+ */
+export type LayoutFunction = (description: GraphDescription, options: LayoutOptions) => GraphLayout;
+
 export interface GraphLayout {
   positions: Record<string, { x: number; y: number }>;
   /** Column index of each node, left to right. */
   layers: Record<string, number>;
   /** Wrapped band of each node, top to bottom; all 0 without `wrapWidth`. */
   bands: Record<string, number>;
+  /**
+   * How the viewer should draw edges for this layout. `curve` (the default) suits a layered
+   * layout whose edges run left to right; a force layout puts nodes at any angle to each other,
+   * where a curve leaving a right-hand handle loops, so it asks for `straight`.
+   */
+  edgeShape?: 'curve' | 'straight';
   width: number;
   height: number;
 }

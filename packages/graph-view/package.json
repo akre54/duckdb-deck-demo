@@ -5,7 +5,10 @@
   "description": "A JSON description of a node graph, and a viewer for it. Producer-agnostic: a GPU command graph, a query plan or an editor network all describe themselves the same way.",
   "license": "MIT",
   "sideEffects": false,
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -14,6 +17,10 @@
     "./react": {
       "types": "./dist/react/index.d.ts",
       "import": "./dist/react/index.js"
+    },
+    "./layouts": {
+      "types": "./dist/layouts/index.d.ts",
+      "import": "./dist/layouts/index.js"
     }
   },
   "scripts": {
@@ -21,11 +28,19 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "peerDependencies": {
+    "@dagrejs/dagre": "^3.0.0",
     "@xyflow/react": "^12.0.0",
+    "d3-force": "^3.0.0",
     "react": ">=18"
   },
   "peerDependenciesMeta": {
+    "@dagrejs/dagre": {
+      "optional": true
+    },
     "@xyflow/react": {
+      "optional": true
+    },
+    "d3-force": {
       "optional": true
     },
     "react": {
