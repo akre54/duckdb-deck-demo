@@ -56,9 +56,9 @@ describe('describeCommandGraph', () => {
     expect(work.map((n) => n.order)).toEqual(work.map((_, i) => i));
 
     const byLabel = (pattern: RegExp) => d.nodes.filter((n) => pattern.test(n.label ?? ''));
-    const predicate = byLabel(/^predicate-batch-0$/)[0];
-    const mask = byLabel(/^selection-mask$/)[0];
-    const rowIds = byLabel(/^row-indices$/)[0];
+    const predicate = byLabel(/^predicate$/)[0];
+    const mask = byLabel(/^selection mask$/)[0];
+    const rowIds = byLabel(/^row indices$/)[0];
     expect(predicate && mask && rowIds).toBeTruthy();
     expect(d.edges).toContainEqual(expect.objectContaining({ from: predicate.id, to: mask.id, kind: 'write' }));
     expect(d.edges.some((e) => e.from === mask.id && e.kind === 'read')).toBe(true);
@@ -115,7 +115,7 @@ describe('describeCommandGraph', () => {
     filter.run({ cut: 0.5 });
     await device.queue.onSubmittedWorkDone();
     const d = describeCommandGraph(filter.commandGraph);
-    const mask = d.nodes.find((n) => n.label === 'selection-mask')!;
+    const mask = d.nodes.find((n) => n.label === 'selection mask')!;
     const table = await previewCommandGraphResource(filter.commandGraph, mask);
     expect(table?.kind).toBe('table');
     if (table?.kind !== 'table') return;

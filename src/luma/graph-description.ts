@@ -36,6 +36,8 @@ export function describeCommandGraph<P>(
 
   const prefix = sharedPrefix([...graph.stats.nodeOrder, ...[...uses.values()].flatMap((u) => u.resources.map((r) => r.id))]);
   const short = (id: string) => id.slice(prefix.length) || id;
+  const passNames = stepNames(graph.stats.nodeOrder.map(short));
+  const resourceNames = stepNames([...new Set([...uses.values()].flatMap((u) => u.resources.map((r) => short(r.id))))]);
   const nodes: GraphNode[] = [];
   const edges: GraphEdge[] = [];
   const version = new Map<string, number>();
@@ -46,7 +48,7 @@ export function describeCommandGraph<P>(
         id,
         kind: r.kind,
         role: 'data',
-        label: v > 1 ? `${short(r.id)} (v${v})` : short(r.id),
+        label: `${resourceNames.get(short(r.id)) ?? short(r.id)}${v > 1 ? ` (v${v})` : ''}`,
         metrics: r.byteLength !== undefined ? { bytes: { value: r.byteLength, unit: 'bytes' } } : undefined,
         // The layout of the bytes, which is what a preview needs to show them as values.
         attributes: { resource: r.id, version: v, transient: r.transient, ...r.layout },
@@ -68,7 +70,7 @@ export function describeCommandGraph<P>(
     nodes.push({
       id: nodeId,
       kind: node?.type ?? work?.type ?? 'compute',
-      label: short(nodeId),
+      label: passNames.get(short(nodeId)) ?? short(nodeId),
       group: work?.operation ?? timing?.group,
       order,
       metrics,
@@ -118,6 +120,45 @@ export function describeCommandGraph<P>(
 
 function sampled(d: { p50Milliseconds?: number; p95Milliseconds?: number }): GraphMetric {
   return { value: d.p50Milliseconds!, p95: d.p95Milliseconds, unit: 'ms' };
+}
+
+/**
+ * A short title for each of a graph's ids: the step it names, plus the numbers that tell it apart.
+ *
+ * luma builds an id from its scope, outermost first, with indices as `word-N` pairs:
+ * `visibility-batch-0-compact-scan-level-1-scan` is the scan step of level 1 of the compaction of
+ * batch 0. The step is the last words after the last pair (or before it, for an id that ends on
+ * one, like `group-values-0-finite-chunk-0`). A pair is kept as a qualifier only when its word
+ * takes more than one value across the graph: every pass of a one-batch filter is `batch 0`, which
+ * says nothing, while its scan levels differ. So that pass is `scan · level 1`.
+ */
+export function stepNames(ids: string[]): Map<string, string> {
+  type Parsed = { step: string; pairs: [string, string][] };
+  const parse = (id: string): Parsed => {
+    const tokens = id.split('-');
+    const pairs: [string, string][] = [];
+    const segments: string[][] = [[]];
+    for (let i = 0; i < tokens.length; i++) {
+      if (i + 1 < tokens.length && /^[a-z]+$/.test(tokens[i]) && /^\d+$/.test(tokens[i + 1])) {
+        pairs.push([tokens[i], tokens[i + 1]]);
+        segments.push([]);
+        i++;
+      } else {
+        segments[segments.length - 1].push(tokens[i]);
+      }
+    }
+    const step = [...segments].reverse().find((seg) => seg.length > 0) ?? tokens;
+    return { step: step.join(' '), pairs };
+  };
+  const parsed = new Map(ids.map((id) => [id, parse(id)]));
+  const values = new Map<string, Set<string>>();
+  for (const { pairs } of parsed.values()) {
+    for (const [word, n] of pairs) (values.get(word) ?? values.set(word, new Set()).get(word)!).add(n);
+  }
+  return new Map([...parsed].map(([id, { step, pairs }]) => {
+    const kept = pairs.filter(([word]) => values.get(word)!.size > 1).map(([word, n]) => `${word} ${n}`);
+    return [id, kept.length ? `${step} · ${kept.join(' ')}` : step];
+  }));
 }
 
 /**
