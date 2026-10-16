@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    // Same reason as the planner: `nodenext` enforces the `.js` extension the emitted JS needs.
+    "moduleResolution": "nodenext",
+    // The DOM is in scope for the `./react` entry. The headless entry is held to no DOM and no
+    // package imports by `tests/boundaries.test.ts`, which one tsconfig cannot express.
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

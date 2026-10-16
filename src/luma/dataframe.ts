@@ -20,9 +20,12 @@
  * problem FINDINGS §5a hit when luma created the device itself.
  */
 
-import { Buffer as LumaBuffer, type CommandEncoder } from '@luma.gl/core';
+import { Buffer as LumaBuffer, type CommandEncoder, type QuerySet } from '@luma.gl/core';
 import { WebGPUDevice } from '@luma.gl/webgpu';
-import { GPUCommandGraph } from '@luma.gl/gpgpu/gpu-core';
+import {
+  GPUCommandGraph,
+  type CompiledGPUCommandGraph, type GPUCommandGraphInspector, type GPUCommandGraphInspectorObservation,
+} from '@luma.gl/gpgpu/gpu-core';
 import { GPUData } from '@luma.gl/gpgpu/gpu-data';
 import { GPURecordBatch, GPUTable } from '@luma.gl/experimental/gpu-tables';
 import {
@@ -116,6 +119,8 @@ export interface LumaFilterProps {
   predicate: Expr;
   params?: Record<string, number>;
   topology?: LumaTopology;
+  /** Record every run's CPU timings, and GPU timings where the device has `timestamp-query`. */
+  inspector?: GPUCommandGraphInspector;
 }
 
 /**
@@ -127,10 +132,11 @@ export class LumaFilter {
   readonly batches: number;
   private readonly frame: GPUDataFrame;
   private readonly query: CompiledGPUDataFrameQuery;
+  private readonly runner: GraphRunner;
   private readonly wrapped: LumaBuffer[] = [];
 
   constructor(props: LumaFilterProps) {
-    const { device, adapter, columns, rows, predicate, params = {}, topology = { kind: 'packed' } } = props;
+    const { device, adapter, columns, rows, predicate, params = {}, topology = { kind: 'packed' }, inspector } = props;
     const expr = toLumaExpr(predicate, params);
     if (!expr) throw new Error('predicate has no luma GPU Dataframe form');
 
@@ -141,8 +147,14 @@ export class LumaFilter {
     this.batches = recordBatches.length;
 
     this.frame = new GPUDataFrame({ table: new GPUTable({ batches: recordBatches }), ownership: 'borrowed' });
-    const graph = new GPUCommandGraph<GPUDataFrameQueryParameters>(this.luma, { id: 'noodles-luma-filter' });
+    const graph = new GPUCommandGraph<GPUDataFrameQueryParameters>(this.luma, { id: graphId('noodles-luma-filter') });
     this.query = this.frame.filter(expr).compile(graph);
+    this.runner = new GraphRunner(this.luma, this.query, inspector);
+  }
+
+  /** The compiled command graph, for `describeCommandGraph` and the inspector. */
+  get commandGraph(): CompiledGPUCommandGraph<GPUDataFrameQueryParameters> {
+    return this.runner.graph;
   }
 
   /**
@@ -151,9 +163,7 @@ export class LumaFilter {
    * still puts it ahead of any render pass submitted afterwards.
    */
   run(params: Record<string, number> = {}): void {
-    const encoder: CommandEncoder = this.luma.createCommandEncoder({ id: 'noodles-luma-filter' });
-    this.query.encode(encoder, params);
-    this.luma.submit(encoder.finish() as Parameters<WebGPUDevice['submit']>[0]);
+    this.runner.run(params);
   }
 
   /** Compacted selected-row ids for batch `i` (u32, source-row numbering). */
@@ -180,6 +190,7 @@ export class LumaFilter {
   }
 
   destroy(): void {
+    this.runner.destroy();
     this.query.destroy();
     this.frame.destroy();
     // The wrappers borrow our buffers; luma's destroy would destroy the handle, so drop them
@@ -208,6 +219,8 @@ export interface LumaGroupByProps {
   /** Optional filter ahead of the grouping, in our IR; must be `compactable`. */
   predicate?: Expr;
   params?: Record<string, number>;
+  /** As `LumaFilterProps.inspector`. */
+  inspector?: GPUCommandGraphInspector;
 }
 
 /**
@@ -222,10 +235,11 @@ export class LumaGroupBy {
   readonly groupCount: number;
   private readonly frame: GPUDataFrame;
   private readonly query: CompiledGPUDataFrameQuery;
+  private readonly runner: GraphRunner;
   private readonly wrapped: LumaBuffer[] = [];
 
   constructor(props: LumaGroupByProps) {
-    const { device, adapter, key, groupCount, columns, rows, aggregates, predicate, params = {} } = props;
+    const { device, adapter, key, groupCount, columns, rows, aggregates, predicate, params = {}, inspector } = props;
     const expr = predicate ? toLumaExpr(predicate, params) : null;
     if (predicate && !expr) throw new Error('predicate has no luma GPU Dataframe form');
 
@@ -236,7 +250,7 @@ export class LumaGroupBy {
     const batches = borrowColumns(this.luma, formatted, rows, Math.max(1, rows), this.wrapped);
 
     this.frame = new GPUDataFrame({ table: new GPUTable({ batches }), ownership: 'borrowed' });
-    const graph = new GPUCommandGraph<GPUDataFrameQueryParameters>(this.luma, { id: 'noodles-luma-group-by' });
+    const graph = new GPUCommandGraph<GPUDataFrameQueryParameters>(this.luma, { id: graphId('noodles-luma-group-by') });
     // Column names are runtime strings here, so luma's schema-typed builders see `never`. LuSQL
     // crosses the same boundary the same way.
     const base = (expr ? this.frame.filter(expr) : this.frame) as unknown as {
@@ -245,13 +259,17 @@ export class LumaGroupBy {
       };
     };
     this.query = base.groupBy(key.name, { groupCount }).aggregate(aggregates).compile(graph);
+    this.runner = new GraphRunner(this.luma, this.query, inspector);
+  }
+
+  /** The compiled command graph, for `describeCommandGraph` and the inspector. */
+  get commandGraph(): CompiledGPUCommandGraph<GPUDataFrameQueryParameters> {
+    return this.runner.graph;
   }
 
   /** Re-run the graph with new parameter values; a separate submission, like `LumaFilter.run`. */
   run(params: Record<string, number> = {}): void {
-    const encoder: CommandEncoder = this.luma.createCommandEncoder({ id: 'noodles-luma-group-by' });
-    this.query.encode(encoder, params);
-    this.luma.submit(encoder.finish() as Parameters<WebGPUDevice['submit']>[0]);
+    this.runner.run(params);
   }
 
   /** One aggregate's `groupCount` values: u32 for `count`, f32 otherwise. */
@@ -262,10 +280,88 @@ export class LumaGroupBy {
   }
 
   destroy(): void {
+    this.runner.destroy();
     this.query.destroy();
     this.frame.destroy();
     this.wrapped.length = 0;
   }
+}
+
+/**
+ * Encodes and submits one compiled query, through a `GPUCommandGraphInspector` when given one.
+ *
+ * Without an inspector this is `query.encode` and a submit, as before. With one, the graph is
+ * encoded through the inspector's observation (which is what `query.encode` calls underneath,
+ * `graph.encode(encoder, { parameters })`), so CPU timings are recorded on every run.
+ *
+ * GPU timings need a timestamp query set on the encoder. One set is reused, so a run whose
+ * previous timing read has not resolved goes untimed: writing new timestamps into a set that is
+ * still being read back returns the new run's numbers as the old one's, or a mix of the two.
+ */
+class GraphRunner {
+  readonly graph: CompiledGPUCommandGraph<GPUDataFrameQueryParameters>;
+  private readonly observation?: GPUCommandGraphInspectorObservation<GPUDataFrameQueryParameters>;
+  private readonly querySet?: QuerySet;
+  private reading = false;
+
+  constructor(
+    private readonly luma: WebGPUDevice,
+    private readonly query: CompiledGPUDataFrameQuery,
+    inspector?: GPUCommandGraphInspector,
+  ) {
+    this.graph = commandGraphOf(query);
+    if (!inspector) return;
+    this.observation = inspector.observeGraph(this.graph);
+    if (this.luma.features.has('timestamp-query')) {
+      // Two timestamps per pass; luma keeps every node in its own pass while profiling.
+      this.querySet = this.luma.createQuerySet({ type: 'timestamp', count: 2 * this.graph.stats.nodeOrder.length });
+    }
+  }
+
+  run(parameters: Record<string, number>): void {
+    const timed = this.querySet !== undefined && !this.reading;
+    const encoder: CommandEncoder = this.luma.createCommandEncoder({
+      id: this.graph.id, timeProfilingQuerySet: timed ? this.querySet : null,
+    });
+    if (!this.observation) {
+      this.query.encode(encoder, parameters);
+      this.luma.submit(encoder.finish() as Parameters<WebGPUDevice['submit']>[0]);
+      return;
+    }
+    const encoding = this.observation.encode(encoder, { parameters });
+    this.luma.submit(encoder.finish() as Parameters<WebGPUDevice['submit']>[0]);
+    if (timed) {
+      this.reading = true;
+      // The inspector counts a failed read rather than rethrowing it.
+      void this.observation.recordGPUTimings(encoding).finally(() => { this.reading = false; });
+    }
+  }
+
+  destroy(): void {
+    this.observation?.detach();
+    this.querySet?.destroy();
+  }
+}
+
+/**
+ * A graph id unique to this page. luma's inspector keys registrations by graph id, and a second
+ * graph registered under an id replaces the first: two filters sharing `noodles-luma-filter`
+ * left the first one's timings silently going nowhere.
+ */
+let graphCount = 0;
+function graphId(prefix: string): string {
+  return `${prefix}-${++graphCount}`;
+}
+
+/**
+ * The compiled command graph behind a GPU Dataframe query. luma keeps it in a private field
+ * (9.4.2 and master as of 2026-10-16), so this is the one place that reaches in.
+ * TODO(luma): use a public accessor on `CompiledGPUDataFrameQuery` once there is one.
+ */
+function commandGraphOf(query: CompiledGPUDataFrameQuery): CompiledGPUCommandGraph<GPUDataFrameQueryParameters> {
+  const graph = (query as unknown as { graph?: CompiledGPUCommandGraph<GPUDataFrameQueryParameters> }).graph;
+  if (!graph) throw new Error('this luma version does not keep a compiled query\'s graph in `graph`; commandGraphOf needs updating');
+  return graph;
 }
 
 type ColumnRef = { buffer: GPUBuffer; format: 'float32' | 'uint32' };

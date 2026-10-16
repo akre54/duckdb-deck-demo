@@ -18,8 +18,10 @@
     "baseUrl": ".",
     "paths": {
       "@noodles.gl/planner": ["packages/planner/src/index.ts"],
-      "@noodles.gl/planner/fixtures": ["packages/planner/src/fixtures.ts"]
+      "@noodles.gl/planner/fixtures": ["packages/planner/src/fixtures.ts"],
+      "@noodles.gl/graph-view": ["packages/graph-view/src/index.ts"],
+      "@noodles.gl/graph-view/react": ["packages/graph-view/src/react/index.ts"]
     }
   },
-  "include": ["src", "demo", "tests", "packages/planner/src", "vite.config.ts", "vitest.browser.config.ts"]
+  "include": ["src", "demo", "tests", "packages/planner/src", "packages/graph-view/src", "vite.config.ts", "vitest.browser.config.ts"]
 }

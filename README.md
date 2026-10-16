@@ -6,8 +6,9 @@ which engine runs each node. Houdini-style named attributes (`P`, `Cd`, `pscale`
 
 **Live demo:** <https://akre54.github.io/duckdb-deck-demo/>. This is the inspector app with
 the three example graphs described below. The node editor is at
-[`/editor/`](https://akre54.github.io/duckdb-deck-demo/editor/). Both are published from
-`main` by `.github/workflows/pages.yml`.
+[`/editor/`](https://akre54.github.io/duckdb-deck-demo/editor/), and a live view of luma.gl's
+GPU command graphs is at [`/graph/`](https://akre54.github.io/duckdb-deck-demo/graph/). All
+three are published from `main` by `.github/workflows/pages.yml`.
 
 ## How this fits with deck.gl and luma.gl
 
@@ -25,9 +26,9 @@ suggested next changes and open research.
 
 ```bash
 npm install
-npm run dev        # the inspector at /, the node editor at /editor/
-npm test           # 738 node tests, including real DuckDB through duckdb-wasm's Node build
-npm run test:gpu   # 91 browser tests, real WebGPU + real DuckDB
+npm run dev        # the inspector at /, the node editor at /editor/, the GPU graph at /graph/
+npm test           # 753 node tests, including real DuckDB through duckdb-wasm's Node build
+npm run test:gpu   # 93 browser tests, real WebGPU + real DuckDB
 ```
 
 You need Chrome or Edge 113+, or Safari 26+. [FINDINGS.md](FINDINGS.md) has the measured
@@ -382,9 +383,31 @@ Four example projects rebuild the shapes of common Noodles and Joby projects on 
 
 Documents are JSON (`demo/editor/examples/*.json`); Save and Open round-trip them.
 
+## The GPU command graph viewer
+
+`npm run dev`, then open `/graph/`. It runs three luma.gl GPU Dataframe queries over 1M rows
+(a filter, the same filter in four batches, and a filtered group-by) every frame. Each query's
+compiled `GPUCommandGraph` is drawn with its passes, the buffers they read and write, and per-pass
+CPU and GPU time from luma's `GPUCommandGraphInspector`.
+
+- **`@noodles.gl/graph-view`** (`packages/graph-view`) is the viewer, and it doesn't know about
+  luma. A producer emits a JSON description (nodes, edges, metrics), and the package lays it out
+  and draws it with React Flow. See its [README](packages/graph-view/README.md) for the schema.
+- **`describeCommandGraph`** (`@noodles.gl/gpu-runtime/luma`) is the luma producer. luma doesn't
+  publish what each pass reads and writes, so for now this function reads it from a private field.
+  [`docs/upstream/luma-command-graph-topology.md`](docs/upstream/luma-command-graph-topology.md)
+  is the request to make it public.
+- **`LumaFilter` and `LumaGroupBy`** take an optional `inspector` and expose `commandGraph`.
+
+Per-pass GPU times arrive in 65.5 µs steps, because Chrome quantizes timestamp queries unless
+`chrome://flags/#enable-webgpu-developer-features` is on. A pass shown as 0 µs ran in less than
+one step.
+
 ## Repository layout
 
 ```
+packages/graph-view/ @noodles.gl/graph-view: a graph description schema, layout, and a
+                    React Flow viewer; headless main entry, React under ./react
 packages/planner/   @noodles.gl/planner: expression IR and backends, analyze/optimize/emit,
                     statistics, cost model, target capabilities, attribute conventions,
                     source providers, wrangle parser, Arrow upload, CPU stage, fixtures;
@@ -392,11 +415,14 @@ packages/planner/   @noodles.gl/planner: expression IR and backends, analyze/opt
                     the operator library, editor documents, lowering, keyframes
 src/webgpu/         device, attributes, kernels, camera, calibration, passes, runtime
 src/duckdb/         DuckDbEngine, a SqlEngine over duckdb-wasm
+src/luma/           LumaFilter, LumaGroupBy, lumaCompactor over luma.gl's GPU Dataframe;
+                    describeCommandGraph, a command graph as a graph-view description
 src/program/        ProgramRuntime, the memo catalog, per-layer query and CPU stage
 src/deck/           the WebGL2, WebGPU and MapLibre deck.gl panes, and the program pane
 docs/               how the planner integrates with deck.gl and luma.gl
 demo/               the inspector app: main.ts, ui/, graphs/, data/ (not published)
 demo/editor/        the node editor: React Flow network, parameter pane, timeline, examples
+demo/graph/         the GPU command graph viewer over live luma.gl queries
 tests/              boundary guard, budgets, benchmarks, browser/
 ```
 
