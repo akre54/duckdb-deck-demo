@@ -68,7 +68,9 @@ can't make them readable.
   be the package's first runtime dependency.
 - **Positions:** memoized on the graph's structure, not on the description object. A producer
   streaming timings re-emits the whole description every few hundred milliseconds, and nodes
-  shouldn't move when a number changes width. A new structure remounts the canvas and re-fits it.
+  shouldn't move when a number changes width. A new structure remounts the canvas and frames
+  it again. A graph too wide to read when fitted starts at its left edge, at a readable zoom,
+  because these graphs read left to right from their inputs.
 - **Heat bar:** `heatMetric` (default `gpu`) draws a bar under each work node, scaled to the
   largest value in the graph. On a luma group-by over 1M rows and 16 bins, the float-mean pass
   fills its bar and the other 18 passes barely register.

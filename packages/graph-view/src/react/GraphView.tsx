@@ -1,7 +1,7 @@
-import { memo, useMemo, type CSSProperties } from 'react';
+import { memo, useMemo, useRef, type CSSProperties } from 'react';
 import {
   ReactFlow, Background, Controls, Handle, Position, MarkerType,
-  type Edge, type Node, type NodeProps,
+  type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from '@xyflow/react';
 import type { GraphDescription, GraphNode } from '../schema.js';
 import { layoutGraph, type NodeSize } from '../layout.js';
@@ -36,6 +36,10 @@ const EDGE_COLORS: Record<string, string> = {
   read: '#64748b', write: '#f59e0b', dependency: '#a78bfa', data: '#94a3b8',
 };
 
+/** Smallest zoom the initial view uses; below it a card's metrics are unreadable. */
+const MIN_INITIAL_ZOOM = 0.55;
+const PAD = 24;
+
 // Tall enough for a two-line name and three metrics, so the layout's boxes match what is drawn.
 const WORK: NodeSize = { width: 220, height: 104 };
 const DATA: NodeSize = { width: 170, height: 40 };
@@ -64,6 +68,24 @@ export function GraphView(props: GraphViewProps) {
   const shown = useMemo(() => (collapse ? collapseData(description) : description), [description, collapse]);
   const structure = structureKey(shown);
   const layout = useMemo(() => layoutGraph(shown, { size: sizeOf }), [structure]);
+  const container = useRef<HTMLDivElement>(null);
+
+  /**
+   * Fit the graph when it fits at a readable zoom. When it does not, start at the left edge
+   * rather than centered: these graphs read left to right from their inputs, and `fitView`
+   * clamped to a minimum zoom centers the graph and puts its first passes off screen.
+   */
+  const frame = (flow: ReactFlowInstance<CardNode, Edge>) => {
+    const box = container.current?.getBoundingClientRect();
+    if (!box || !layout.width) return;
+    const fit = Math.min((box.width - 2 * PAD) / layout.width, (box.height - 2 * PAD) / layout.height, 1);
+    const zoom = Math.max(fit, MIN_INITIAL_ZOOM);
+    void flow.setViewport({
+      x: fit >= MIN_INITIAL_ZOOM ? (box.width - layout.width * zoom) / 2 : PAD,
+      y: Math.max(PAD, (box.height - layout.height * zoom) / 2),
+      zoom,
+    });
+  };
 
   const hottest = heatMetric ? Math.max(0, ...shown.nodes.map((n) => n.metrics?.[heatMetric]?.value ?? 0)) : 0;
   const nodes: CardNode[] = shown.nodes.map((n) => ({
@@ -97,17 +119,15 @@ export function GraphView(props: GraphViewProps) {
   });
 
   return (
-    <div className={className} style={{ width: '100%', height: '100%', background: '#0b0c10', ...style }}>
+    <div ref={container} className={className} style={{ width: '100%', height: '100%', background: '#0b0c10', ...style }}>
       <ReactFlow
-        // A new structure (another graph, or the pass-only view) remounts so `fitView` frames it;
+        // A new structure (another graph, or the pass-only view) remounts so `frame` runs again;
         // a metrics update keeps the user's pan and zoom.
         key={structure}
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
-        fitView
-        // A long pass chain fitted whole is unreadable; start legible and let the user pan.
-        fitViewOptions={{ minZoom: 0.55, maxZoom: 1 }}
+        onInit={frame}
         minZoom={0.1}
         nodesConnectable={false}
         nodesDraggable={false}
