@@ -195,6 +195,37 @@
         background: var(--panel); color: var(--dim);
       }
       footer b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+      /* A drag on the stage orbits the camera; without this a touch drag scrolls the page. */
+      #panes { touch-action: none; }
+
+      /* --- phone ------------------------------------------------------------
+         One column: controls, then the stage at a fixed share of the height, then the
+         panel. The side-by-side panes stack, and the tab strip scrolls rather than wraps. */
+      @media (max-width: 800px) {
+        body { height: 100dvh; grid-template-rows: auto minmax(0, 1fr) auto; }
+        header {
+          display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; padding: 8px 10px;
+        }
+        header > a { justify-self: end; }
+        #status { grid-column: 1 / -1; }
+        #status { margin-left: 0; font-size: 11px; }
+        label.field { min-width: 0; }
+        label.field select { flex: 1; min-width: 0; }
+        /* 16px stops iOS from zooming the page when a control takes focus. */
+        select, input, textarea, button { font-size: 16px; }
+        main { grid-template-columns: minmax(0, 1fr); grid-template-rows: 42% minmax(0, 1fr); }
+        #panes { flex-direction: column; }
+        .pane + .pane:not([hidden]) { border-left: 0; border-top: 1px solid var(--line); }
+        #hint { display: none; }
+        aside { border-left: 0; border-top: 1px solid var(--line); }
+        #params { max-height: 24vh; }
+        #tabs { overflow-x: auto; scrollbar-width: none; }
+        #tabs button { flex: none; font-size: 12px; }
+        .editor-split { grid-template-columns: 1fr; }
+        /* One line of counters that scrolls sideways, rather than three that wrap. */
+        footer { flex-wrap: nowrap; white-space: nowrap; overflow-x: auto; gap: 12px; padding: 4px 10px; font-size: 11px; }
+      }
     </style>
   </head>
   <body>
