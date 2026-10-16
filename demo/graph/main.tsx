@@ -94,7 +94,13 @@ async function start(): Promise<{ queries: Query[]; inspector: GPUCommandGraphIn
 function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>) {
   const [active, setActive] = useState(queries[0].key);
   const [cut, setCut] = useState(0.5);
-  const [collapse, setCollapse] = useState(false);
+  // A phone gets compact cards with buffers folded into edges: the regular view fits two or
+  // three passes on a phone screen. The graph still flows right. These graphs are wide (seven
+  // independent passes open the group-by), so a layer fits a phone's height as a column but
+  // not its width as a row, and flowing right leaves one axis to swipe instead of two.
+  const narrow = useNarrow();
+  const [collapse, setCollapse] = useState(narrow);
+  const [compact, setCompact] = useState(narrow);
   const [tab, setTab] = useState<'node' | 'json'>('node');
   const [selected, setSelected] = useState<string>();
   const [description, setDescription] = useState<GraphDescription>();
@@ -123,25 +129,33 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
   }, [query, cut, inspector]);
 
   const node = useMemo(() => description?.nodes.find((n) => n.id === selected), [description, selected]);
-  const totals = Object.entries(description?.metrics ?? {});
+  // On a phone the header keeps only the whole-graph times; the allocation figures are in JSON.
+  const totals = Object.entries(description?.metrics ?? {}).filter(([k]) => !narrow || k === 'gpu' || k === 'cpu');
 
   return (
-    <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr', height: '100vh', background: '#0b0c10', color: '#dde1ea', font: '12px/1.45 -apple-system, sans-serif' }}>
-      <header style={{ display: 'flex', gap: 16, alignItems: 'center', padding: '8px 12px', borderBottom: '1px solid #262a36', flexWrap: 'wrap' }}>
-        <strong>GPU command graph</strong>
-        <select value={active} onChange={(e) => { setActive(e.target.value); setSelected(undefined); }}>
+    // dvh, not vh: on a phone 100vh is taller than the visible area while the toolbar shows.
+    <div style={{ display: 'grid', gridTemplateRows: 'auto 1fr', height: '100dvh', background: '#0b0c10', color: '#dde1ea', font: '12px/1.45 -apple-system, sans-serif' }}>
+      <header style={{ display: 'flex', gap: narrow ? '6px 12px' : 16, alignItems: 'center', padding: narrow ? '6px 10px' : '8px 12px', borderBottom: '1px solid #262a36', flexWrap: 'wrap' }}>
+        {!narrow && <strong>GPU command graph</strong>}
+        <select value={active} onChange={(e) => { setActive(e.target.value); setSelected(undefined); }} style={narrow ? { flex: '1 1 100%' } : undefined}>
           {queries.map((q) => <option key={q.key} value={q.key}>{q.label}</option>)}
         </select>
         <label>cut <input type="range" min={0} max={1} step={0.01} value={cut} onChange={(e) => setCut(Number(e.target.value))} /> {cut.toFixed(2)}</label>
         <label><input type="checkbox" checked={collapse} onChange={(e) => setCollapse(e.target.checked)} /> passes only</label>
-        <span style={{ marginLeft: 'auto', color: '#8a92a6', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
-          {ROWS.toLocaleString('en-US')} rows · {features.length ? features.join(', ') : 'no optional features'}
+        <label><input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} /> compact</label>
+        <span style={{ marginLeft: narrow ? 0 : 'auto', color: '#8a92a6', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+          {narrow ? '1M rows' : `${ROWS.toLocaleString('en-US')} rows · ${features.length ? features.join(', ') : 'no optional features'}`}
           {totals.map(([k, m]) => ` · ${k} ${formatMetric(m)}`).join('')}
         </span>
       </header>
       <main className="layout">
         {description
-          ? <GraphView description={description} collapse={collapse} selected={selected} onSelect={setSelected} />
+          ? (
+            <GraphView
+              description={description} collapse={collapse} selected={selected} onSelect={setSelected}
+              density={compact ? 'compact' : 'regular'}
+            />
+          )
           : <div style={{ padding: 16 }}>compiling…</div>}
         <aside style={{ padding: 12, overflow: 'auto', minHeight: 0 }}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
@@ -153,8 +167,8 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
           </div>
           {tab === 'node'
             ? (node ? <NodeDetails node={node} /> : (
-              <p style={{ color: '#8a92a6' }}>
-                Click a node. The orange bar is each pass's share of the slowest pass's GPU time.
+              <p style={{ color: '#8a92a6', margin: 0 }}>
+                {narrow ? 'Tap' : 'Click'} a node. The orange bar is each pass's share of the slowest pass's GPU time.
                 Chrome reports pass times in 65.5 µs steps unless WebGPU developer features are on.
               </p>
             ))
@@ -163,6 +177,19 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
       </main>
     </div>
   );
+}
+
+/** Whether the screen is phone-sized, tracking rotation and resizes. Matches the CSS breakpoint. */
+function useNarrow(): boolean {
+  const query = '(max-width: 800px)';
+  const [narrow, setNarrow] = useState(() => matchMedia(query).matches);
+  useEffect(() => {
+    const list = matchMedia(query);
+    const update = () => setNarrow(list.matches);
+    list.addEventListener('change', update);
+    return () => list.removeEventListener('change', update);
+  }, []);
+  return narrow;
 }
 
 const root = createRoot(document.getElementById('root')!);

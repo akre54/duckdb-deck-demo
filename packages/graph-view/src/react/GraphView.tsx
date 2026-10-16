@@ -21,6 +21,12 @@ export interface GraphViewProps {
    * slowest pass stands out without reading every card. Defaults to `gpu`; `null` hides it.
    */
   heatMetric?: string | null;
+  /**
+   * `compact` draws a pass as a one-line name, one metric and the heat bar, and a resource as
+   * a one-line pill, at about a third of the area. For a phone, where the regular cards leave
+   * room for two or three passes on screen.
+   */
+  density?: 'regular' | 'compact';
   selected?: string;
   onSelect?: (id: string | undefined) => void;
   className?: string;
@@ -36,14 +42,18 @@ const EDGE_COLORS: Record<string, string> = {
   read: '#64748b', write: '#f59e0b', dependency: '#a78bfa', data: '#94a3b8',
 };
 
-/** Smallest zoom the initial view uses; below it a card's metrics are unreadable. */
-const MIN_INITIAL_ZOOM = 0.55;
 const PAD = 24;
 
-// Tall enough for a two-line name and three metrics, so the layout's boxes match what is drawn.
-const WORK: NodeSize = { width: 220, height: 104 };
-const DATA: NodeSize = { width: 170, height: 40 };
-const sizeOf = (n: GraphNode) => (n.role === 'data' ? DATA : WORK);
+/**
+ * Card sizes per density, and the smallest zoom the initial view uses. Regular cards are tall
+ * enough for a two-line name and three metrics; compact ones fit one line and one metric, so
+ * they need more zoom to stay readable.
+ */
+const DENSITY = {
+  regular: { work: { width: 220, height: 104 }, data: { width: 170, height: 40 }, minZoom: 0.55, nameChars: 0 },
+  compact: { work: { width: 168, height: 46 }, data: { width: 132, height: 22 }, minZoom: 0.85, nameChars: 24 },
+} satisfies Record<string, { work: NodeSize; data: NodeSize; minZoom: number; nameChars: number }>;
+type Density = keyof typeof DENSITY;
 
 interface CardData extends Record<string, unknown> {
   node: GraphNode;
@@ -51,6 +61,8 @@ interface CardData extends Record<string, unknown> {
   metricKeys?: string[];
   /** Share of the hottest node's heat metric, 0 to 1. */
   heat?: number;
+  heatMetric?: string | null;
+  density: Density;
 }
 type CardNode = Node<CardData, 'work' | 'data'>;
 
@@ -64,27 +76,33 @@ type CardNode = Node<CardData, 'work' | 'data'>;
  * The host must import `@xyflow/react/dist/style.css` once, as it would for any React Flow app.
  */
 export function GraphView(props: GraphViewProps) {
-  const { description, collapse = false, kindColors = DEFAULT_KIND_COLORS, metricKeys, heatMetric = 'gpu', selected, onSelect, className, style } = props;
+  const {
+    description, collapse = false, kindColors = DEFAULT_KIND_COLORS, metricKeys, heatMetric = 'gpu',
+    density = 'regular', selected, onSelect, className, style,
+  } = props;
+  const sizes = DENSITY[density];
+  const sizeOf = (n: GraphNode) => (n.role === 'data' ? sizes.data : sizes.work);
   const shown = useMemo(() => (collapse ? collapseData(description) : description), [description, collapse]);
-  const structure = structureKey(shown);
-  const layout = useMemo(() => layoutGraph(shown, { size: sizeOf }), [structure]);
+  const structure = `${density}:${structureKey(shown)}`;
+  const layout = useMemo(
+    () => layoutGraph(shown, { size: sizeOf, ...(density === 'compact' ? { columnGap: 40, rowGap: 12 } : {}) }),
+    [structure],
+  );
   const container = useRef<HTMLDivElement>(null);
 
   /**
-   * Fit the graph when it fits at a readable zoom. When it does not, start at the left edge
-   * rather than centered: these graphs read left to right from their inputs, and `fitView`
-   * clamped to a minimum zoom centers the graph and puts its first passes off screen.
+   * Fit the graph when it fits at a readable zoom. When it does not, center each axis that fits
+   * and start the other at its edge rather than centered: these graphs read left to right from
+   * their inputs, and `fitView` clamped to a minimum zoom centers the graph and puts its first
+   * passes off screen.
    */
   const frame = (flow: ReactFlowInstance<CardNode, Edge>) => {
     const box = container.current?.getBoundingClientRect();
     if (!box || !layout.width) return;
     const fit = Math.min((box.width - 2 * PAD) / layout.width, (box.height - 2 * PAD) / layout.height, 1);
-    const zoom = Math.max(fit, MIN_INITIAL_ZOOM);
-    void flow.setViewport({
-      x: fit >= MIN_INITIAL_ZOOM ? (box.width - layout.width * zoom) / 2 : PAD,
-      y: Math.max(PAD, (box.height - layout.height * zoom) / 2),
-      zoom,
-    });
+    const zoom = Math.max(fit, sizes.minZoom);
+    const start = (room: number, extent: number) => (extent * zoom <= room - 2 * PAD ? (room - extent * zoom) / 2 : PAD);
+    void flow.setViewport({ x: start(box.width, layout.width), y: start(box.height, layout.height), zoom });
   };
 
   const hottest = heatMetric ? Math.max(0, ...shown.nodes.map((n) => n.metrics?.[heatMetric]?.value ?? 0)) : 0;
@@ -97,7 +115,7 @@ export function GraphView(props: GraphViewProps) {
     // (no onNodesChange) mode, so without these every node went hidden after the first update.
     ...sizeOf(n),
     data: {
-      node: n, color: kindColors[n.kind] ?? '#525252', metricKeys,
+      node: n, color: kindColors[n.kind] ?? '#525252', metricKeys, heatMetric, density,
       heat: heatMetric && hottest > 0 ? (n.metrics?.[heatMetric]?.value ?? 0) / hottest : undefined,
     },
     selected: n.id === selected,
@@ -110,7 +128,8 @@ export function GraphView(props: GraphViewProps) {
       id: `${e.from}->${e.to}#${i}`,
       source: e.from,
       target: e.to,
-      label: e.label,
+      // On a compact card the labels (resource names, often several) outweigh the cards.
+      label: density === 'compact' ? undefined : e.label,
       labelStyle: { fill: '#cbd5e1', fontSize: 10, fontFamily: MONO },
       labelBgStyle: { fill: '#0b0c10' },
       style: { stroke: color, strokeWidth: 1.5, strokeDasharray: e.kind === 'dependency' ? '4 3' : undefined },
@@ -150,12 +169,55 @@ function structureKey(d: GraphDescription): string {
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
 const hidden: CSSProperties = { opacity: 0, pointerEvents: 'none' };
 
-const WorkCard = memo(function WorkCard({ data, selected }: NodeProps<CardNode>) {
+/**
+ * A name cut from the front to `max` characters. Pass names share long prefixes and differ at the
+ * end (`...-scan-level-1-scan`, `...-level-2-scan`), so the end is the part to keep.
+ */
+const tail = (name: string, max: number) => (max && name.length > max ? `…${name.slice(name.length - max + 1)}` : name);
+
+const HeatBar = ({ heat, margin }: { heat?: number; margin: string }) =>
+  heat === undefined ? null : (
+    <div style={{ height: 3, margin, background: '#232733', borderRadius: 2 }}>
+      <div style={{ height: '100%', width: `${Math.max(heat * 100, heat > 0 ? 2 : 0)}%`, background: '#f97316', borderRadius: 2 }} />
+    </div>
+  );
+
+const WorkCard = memo(function WorkCard(props: NodeProps<CardNode>) {
+  return props.data.density === 'compact' ? <CompactWorkCard {...props} /> : <RegularWorkCard {...props} />;
+});
+
+const CompactWorkCard = ({ data, selected }: NodeProps<CardNode>) => {
   const { node, color } = data;
+  const size = DENSITY.compact.work;
+  const key = data.metricKeys?.[0] ?? (data.heatMetric && node.metrics?.[data.heatMetric] ? data.heatMetric : Object.keys(node.metrics ?? {})[0]);
+  const metric = key ? node.metrics?.[key] : undefined;
+  return (
+    <div title={node.id} style={{
+      width: size.width, height: size.height, boxSizing: 'border-box', borderRadius: 5, overflow: 'hidden',
+      background: '#151821', color: '#e5e7eb', font: `10.5px/1.35 ${MONO}`,
+      // The kind color as a stripe rather than a header row, which a one-line card has no room for.
+      border: `1px solid ${selected ? '#e5e7eb' : '#2a2f3a'}`, boxShadow: `inset 4px 0 0 ${color}`,
+      padding: '4px 7px 0 10px', display: 'flex', flexDirection: 'column', gap: 1,
+    }}>
+      <Handle type="target" position={Position.Left} style={hidden} />
+      <span style={{ fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden' }}>{tail(node.label ?? node.id, DENSITY.compact.nameChars)}</span>
+      <span style={{ display: 'flex', justifyContent: 'space-between', color: '#9ca3af' }}>
+        <span>{metric ? key : node.kind}</span>
+        <span style={{ color: '#e5e7eb' }}>{metric ? formatMetric({ ...metric, p95: undefined }) : ''}</span>
+      </span>
+      <HeatBar heat={data.heat} margin="2px 0 0" />
+      <Handle type="source" position={Position.Right} style={hidden} />
+    </div>
+  );
+};
+
+const RegularWorkCard = ({ data, selected }: NodeProps<CardNode>) => {
+  const { node, color } = data;
+  const size = DENSITY.regular.work;
   const keys = data.metricKeys ?? Object.keys(node.metrics ?? {}).slice(0, 3);
   return (
     <div style={{
-      width: WORK.width, minHeight: WORK.height, boxSizing: 'border-box', borderRadius: 6, overflow: 'hidden',
+      width: size.width, minHeight: size.height, boxSizing: 'border-box', borderRadius: 6, overflow: 'hidden',
       background: '#151821', color: '#e5e7eb', font: `11px/1.4 ${MONO}`,
       border: `1px solid ${selected ? '#e5e7eb' : '#2a2f3a'}`,
     }}>
@@ -178,29 +240,35 @@ const WorkCard = memo(function WorkCard({ data, selected }: NodeProps<CardNode>)
           </div>
         ))}
       </div>
-      {data.heat !== undefined && (
-        <div style={{ height: 3, margin: '0 8px 6px', background: '#232733', borderRadius: 2 }}>
-          <div style={{ height: '100%', width: `${Math.max(data.heat * 100, data.heat > 0 ? 2 : 0)}%`, background: '#f97316', borderRadius: 2 }} />
-        </div>
-      )}
+      <HeatBar heat={data.heat} margin="0 8px 6px" />
       <Handle type="source" position={Position.Right} style={hidden} />
     </div>
   );
-});
+};
 
 const DataCard = memo(function DataCard({ data, selected }: NodeProps<CardNode>) {
   const { node, color } = data;
+  const compact = data.density === 'compact';
+  const size = DENSITY[data.density].data;
   const bytes = node.metrics?.bytes;
+  const name = node.label ?? node.id;
   return (
     <div title={node.id} style={{
-      width: DATA.width, height: DATA.height, boxSizing: 'border-box', borderRadius: DATA.height / 2,
-      padding: '3px 12px', background: '#10131a', color: '#e5e7eb', font: `10.5px/1.35 ${MONO}`,
+      width: size.width, height: size.height, boxSizing: 'border-box', borderRadius: size.height / 2,
+      padding: compact ? '0 9px' : '3px 12px', background: '#10131a', color: '#e5e7eb',
+      font: `${compact ? 9.5 : 10.5}px/1.35 ${MONO}`,
       border: `1px ${node.attributes?.transient ? 'dashed' : 'solid'} ${selected ? '#e5e7eb' : color}`,
-      display: 'flex', flexDirection: 'column', justifyContent: 'center',
+      display: 'flex', flexDirection: 'column', justifyContent: 'center', whiteSpace: 'nowrap', overflow: 'hidden',
     }}>
       <Handle type="target" position={Position.Left} style={hidden} />
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{node.label ?? node.id}</span>
-      <span style={{ color: '#9ca3af' }}>{node.kind}{bytes ? ` · ${formatMetric(bytes)}` : ''}</span>
+      {compact ? (
+        <span>{tail(name, 14)}{bytes ? <span style={{ color: '#9ca3af' }}> {formatMetric(bytes)}</span> : null}</span>
+      ) : (
+        <>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{name}</span>
+          <span style={{ color: '#9ca3af' }}>{node.kind}{bytes ? ` · ${formatMetric(bytes)}` : ''}</span>
+        </>
+      )}
       <Handle type="source" position={Position.Right} style={hidden} />
     </div>
   );
