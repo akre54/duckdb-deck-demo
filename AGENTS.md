@@ -150,7 +150,7 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
   graph behind a GPU Dataframe query) and `resourceUsesOf` (each pass's reads and writes) in
   `src/luma`. Both throw a clear error if luma renames the field, and
   `graph-description.browser.test.ts` fails on a real compile. Don't add a third; extend the
-  upstream request in `docs/upstream/luma-command-graph-topology.md` instead.
+  upstream request listed in `docs/upstream.md` instead.
 - **One `GPUCommandGraphInspector` keys graphs by id, and a repeated id replaces the earlier
   registration.** Two `LumaFilter`s shared `noodles-luma-filter`, and the first one's timings
   went nowhere, with no error. Graph ids carry a counter (`graphId`) for this reason.
