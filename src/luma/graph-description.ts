@@ -18,6 +18,7 @@
 
 import type { CompiledGPUCommandGraph, GPUCommandGraphInspectorGraphSnapshot } from '@luma.gl/gpgpu/gpu-core';
 import type { GraphDescription, GraphEdge, GraphMetric, GraphNode } from '@noodles.gl/graph-view';
+import { texelBytes } from './graph-preview.js';
 
 export interface DescribeCommandGraphOptions {
   /** The graph's entry in `GPUCommandGraphInspector.getSnapshot()`, for CPU and GPU timings. */
@@ -47,7 +48,8 @@ export function describeCommandGraph<P>(
         role: 'data',
         label: v > 1 ? `${short(r.id)} (v${v})` : short(r.id),
         metrics: r.byteLength !== undefined ? { bytes: { value: r.byteLength, unit: 'bytes' } } : undefined,
-        attributes: { resource: r.id, version: v, transient: r.transient },
+        // The layout of the bytes, which is what a preview needs to show them as values.
+        attributes: { resource: r.id, version: v, transient: r.transient, ...r.layout },
       });
     }
     return id;
@@ -82,11 +84,21 @@ export function describeCommandGraph<P>(
       // A read of a resource nothing in the graph has written is a read of its imported contents.
       // Color already says read or write; a label is only worth its clutter for the other usages.
       const label = r.usage.startsWith('storage-') ? undefined : r.usage;
-      if (r.reads) edges.push({ from: resourceNode(r, current ?? 0), to: nodeId, kind: 'read', label });
+      // The tooltip's facts: how the pass touches the resource, and how many bytes of it.
+      const moved = r.range?.byteLength ?? r.byteLength;
+      const detail = {
+        ...(moved !== undefined ? { metrics: { bytes: { value: moved, unit: 'bytes' as const } } } : {}),
+        attributes: {
+          usage: r.usage, resource: short(r.id),
+          ...(r.layout.format ? { format: r.layout.format } : {}),
+          ...(r.range?.byteOffset ? { byteOffset: r.range.byteOffset } : {}),
+        },
+      };
+      if (r.reads) edges.push({ from: resourceNode(r, current ?? 0), to: nodeId, kind: 'read', label, ...detail });
       if (r.writes) {
         const next = (current ?? 0) + 1;
         version.set(r.id, next);
-        edges.push({ from: nodeId, to: resourceNode(r, next), kind: 'write', label });
+        edges.push({ from: nodeId, to: resourceNode(r, next), kind: 'write', label, ...detail });
       }
     }
     for (const before of node?.dependsOn ?? []) edges.push({ from: before, to: nodeId, kind: 'dependency' });
@@ -131,6 +143,10 @@ interface ResourceUse {
   writes: boolean;
   byteLength?: number;
   transient: boolean;
+  /** The byte range a buffer view covers, when the use names a view rather than the buffer. */
+  range?: { byteOffset: number; byteLength: number };
+  /** Element format and extent: `format`, `rows` and `byteStride`, or `format`, `width`, `height`. */
+  layout: Record<string, string | number>;
 }
 
 interface NodeUses {
@@ -139,9 +155,10 @@ interface NodeUses {
   dependsOn: string[];
 }
 
-type Handle = { id: string; byteLength?: number; transient?: boolean; width?: number; height?: number };
+type Handle = { id: string; byteLength?: number; transient?: boolean; width?: number; height?: number; format?: string };
+type View = { buffer: Handle; format: string; length: number; byteOffset: number; byteStride: number; rowByteLength: number };
 type RawUse =
-  | { buffer: Handle | { buffer: Handle }; usage: string }
+  | { buffer: Handle | View; usage: string }
   | { texture: Handle | { texture: Handle }; usage: string }
   | { externalTexture: Handle; usage: string };
 type CompiledNodes = { node: { id: string; type: string; resources?: RawUse[]; dependsOn?: string[] } }[];
@@ -171,20 +188,30 @@ function resourceUsesOf<P>(graph: CompiledGPUCommandGraph<P>): Map<string, NodeU
 
 function toResourceUse(use: RawUse): ResourceUse {
   if ('buffer' in use) {
-    const handle = 'buffer' in use.buffer ? use.buffer.buffer : use.buffer;
+    const view = 'buffer' in use.buffer ? use.buffer : undefined;
+    const handle = view ? view.buffer : (use.buffer as Handle);
     return {
       id: handle.id, kind: 'buffer', usage: use.usage, byteLength: handle.byteLength, transient: !!handle.transient,
       reads: BUFFER_READS.has(use.usage), writes: BUFFER_WRITES.has(use.usage),
+      ...(view ? {
+        range: { byteOffset: view.byteOffset, byteLength: Math.max(0, view.length - 1) * view.byteStride + view.rowByteLength },
+        layout: { format: view.format, rows: view.length, byteStride: view.byteStride, byteOffset: view.byteOffset },
+      } : { layout: {} }),
     };
   }
   if ('texture' in use) {
     const handle = 'texture' in use.texture ? use.texture.texture : use.texture;
     return {
       id: handle.id, kind: 'texture', usage: use.usage, transient: !!handle.transient,
+      byteLength: handle.format && texelBytes(handle.format) ? (handle.width ?? 0) * (handle.height ?? 0) * texelBytes(handle.format)! : undefined,
       reads: TEXTURE_READS.has(use.usage), writes: TEXTURE_WRITES.has(use.usage),
+      layout: { ...(handle.format ? { format: handle.format } : {}), width: handle.width ?? 0, height: handle.height ?? 0 },
     };
   }
-  return { id: use.externalTexture.id, kind: 'external-texture', usage: use.usage, transient: false, reads: true, writes: false };
+  return {
+    id: use.externalTexture.id, kind: 'external-texture', usage: use.usage, transient: false, reads: true, writes: false,
+    layout: { width: use.externalTexture.width ?? 0, height: use.externalTexture.height ?? 0 },
+  };
 }
 
 const BUFFER_READS = new Set(['storage-read', 'storage-read-write', 'uniform', 'copy-source', 'indirect', 'vertex', 'index']);

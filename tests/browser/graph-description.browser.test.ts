@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { GPUCommandGraphInspector } from '@luma.gl/gpgpu/gpu-core';
 import { parseExpr } from '@noodles.gl/planner';
 import { validateGraph, collapseData, type GraphDescription } from '@noodles.gl/graph-view';
-import { LumaFilter, LumaGroupBy, describeCommandGraph } from '../../src/luma/index.js';
+import { LumaFilter, LumaGroupBy, describeCommandGraph, previewCommandGraphResource } from '../../src/luma/index.js';
+import { DensityGraph, DENSITY_SIZE } from '../../demo/graph/density.js';
 import { gpuDevice, storageBuffer, expectNoGpuError } from './harness.js';
 
 /**
@@ -107,5 +108,61 @@ describe('describeCommandGraph', () => {
       expect(timed.length).toBe(q.commandGraph.stats.nodeOrder.length);
     }
     for (const q of [a, b, group]) q.destroy();
+  });
+
+  it('previews what a pass wrote: the mask as values, a texture as pixels', async () => {
+    const filter = new LumaFilter({ device, adapter, columns: { v }, rows: ROWS, predicate: parseExpr('v > {{cut}}'), params: { cut: 0.5 } });
+    filter.run({ cut: 0.5 });
+    await device.queue.onSubmittedWorkDone();
+    const d = describeCommandGraph(filter.commandGraph);
+    const mask = d.nodes.find((n) => n.label === 'selection-mask')!;
+    const table = await previewCommandGraphResource(filter.commandGraph, mask);
+    expect(table?.kind).toBe('table');
+    if (table?.kind !== 'table') return;
+    expect(table.columns).toEqual(['row', 'uint32']);
+    expect(table.total).toBe(ROWS);
+    // v is (i % 100) / 100, so rows 0..50 fail `v > 0.5` and rows 51..99 pass.
+    const values = table.rows.map((r) => r[1]);
+    expect(values).toEqual(Array.from({ length: 16 }, (_, i) => (i % 100 > 50 ? 1 : 0)));
+
+    // A column the dataframe imported is a typed view, so it decodes as f32, not as raw words.
+    const input = d.nodes.find((n) => n.role === 'data' && /input/.test(n.label ?? ''))!;
+    const column = await previewCommandGraphResource(filter.commandGraph, input);
+    expect(column?.kind === 'table' && column.rows.slice(0, 3).map((r) => r[1])).toEqual([0, 0.01, 0.02]);
+    filter.destroy();
+
+    const w = storageBuffer(device, new Float32Array(ROWS).map((_, i) => (i % 50) * 2), 'w');
+    const density = new DensityGraph({ device, adapter, v, w, rows: ROWS });
+    await expectNoGpuError(device, async () => {
+      density.run({ cut: 0.5 });
+      await device.queue.onSubmittedWorkDone();
+    });
+    const dd = describeCommandGraph(density.commandGraph);
+    expect(validateGraph(dd)).toEqual([]);
+    expect(density.commandGraph.stats.nodeOrder).toEqual(['clear-bins', 'accumulate', 'colorize']);
+    const texture = dd.nodes.find((n) => n.kind === 'texture')!;
+    expect(texture.attributes).toMatchObject({ format: 'rgba8unorm', width: DENSITY_SIZE, height: DENSITY_SIZE });
+    const image = await previewCommandGraphResource(density.commandGraph, texture);
+    expect(image?.kind).toBe('image');
+    if (image?.kind !== 'image') return;
+    expect([image.width, image.height, image.rgba.length]).toEqual([DENSITY_SIZE, DENSITY_SIZE, DENSITY_SIZE * DENSITY_SIZE * 4]);
+    // Only v > 0.5 is counted, so the left half of the map stays the empty-bin color and the
+    // right half has lit bins: the cut reached the pass and the texture reached the preview.
+    const red = (x: number, y: number) => image.rgba[(y * DENSITY_SIZE + x) * 4];
+    let leftLit = 0;
+    let rightLit = 0;
+    for (let y = 0; y < DENSITY_SIZE; y++) {
+      for (let x = 0; x < DENSITY_SIZE; x++) {
+        if (red(x, y) > 30) { if (x < DENSITY_SIZE / 2) leftLit++; else rightLit++; }
+      }
+    }
+    expect(leftLit).toBe(0);
+    expect(rightLit).toBeGreaterThan(0);
+
+    // `v` was imported as a whole buffer with no view, so its format is unknown: both readings.
+    const vNode = dd.nodes.find((n) => n.label === 'v')!;
+    const raw = await previewCommandGraphResource(density.commandGraph, vNode);
+    expect(raw?.kind === 'table' && raw.columns).toEqual(['row', 'as u32', 'as f32']);
+    density.destroy();
   });
 });

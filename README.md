@@ -385,10 +385,14 @@ Documents are JSON (`demo/editor/examples/*.json`); Save and Open round-trip the
 
 ## The GPU command graph viewer
 
-`npm run dev`, then open `/graph/`. It runs three luma.gl GPU Dataframe queries over 1M rows
-(a filter, the same filter in four batches, and a filtered group-by) every frame. Each query's
-compiled `GPUCommandGraph` is drawn with its passes, the buffers they read and write, and per-pass
-CPU and GPU time from luma's `GPUCommandGraphInspector`.
+`npm run dev`, then open `/graph/`. It runs four luma.gl command graphs over 1M rows every
+frame: three GPU Dataframe queries (a filter, the same filter in four batches, and a filtered
+group-by) and a hand-written density map that bins (v, w) into a 256×256 texture
+(`demo/graph/density.ts`). Each compiled `GPUCommandGraph` is drawn with its passes, the
+buffers and textures they read and write, and per-pass CPU and GPU time from luma's
+`GPUCommandGraphInspector`. Hover a buffer to read its first rows back from the GPU, or the
+density texture to see it; hover an edge for its usage, format and bytes. Long chains wrap
+onto rows.
 
 - **`@noodles.gl/graph-view`** (`packages/graph-view`) is the viewer, and it doesn't know about
   luma. A producer emits a JSON description (nodes, edges, metrics), and the package lays it out

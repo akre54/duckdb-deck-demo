@@ -156,7 +156,10 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
   went nowhere, with no error. Graph ids carry a counter (`graphId`) for this reason.
 - **React Flow hides a node it has not measured.** The graph viewer rebuilds nodes on every
   metrics update and has no `onNodesChange`, so a node without an explicit `width` and
-  `height` stayed `visibility: hidden` after the first update. Keep the sizes on the nodes.
+  `height` stayed `visibility: hidden` after the first update. Keep the sizes on the nodes,
+  and the `handles` too: without them a rebuilt node lost its measured handle bounds, so every
+  edge unmounted and remounted on every update, which also swallowed the `mouseleave` that
+  closes an edge tooltip. A probe that holds a DOM node across updates catches this.
 - **An expression is SQL-feasible only if its vectors are at the top level.** `enginesFor`
   checks this; a new construct that nests a vector must keep that check true.
 

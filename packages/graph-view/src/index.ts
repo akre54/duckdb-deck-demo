@@ -11,6 +11,7 @@ export {
   type GraphDescription, type GraphNode, type GraphNodeRole, type GraphEdge,
   type GraphMetric, type GraphMetricUnit,
 } from './schema.js';
+export { type NodePreview } from './preview.js';
 export { validateGraph } from './validate.js';
 export { layoutGraph, type LayoutOptions, type GraphLayout, type NodeSize } from './layout.js';
 export { collapseData } from './collapse.js';

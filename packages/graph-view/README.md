@@ -74,6 +74,16 @@ can't make them readable.
 - **Density:** `density="compact"` draws a pass as a one-line name (cut from the front, since
   pass names share long prefixes and differ at the end), one metric and the heat bar, and a
   resource as a one-line pill, at about a third of the regular card's area. For phones.
+- **Wrap:** `wrap` lays a graph too wide to read when fitted onto rows, like text: the columns
+  fill a row as wide as the viewer at a readable zoom, then continue on the next. An edge into the
+  next row is routed in steps around the row's end. `layoutGraph` takes the same `wrapWidth`.
+- **Previews:** `preview(node)` returns a `NodePreview` (a table of values, RGBA pixels, or
+  text), asked for on hover and kept open on tap. It is plain data, so a producer reads its own
+  resources and the viewer only draws them. `@noodles.gl/gpu-runtime/luma`'s
+  `previewCommandGraphResource` reads a luma graph's buffers and textures back from the GPU.
+- **Edges:** colored by kind (read, write, dependency, folded data), as wide as the log of the
+  bytes they move, and hoverable for every metric and attribute the producer gave them. A legend
+  names the colors in use.
 - **Heat bar:** `heatMetric` (default `gpu`) draws a bar under each work node, scaled to the
   largest value in the graph. On a luma group-by over 1M rows and 16 bins, the float-mean pass
   fills its bar and the other 18 passes barely register.

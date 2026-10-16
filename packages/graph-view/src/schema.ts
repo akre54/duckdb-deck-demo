@@ -65,4 +65,7 @@ export interface GraphEdge {
    */
   kind?: string;
   label?: string;
+  /** What moves along the edge: `bytes` sets its width, and all of them show in its tooltip. */
+  metrics?: Record<string, GraphMetric>;
+  attributes?: Record<string, string | number | boolean>;
 }

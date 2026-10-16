@@ -14,6 +14,7 @@ import type { GraphDescription, GraphEdge } from './schema.js';
 export function collapseData(description: GraphDescription): GraphDescription {
   const role = new Map(description.nodes.map((n) => [n.id, n.role ?? 'work']));
   const label = new Map(description.nodes.map((n) => [n.id, n.label ?? n.id]));
+  const bytes = new Map(description.nodes.map((n) => [n.id, n.metrics?.bytes?.value ?? 0]));
   const into = new Map<string, string[]>();
   const outOf = new Map<string, string[]>();
   for (const e of description.edges) {
@@ -27,14 +28,17 @@ export function collapseData(description: GraphDescription): GraphDescription {
   );
 
   const kept: GraphEdge[] = description.edges.filter((e) => !collapsed.has(e.from) && !collapsed.has(e.to));
-  const bridged = new Map<string, { from: string; to: string; labels: string[] }>();
+  const bridged = new Map<string, { from: string; to: string; labels: string[]; bytes: number }>();
   for (const id of collapsed) {
     for (const from of into.get(id)!) {
       for (const to of outOf.get(id)!) {
         if (from === to) continue;
         const key = `${from}\u0000${to}`;
-        const edge = bridged.get(key) ?? bridged.set(key, { from, to, labels: [] }).get(key)!;
-        if (!edge.labels.includes(label.get(id)!)) edge.labels.push(label.get(id)!);
+        const edge = bridged.get(key) ?? bridged.set(key, { from, to, labels: [], bytes: 0 }).get(key)!;
+        if (!edge.labels.includes(label.get(id)!)) {
+          edge.labels.push(label.get(id)!);
+          edge.bytes += bytes.get(id)!;
+        }
       }
     }
   }
@@ -43,7 +47,10 @@ export function collapseData(description: GraphDescription): GraphDescription {
     nodes: description.nodes.filter((n) => !collapsed.has(n.id)),
     edges: [
       ...kept,
-      ...[...bridged.values()].map(({ from, to, labels }) => ({ from, to, kind: 'data', label: labels.join(', ') })),
+      ...[...bridged.values()].map(({ from, to, labels, bytes: moved }) => ({
+        from, to, kind: 'data', label: labels.join(', '),
+        ...(moved ? { metrics: { bytes: { value: moved, unit: 'bytes' as const } } } : {}),
+      })),
     ],
   };
 }
