@@ -10,7 +10,8 @@
       .layout { display: grid; grid-template-columns: 1fr 340px; min-height: 0; }
       .layout > aside { border-left: 1px solid #262a36; }
       @media (max-width: 800px) {
-        .layout { grid-template-columns: 1fr; grid-template-rows: 1fr 40%; }
+        /* The graph gets most of a phone screen; the details panel scrolls. */
+        .layout { grid-template-columns: 1fr; grid-template-rows: 1fr 28%; }
         .layout > aside { border-left: none; border-top: 1px solid #262a36; }
       }
     </style>

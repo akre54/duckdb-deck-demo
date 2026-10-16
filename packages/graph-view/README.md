@@ -71,6 +71,9 @@ can't make them readable.
   shouldn't move when a number changes width. A new structure remounts the canvas and frames
   it again. A graph too wide to read when fitted starts at its left edge, at a readable zoom,
   because these graphs read left to right from their inputs.
+- **Density:** `density="compact"` draws a pass as a one-line name (cut from the front, since
+  pass names share long prefixes and differ at the end), one metric and the heat bar, and a
+  resource as a one-line pill, at about a third of the regular card's area. For phones.
 - **Heat bar:** `heatMetric` (default `gpu`) draws a bar under each work node, scaled to the
   largest value in the graph. On a luma group-by over 1M rows and 16 bins, the float-mean pass
   fills its bar and the other 18 passes barely register.
