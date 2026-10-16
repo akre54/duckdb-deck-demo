@@ -30,8 +30,8 @@ and to its built `dist` when the root package compiles — that is why `tsconfig
 ## Commands
 
 ```bash
-npm test           # 680 node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
-npm run test:gpu   # 66 browser tests, Chromium, real WebGPU + real DuckDB
+npm test           # node tests; the program ones run real DuckDB (duckdb-wasm, Node build)
+npm run test:gpu   # browser tests, Chromium, real WebGPU + real DuckDB
 npm run typecheck  # tsc --noEmit across everything
 npm run build      # planner dist, then the runtime entries
 npm run dev        # the inspector on :5173, the node editor at /editor/
@@ -88,6 +88,12 @@ kernel's storage-binding count so it can reject candidates over the per-stage li
 - Playwright's default headless binary is `chrome-headless-shell`, which has **no WebGPU**:
   `navigator.gpu` exists but `requestAdapter()` returns null, so GPU tests skip while looking like
   they ran. The config uses `channel: 'chromium'`.
+- **CI runs WebGPU on SwiftShader** (`.github/workflows/ci.yml`; the Linux flags are in
+  `vitest.browser.config.ts`). Without `--use-angle=swiftshader` the first frame presented to
+  a canvas destroys the device and every later test fails with "A valid external Instance
+  reference no longer exists". SwiftShader's chained trig is looser than Metal's, and a
+  million-instance draw takes seconds there: check `isSoftwareAdapter` before widening a
+  tolerance or skipping a test, and never do either unconditionally.
 - `Runtime.build()` marks kernels dirty without dispatching. A derived attribute reads as zero
   until a frame is submitted — use the `settle()` helper in tests.
 - A bind-group cache must key on a token that changes when a buffer is *replaced*. Labels are not

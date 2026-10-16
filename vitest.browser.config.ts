@@ -60,6 +60,24 @@ export default defineConfig({
             // Software rasterization, so the suite works on a machine or CI box with no
             // usable GPU. A real GPU is used when one is available.
             '--enable-unsafe-swiftshader',
+            // Chromium on Linux ships WebGPU behind a flag and only over Vulkan. The CI
+            // runners have no GPU, so Vulkan is SwiftShader's. Not applied elsewhere: macOS
+            // has WebGPU on Metal by default.
+            ...(process.platform === 'linux'
+              ? [
+                  '--enable-unsafe-webgpu',
+                  '--enable-features=Vulkan',
+                  '--use-vulkan=swiftshader',
+                  '--use-webgpu-adapter=swiftshader',
+                  // Without this, compute-only tests pass and the first frame presented to a
+                  // canvas loses the device ("Device was destroyed"), failing every test
+                  // after it with "A valid external Instance reference no longer exists".
+                  // The compositor's GL has to be SwiftShader too for the canvas to share
+                  // images with Dawn. `--use-angle=vulkan` and `--disable-vulkan-surface`
+                  // were tried and do not help.
+                  '--use-angle=swiftshader',
+                ]
+              : []),
           ],
         },
       },

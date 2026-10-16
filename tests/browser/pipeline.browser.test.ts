@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { initGpu, type Gpu } from '../../src/webgpu/device.js';
 import { Runtime } from '../../src/webgpu/runtime.js';
 import { readColumn, evaluateStage, relationSource, sqlSource, targetCaps, type Graph } from '@noodles.gl/planner';
-import { duck, readBuffer, readBufferU32, expectNoGpuError } from './harness.js';
+import { duck, readBuffer, readBufferU32, expectNoGpuError, isSoftwareAdapter } from './harness.js';
 
 /**
  * The pipeline end to end on real engines: DuckDB produces Arrow, the upload path lands it on
@@ -701,7 +701,17 @@ describe('gpu aggregation produces exact counts', () => {
 });
 
 describe('calibration measures this machine', () => {
-  it('produces finite, positive constants for every field', async () => {
+  /**
+   * Calibration draws two million instances, which SwiftShader (CI) takes 15 s a sample for:
+   * each of these tests ran 7.6 minutes there and passed. Measuring a CPU rasterizer's cost
+   * constants is not what the tests guard, so they run on real GPUs only.
+   */
+  const skipOnSoftware = (ctx: { skip: () => void }) => {
+    if (isSoftwareAdapter(gpu.device)) ctx.skip();
+  };
+
+  it('produces finite, positive constants for every field', async (ctx) => {
+    skipOnSoftware(ctx);
     const report = await rt.runCalibration();
     for (const [name, value] of Object.entries(report.costs)) {
       expect(Number.isFinite(value), name).toBe(true);
@@ -711,7 +721,8 @@ describe('calibration measures this machine', () => {
     expect(report.samples.length).toBeGreaterThan(5);
   });
 
-  it('predicts build cost within an order of magnitude of reality', async () => {
+  it('predicts build cost within an order of magnitude of reality', async (ctx) => {
+    skipOnSoftware(ctx);
     // The one test that catches the cost model drifting away from the machine it plans for.
     // Deliberately loose: SwiftShader and a real GPU differ by a lot, and a wrong *ordering*
     // matters far more than a wrong constant.
