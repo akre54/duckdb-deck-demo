@@ -254,3 +254,71 @@ describe('OrbitCamera', () => {
     expect(new OrbitCamera().version).toBe(0);
   });
 });
+
+describe('OrbitCamera.attach', () => {
+  /** An element that records listeners, so pointer sequences can be replayed without a DOM. */
+  function fakeElement() {
+    const handlers: Record<string, (e: unknown) => void> = {};
+    const el = {
+      addEventListener: (type: string, fn: (e: unknown) => void) => { handlers[type] = fn; },
+      removeEventListener: () => {},
+      setPointerCapture: () => {},
+      hasPointerCapture: () => true,
+      releasePointerCapture: () => {},
+    };
+    const fire = (type: string, pointerId: number, x: number, y: number) =>
+      handlers[type]({ pointerId, clientX: x, clientY: y, shiftKey: false, button: 0 });
+    return { el: el as unknown as HTMLElement, fire };
+  }
+
+  it('one pointer orbits', () => {
+    const cam = new OrbitCamera();
+    const { el, fire } = fakeElement();
+    cam.attach(el);
+    const { yaw, distance } = cam.state;
+    fire('pointerdown', 1, 100, 100);
+    fire('pointermove', 1, 150, 100);
+    expect(cam.state.yaw).toBeCloseTo(yaw - 50 * 0.006);
+    expect(cam.state.distance).toBe(distance);
+  });
+
+  it('two pointers spreading apart zoom in by the ratio of their spans', () => {
+    const cam = new OrbitCamera();
+    const { el, fire } = fakeElement();
+    cam.attach(el);
+    const { yaw, distance } = cam.state;
+    fire('pointerdown', 1, 100, 100);
+    fire('pointerdown', 2, 200, 100);
+    fire('pointermove', 2, 300, 100); // span 100 -> 200; midpoint moves 50 right
+    expect(cam.state.distance).toBeCloseTo(distance / 2);
+    // A pinch does not orbit.
+    expect(cam.state.yaw).toBe(yaw);
+  });
+
+  it('two pointers moving together pan without zooming', () => {
+    const cam = new OrbitCamera();
+    const { el, fire } = fakeElement();
+    cam.attach(el);
+    const { distance } = cam.state;
+    const target = [...cam.state.target];
+    fire('pointerdown', 1, 100, 100);
+    fire('pointerdown', 2, 200, 100);
+    fire('pointermove', 1, 100, 140);
+    fire('pointermove', 2, 200, 140);
+    expect(cam.state.distance).toBeCloseTo(distance);
+    expect(cam.state.target[1]).not.toBeCloseTo(target[1]);
+  });
+
+  it('lifting one finger of a pinch orbits from where the other one is, without a jump', () => {
+    const cam = new OrbitCamera();
+    const { el, fire } = fakeElement();
+    cam.attach(el);
+    fire('pointerdown', 1, 100, 100);
+    fire('pointerdown', 2, 200, 100);
+    fire('pointermove', 1, 60, 100); // pointer 1 travels 40 px during the pinch
+    fire('pointerup', 2, 200, 100);
+    const { yaw } = cam.state;
+    fire('pointermove', 1, 70, 100);
+    expect(cam.state.yaw).toBeCloseTo(yaw - 10 * 0.006);
+  });
+});

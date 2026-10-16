@@ -86,34 +86,69 @@ export class OrbitCamera {
   /**
    * Wire pointer + wheel interaction to an element. Returns a teardown function.
    * Attached to the pane container rather than a canvas so the same camera drives
-   * whichever renderer is on screen.
+   * whichever renderer is on screen. One pointer orbits (shift or middle button pans);
+   * two pinch to zoom and pan. The element needs `touch-action: none`, or a touch drag
+   * scrolls the page instead of reaching it.
    */
   attach(canvas: HTMLElement): () => void {
     let dragging = false;
     let lastX = 0;
     let lastY = 0;
     let panning = false;
+    // Every pointer that is down, so two fingers can pinch. A mouse is one pointer and never
+    // reaches the two-pointer path.
+    const pointers = new Map<number, { x: number; y: number }>();
+    let pinch: { span: number; x: number; y: number } | undefined;
+    const pinchOf = () => {
+      const [a, b] = [...pointers.values()];
+      return { span: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    };
+
+    const pan = (dx: number, dy: number) => {
+      // Pan in the camera's screen plane, scaled so it feels the same at any zoom.
+      const [rx, , rz] = right(this.state.yaw);
+      const k = this.state.distance * 0.0015;
+      this.state.target[0] -= dx * k * rx;
+      this.state.target[2] -= dx * k * rz;
+      this.state.target[1] += dy * k;
+    };
+    const zoom = (factor: number) => {
+      this.state.distance = clamp(this.state.distance * factor, 0.02, 60);
+    };
 
     const down = (e: PointerEvent) => {
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      canvas.setPointerCapture(e.pointerId);
+      if (pointers.size === 2) {
+        // A second finger turns an orbit into pinch-zoom plus two-finger pan.
+        pinch = pinchOf();
+        dragging = false;
+        return;
+      }
+      if (pointers.size > 2) return;
       dragging = true;
       panning = e.shiftKey || e.button === 1;
       lastX = e.clientX;
       lastY = e.clientY;
-      canvas.setPointerCapture(e.pointerId);
     };
     const move = (e: PointerEvent) => {
+      if (!pointers.has(e.pointerId)) return;
+      pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pinch && pointers.size === 2) {
+        const next = pinchOf();
+        if (next.span > 0) zoom(pinch.span / next.span);
+        pan(next.x - pinch.x, next.y - pinch.y);
+        pinch = next;
+        this.version++;
+        return;
+      }
       if (!dragging) return;
       const dx = e.clientX - lastX;
       const dy = e.clientY - lastY;
       lastX = e.clientX;
       lastY = e.clientY;
       if (panning) {
-        // Pan in the camera's screen plane, scaled so it feels the same at any zoom.
-        const [rx, , rz] = right(this.state.yaw);
-        const k = this.state.distance * 0.0015;
-        this.state.target[0] -= dx * k * rx;
-        this.state.target[2] -= dx * k * rz;
-        this.state.target[1] += dy * k;
+        pan(dx, dy);
       } else {
         this.state.yaw -= dx * 0.006;
         this.state.pitch = clamp(this.state.pitch + dy * 0.006, -1.5, 1.5);
@@ -121,13 +156,25 @@ export class OrbitCamera {
       this.version++;
     };
     const up = (e: PointerEvent) => {
+      pointers.delete(e.pointerId);
+      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+      if (pointers.size < 2) pinch = undefined;
+      if (pointers.size === 1) {
+        // Lifting one finger of a pinch carries on as an orbit from where the other one is,
+        // instead of jumping by the distance it moved during the pinch.
+        const [rest] = pointers.values();
+        dragging = true;
+        panning = false;
+        lastX = rest.x;
+        lastY = rest.y;
+        return;
+      }
       dragging = false;
       panning = false;
-      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     };
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
-      this.state.distance = clamp(this.state.distance * Math.exp(e.deltaY * 0.0012), 0.02, 60);
+      zoom(Math.exp(e.deltaY * 0.0012));
       this.version++;
     };
 

@@ -265,3 +265,37 @@ pre.code { max-width: 100%; overflow-wrap: anywhere; margin: 4px 0 0; background
 .tl-canvas { position: relative; overflow: hidden; cursor: crosshair; }
 .tl-canvas svg { position: absolute; inset: 0; }
 .tl-empty { position: absolute; left: 12px; top: 34px; color: var(--faint); pointer-events: none; }
+
+/* --- phone ---------------------------------------------------------------
+   One column: the top bar wraps, the work area (viewport over network) takes the middle, and
+   the parameter pane sits below it as a scrolling panel instead of a 360px side column that
+   left the work area almost no width. */
+@media (max-width: 800px) {
+  html, body, #root { height: 100dvh; }
+  .app {
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 32%);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "top" "work" "side";
+  }
+  .topbar { flex-wrap: wrap; padding: 6px 10px; gap: 6px 8px; }
+  .brand small { display: none; }
+  .topbar select { flex: 1 1 50%; min-width: 0; }
+  .status { flex: 1 1 100%; margin-left: 0; min-width: 0; }
+  .status .err { max-width: 100%; }
+  /* 16px stops iOS from zooming the page when a control takes focus. */
+  input, select, textarea { font-size: 16px; }
+  /* A finger needs more than 5px to grab, and the drag must not scroll the page. */
+  .work { grid-template-rows: var(--viewport-h, 46%) 12px 1fr auto; }
+  .splitter { touch-action: none; }
+  .viewport .overlay-info { font-size: 9.5px; max-width: calc(100% - 20px); }
+  .viewport .credits { max-width: 90%; }
+  .tabs { overflow-x: auto; scrollbar-width: none; }
+  .tabs button { flex: none; }
+  .tabs .hint { display: none; }
+  .side { border-left: 0; border-top: 1px solid var(--line); }
+  .prow { grid-template-columns: 92px 1fr 16px; }
+  .planview { grid-template-columns: minmax(0, 1fr); }
+  .tl-body { grid-template-columns: 110px 1fr; height: 96px; }
+  .tl-bar { overflow-x: auto; scrollbar-width: none; white-space: nowrap; }
+  .tl-bar > * { flex: none; }
+}

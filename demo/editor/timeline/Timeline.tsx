@@ -32,7 +32,8 @@ export function Timeline({ engine }: { engine: Engine }) {
   const selectedKeys = useEditor((s) => s.selectedKeys);
   const selection = useEditor((s) => s.selection);
   const [view, setView] = useState<View>('dope');
-  const [collapsed, setCollapsed] = useState(false);
+  // Collapsed on a phone, where the open timeline takes a quarter of the screen from the viewport.
+  const [collapsed, setCollapsed] = useState(() => matchMedia('(max-width: 800px)').matches);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | undefined>();
   const canvas = useRef<HTMLDivElement>(null);
   const width = useWidth(canvas);
