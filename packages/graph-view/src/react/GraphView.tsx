@@ -1,12 +1,14 @@
-import { memo, useMemo, useRef, type CSSProperties } from 'react';
+import { memo, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import {
   ReactFlow, Background, Controls, Handle, Position, MarkerType,
   type Edge, type Node, type NodeProps, type ReactFlowInstance,
 } from '@xyflow/react';
-import type { GraphDescription, GraphNode } from '../schema.js';
+import type { GraphDescription, GraphEdge, GraphNode } from '../schema.js';
+import type { NodePreview } from '../preview.js';
 import { layoutGraph, type NodeSize } from '../layout.js';
 import { collapseData } from '../collapse.js';
 import { formatMetric } from '../format.js';
+import { EdgeTip, Legend, Popup, PreviewView } from './Popup.js';
 
 export interface GraphViewProps {
   description: GraphDescription;
@@ -27,6 +29,16 @@ export interface GraphViewProps {
    * room for two or three passes on screen.
    */
   density?: 'regular' | 'compact';
+  /**
+   * Wrap a graph too wide to read when fitted onto rows, like text, so a long pass chain continues
+   * on the next row instead of off the right edge. Rows are as wide as the viewer at a readable zoom.
+   */
+  wrap?: boolean;
+  /**
+   * Read a node's contents when it is hovered (or tapped): a buffer's values, a texture's image.
+   * Asked again on every hover, since GPU contents change between frames.
+   */
+  preview?: (node: GraphNode) => Promise<NodePreview | undefined>;
   selected?: string;
   onSelect?: (id: string | undefined) => void;
   className?: string;
@@ -66,6 +78,9 @@ interface CardData extends Record<string, unknown> {
 }
 type CardNode = Node<CardData, 'work' | 'data'>;
 
+/** A popup's anchor in viewer coordinates, and what it shows. */
+type Tip = { x: number; y: number; key: string; content: ReactNode };
+
 /**
  * A read-only view of a graph description.
  *
@@ -78,17 +93,24 @@ type CardNode = Node<CardData, 'work' | 'data'>;
 export function GraphView(props: GraphViewProps) {
   const {
     description, collapse = false, kindColors = DEFAULT_KIND_COLORS, metricKeys, heatMetric = 'gpu',
-    density = 'regular', selected, onSelect, className, style,
+    density = 'regular', wrap = false, preview, selected, onSelect, className, style,
   } = props;
   const sizes = DENSITY[density];
   const sizeOf = (n: GraphNode) => (n.role === 'data' ? sizes.data : sizes.work);
   const shown = useMemo(() => (collapse ? collapseData(description) : description), [description, collapse]);
-  const structure = `${density}:${structureKey(shown)}`;
-  const layout = useMemo(
-    () => layoutGraph(shown, { size: sizeOf, ...(density === 'compact' ? { columnGap: 40, rowGap: 12 } : {}) }),
-    [structure],
-  );
   const container = useRef<HTMLDivElement>(null);
+  const width = useWidth(container);
+
+  // Wrap only a graph that would not fit at a readable zoom, at the width that zoom leaves.
+  const gaps = density === 'compact' ? { columnGap: 40, rowGap: 12 } : {};
+  const room = width ? (width - 2 * PAD) / sizes.minZoom : 0;
+  const structure = `${density}:${structureKey(shown)}`;
+  const flat = useMemo(() => layoutGraph(shown, { size: sizeOf, ...gaps }), [structure]);
+  const wrapWidth = wrap && room && flat.width > room ? Math.round(room / 40) * 40 : undefined;
+  const layout = useMemo(
+    () => (wrapWidth ? layoutGraph(shown, { size: sizeOf, ...gaps, wrapWidth }) : flat),
+    [structure, wrapWidth, flat],
+  );
 
   /**
    * Fit the graph when it fits at a readable zoom. When it does not, center each axis that fits
@@ -101,9 +123,34 @@ export function GraphView(props: GraphViewProps) {
     if (!box || !layout.width) return;
     const fit = Math.min((box.width - 2 * PAD) / layout.width, (box.height - 2 * PAD) / layout.height, 1);
     const zoom = Math.max(fit, sizes.minZoom);
-    const start = (room: number, extent: number) => (extent * zoom <= room - 2 * PAD ? (room - extent * zoom) / 2 : PAD);
+    const start = (span: number, extent: number) => (extent * zoom <= span - 2 * PAD ? (span - extent * zoom) / 2 : PAD);
     void flow.setViewport({ x: start(box.width, layout.width), y: start(box.height, layout.height), zoom });
   };
+
+  // --- popups: a node's preview, an edge's tooltip ---------------------------------------------
+  const [tip, setTip] = useState<Tip>();
+  const pinned = useRef(false);
+  const asked = useRef('');
+  const at = (e: { clientX: number; clientY: number }) => {
+    const box = container.current!.getBoundingClientRect();
+    return { x: e.clientX - box.left, y: e.clientY - box.top };
+  };
+  const showNode = (e: React.MouseEvent, n: GraphNode, pin: boolean) => {
+    if (!preview || (pinned.current && !pin)) return;
+    pinned.current = pin;
+    const title = n.label ?? n.id;
+    const key = `node:${n.id}:${Date.now()}`;
+    asked.current = key;
+    setTip({ ...at(e), key, content: <PreviewView title={title} preview="loading" /> });
+    preview(n).then(
+      (p) => { if (asked.current === key) setTip((t) => t && { ...t, content: <PreviewView title={title} preview={p} /> }); },
+      (err: unknown) => { if (asked.current === key) setTip((t) => t && { ...t, content: <PreviewView title={title} preview={{ kind: 'text', text: String(err) }} /> }); },
+    );
+  };
+  const hide = () => { if (!pinned.current) { asked.current = ''; setTip(undefined); } };
+  // A popup belongs to the graph it was opened on; another graph or view closes it.
+  useLayoutEffect(() => { pinned.current = false; asked.current = ''; setTip(undefined); }, [structure, wrapWidth]);
+  const labelOf = new Map(shown.nodes.map((n) => [n.id, n.label ?? n.id]));
 
   const hottest = heatMetric ? Math.max(0, ...shown.nodes.map((n) => n.metrics?.[heatMetric]?.value ?? 0)) : 0;
   const nodes: CardNode[] = shown.nodes.map((n) => ({
@@ -114,6 +161,10 @@ export function GraphView(props: GraphViewProps) {
     // nodes rebuilt on every metrics update are never fed a measurement back in this read-only
     // (no onNodesChange) mode, so without these every node went hidden after the first update.
     ...sizeOf(n),
+    // Explicit handles too, for the same reason one step later: a rebuilt node lost its measured
+    // handle bounds, so every edge unmounted and remounted on every update. That cost a render,
+    // dropped edges from a throttled tab, and swallowed the mouseleave that closes a tooltip.
+    handles: handlesFor(sizeOf(n)),
     data: {
       node: n, color: kindColors[n.kind] ?? '#525252', metricKeys, heatMetric, density,
       heat: heatMetric && hottest > 0 ? (n.metrics?.[heatMetric]?.value ?? 0) / hottest : undefined,
@@ -122,27 +173,43 @@ export function GraphView(props: GraphViewProps) {
     draggable: false,
     connectable: false,
   }));
+
+  // Width by bytes on a log scale: a 64 B count and a 4 MB column differ by 2^16, and a linear
+  // width would draw one of them invisible.
+  const heaviest = Math.max(1, ...shown.edges.map((e) => e.metrics?.bytes?.value ?? 0));
+  const byId = new Map<string, GraphEdge>();
   const edges: Edge[] = shown.edges.map((e, i) => {
+    const id = `${e.from}->${e.to}#${i}`;
+    byId.set(id, e);
     const color = EDGE_COLORS[e.kind ?? ''] ?? '#94a3b8';
+    const bytes = e.metrics?.bytes?.value;
+    const strokeWidth = bytes ? 1 + 3 * Math.log1p(bytes) / Math.log1p(heaviest) : 1.5;
+    // An edge into the next wrapped row runs back to the left; routed in steps it goes around
+    // the row instead of curving through it.
+    const wrapped = (layout.bands[e.from] ?? 0) !== (layout.bands[e.to] ?? 0);
     return {
-      id: `${e.from}->${e.to}#${i}`,
+      id,
       source: e.from,
       target: e.to,
+      type: wrapped ? 'smoothstep' : 'default',
+      interactionWidth: 14,
       // On a compact card the labels (resource names, often several) outweigh the cards.
       label: density === 'compact' ? undefined : e.label,
       labelStyle: { fill: '#cbd5e1', fontSize: 10, fontFamily: MONO },
       labelBgStyle: { fill: '#0b0c10' },
-      style: { stroke: color, strokeWidth: 1.5, strokeDasharray: e.kind === 'dependency' ? '4 3' : undefined },
+      style: { stroke: color, strokeWidth, strokeDasharray: e.kind === 'dependency' ? '4 3' : undefined },
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 14, height: 14 },
     };
   });
+  const usedKinds = Object.fromEntries(Object.entries(EDGE_COLORS).filter(([k]) => shown.edges.some((e) => (e.kind ?? '') === k)));
+  const bounds = container.current?.getBoundingClientRect();
 
   return (
-    <div ref={container} className={className} style={{ width: '100%', height: '100%', background: '#0b0c10', ...style }}>
+    <div ref={container} className={className} style={{ position: 'relative', width: '100%', height: '100%', background: '#0b0c10', ...style }}>
       <ReactFlow
-        // A new structure (another graph, or the pass-only view) remounts so `frame` runs again;
-        // a metrics update keeps the user's pan and zoom.
-        key={structure}
+        // A new structure (another graph, the pass-only view, a new wrap width) remounts so
+        // `frame` runs again; a metrics update keeps the user's pan and zoom.
+        key={`${structure}:${wrapWidth ?? ''}`}
         nodes={nodes}
         edges={edges}
         nodeTypes={NODE_TYPES}
@@ -150,15 +217,51 @@ export function GraphView(props: GraphViewProps) {
         minZoom={0.1}
         nodesConnectable={false}
         nodesDraggable={false}
-        onNodeClick={(_, n) => onSelect?.(n.id)}
-        onPaneClick={() => onSelect?.(undefined)}
+        onNodeClick={(e, n) => {
+          onSelect?.(n.id);
+          // A tap is the only hover a phone has, so a tapped data node keeps its preview open.
+          if (n.data.node.role === 'data') showNode(e, n.data.node, true);
+        }}
+        onNodeMouseEnter={(e, n) => { if (n.data.node.role === 'data') showNode(e, n.data.node, false); }}
+        onNodeMouseLeave={hide}
+        onEdgeMouseEnter={(e, edge) => {
+          if (pinned.current) return;
+          const g = byId.get(edge.id);
+          if (g) setTip({ ...at(e), key: `edge:${edge.id}`, content: <EdgeTip edge={g} from={labelOf.get(g.from) ?? g.from} to={labelOf.get(g.to) ?? g.to} /> });
+        }}
+        onEdgeMouseLeave={hide}
+        onPaneClick={() => { pinned.current = false; hide(); onSelect?.(undefined); }}
+        onMoveStart={() => { pinned.current = false; hide(); }}
         colorMode="dark"
       >
         <Background gap={16} color="#1f2430" />
         <Controls showInteractive={false} />
       </ReactFlow>
+      {Object.keys(usedKinds).length > 0 && <Legend colors={usedKinds} />}
+      {tip && bounds && <Popup x={tip.x} y={tip.y} bounds={bounds}>{tip.content}</Popup>}
     </div>
   );
+}
+
+/** In on the left edge's middle, out on the right's, matching the cards' hidden `Handle`s. */
+function handlesFor({ width, height }: NodeSize) {
+  return [
+    { type: 'target' as const, position: Position.Left, x: 0, y: height / 2, width: 1, height: 1 },
+    { type: 'source' as const, position: Position.Right, x: width - 1, y: height / 2, width: 1, height: 1 },
+  ];
+}
+
+/** The element's width, kept current as it resizes. Undefined until measured. */
+function useWidth(ref: React.RefObject<HTMLElement | null>): number | undefined {
+  const [width, setWidth] = useState<number>();
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+  return width;
 }
 
 /** Node ids, roles and edges: what the layout depends on. Labels and metrics are not. */

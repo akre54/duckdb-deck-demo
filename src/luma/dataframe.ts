@@ -132,7 +132,7 @@ export class LumaFilter {
   readonly batches: number;
   private readonly frame: GPUDataFrame;
   private readonly query: CompiledGPUDataFrameQuery;
-  private readonly runner: GraphRunner;
+  private readonly runner: CommandGraphRunner;
   private readonly wrapped: LumaBuffer[] = [];
 
   constructor(props: LumaFilterProps) {
@@ -149,7 +149,7 @@ export class LumaFilter {
     this.frame = new GPUDataFrame({ table: new GPUTable({ batches: recordBatches }), ownership: 'borrowed' });
     const graph = new GPUCommandGraph<GPUDataFrameQueryParameters>(this.luma, { id: graphId('noodles-luma-filter') });
     this.query = this.frame.filter(expr).compile(graph);
-    this.runner = new GraphRunner(this.luma, this.query, inspector);
+    this.runner = new CommandGraphRunner(this.luma, commandGraphOf(this.query), inspector);
   }
 
   /** The compiled command graph, for `describeCommandGraph` and the inspector. */
@@ -235,7 +235,7 @@ export class LumaGroupBy {
   readonly groupCount: number;
   private readonly frame: GPUDataFrame;
   private readonly query: CompiledGPUDataFrameQuery;
-  private readonly runner: GraphRunner;
+  private readonly runner: CommandGraphRunner;
   private readonly wrapped: LumaBuffer[] = [];
 
   constructor(props: LumaGroupByProps) {
@@ -259,7 +259,7 @@ export class LumaGroupBy {
       };
     };
     this.query = base.groupBy(key.name, { groupCount }).aggregate(aggregates).compile(graph);
-    this.runner = new GraphRunner(this.luma, this.query, inspector);
+    this.runner = new CommandGraphRunner(this.luma, commandGraphOf(this.query), inspector);
   }
 
   /** The compiled command graph, for `describeCommandGraph` and the inspector. */
@@ -288,28 +288,24 @@ export class LumaGroupBy {
 }
 
 /**
- * Encodes and submits one compiled query, through a `GPUCommandGraphInspector` when given one.
- *
- * Without an inspector this is `query.encode` and a submit, as before. With one, the graph is
- * encoded through the inspector's observation (which is what `query.encode` calls underneath,
- * `graph.encode(encoder, { parameters })`), so CPU timings are recorded on every run.
+ * Encodes and submits one compiled command graph, through a `GPUCommandGraphInspector` when given
+ * one, so CPU timings are recorded on every run. A GPU Dataframe query's `encode` is
+ * `graph.encode(encoder, { parameters })` underneath, so running its graph directly is the same.
  *
  * GPU timings need a timestamp query set on the encoder. One set is reused, so a run whose
  * previous timing read has not resolved goes untimed: writing new timestamps into a set that is
  * still being read back returns the new run's numbers as the old one's, or a mix of the two.
  */
-class GraphRunner {
-  readonly graph: CompiledGPUCommandGraph<GPUDataFrameQueryParameters>;
-  private readonly observation?: GPUCommandGraphInspectorObservation<GPUDataFrameQueryParameters>;
+export class CommandGraphRunner<P extends GPUDataFrameQueryParameters = GPUDataFrameQueryParameters> {
+  private readonly observation?: GPUCommandGraphInspectorObservation<P>;
   private readonly querySet?: QuerySet;
   private reading = false;
 
   constructor(
     private readonly luma: WebGPUDevice,
-    private readonly query: CompiledGPUDataFrameQuery,
+    readonly graph: CompiledGPUCommandGraph<P>,
     inspector?: GPUCommandGraphInspector,
   ) {
-    this.graph = commandGraphOf(query);
     if (!inspector) return;
     this.observation = inspector.observeGraph(this.graph);
     if (this.luma.features.has('timestamp-query')) {
@@ -318,13 +314,13 @@ class GraphRunner {
     }
   }
 
-  run(parameters: Record<string, number>): void {
+  run(parameters: P): void {
     const timed = this.querySet !== undefined && !this.reading;
     const encoder: CommandEncoder = this.luma.createCommandEncoder({
       id: this.graph.id, timeProfilingQuerySet: timed ? this.querySet : null,
     });
     if (!this.observation) {
-      this.query.encode(encoder, parameters);
+      this.graph.encode(encoder, { parameters });
       this.luma.submit(encoder.finish() as Parameters<WebGPUDevice['submit']>[0]);
       return;
     }
@@ -349,7 +345,7 @@ class GraphRunner {
  * left the first one's timings silently going nowhere.
  */
 let graphCount = 0;
-function graphId(prefix: string): string {
+export function graphId(prefix: string): string {
   return `${prefix}-${++graphCount}`;
 }
 
@@ -411,7 +407,7 @@ function borrowColumns(
  */
 const wrappers = new WeakMap<GPUDevice, WebGPUDevice>();
 
-function lumaDeviceFor(device: GPUDevice, adapter: GPUAdapter): WebGPUDevice {
+export function lumaDeviceFor(device: GPUDevice, adapter: GPUAdapter): WebGPUDevice {
   let luma = wrappers.get(device);
   if (!luma) {
     // TODO(luma#3313): `WebGPUAdapter.attach()` is merged (v10.0.0-alpha.3, not in 9.4). Replace

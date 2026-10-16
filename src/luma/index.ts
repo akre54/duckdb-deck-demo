@@ -7,7 +7,8 @@
  */
 
 export {
-  LumaFilter, LumaGroupBy, lumaCompactor, toLumaExpr,
+  LumaFilter, LumaGroupBy, CommandGraphRunner, lumaCompactor, toLumaExpr,
   type LumaFilterProps, type LumaGroupByProps, type LumaAggregate, type LumaTopology,
 } from './dataframe.js';
 export { describeCommandGraph, type DescribeCommandGraphOptions } from './graph-description.js';
+export { previewCommandGraphResource, decodeRows, elementOf, texelBytes, toRgba, type PreviewOptions } from './graph-preview.js';

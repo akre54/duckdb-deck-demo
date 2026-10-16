@@ -68,6 +68,22 @@ describe('layoutGraph', () => {
     expect(positions.z.y).toBe(15);
   });
 
+  it('wraps columns onto bands below once a band would pass the wrap width', () => {
+    const size = () => ({ width: 100, height: 40 });
+    // Seven columns of 100 with gaps of 20: three fit in 340, the fourth would make 460.
+    const { positions, bands, width, height } = layoutGraph(passes, { size, columnGap: 20, rowGap: 10, wrapWidth: 340 });
+    expect(passes.nodes.map((n) => bands[n.id])).toEqual([0, 0, 0, 1, 1, 1, 2]);
+    // Each band restarts at the left edge, one band height plus the gap (3 row gaps) lower.
+    expect(passes.nodes.map((n) => positions[n.id].x)).toEqual([0, 120, 240, 0, 120, 240, 0]);
+    expect(passes.nodes.map((n) => positions[n.id].y)).toEqual([0, 0, 0, 70, 70, 70, 140]);
+    expect([width, height]).toEqual([340, 180]);
+  });
+
+  it('gives a column wider than the wrap width a band of its own instead of looping', () => {
+    const { bands } = layoutGraph(passes, { size: () => ({ width: 500, height: 40 }), wrapWidth: 300 });
+    expect(passes.nodes.map((n) => bands[n.id])).toEqual([0, 1, 2, 3, 4, 5, 6]);
+  });
+
   it('lays out a cycle instead of throwing', () => {
     const loop: GraphDescription = {
       version: 1, id: 'loop',
@@ -90,6 +106,15 @@ describe('collapseData', () => {
       { from: 'compact', to: 'count', kind: 'data', label: 'ids' },
     ]);
     expect(validateGraph(view)).toEqual([]);
+  });
+
+  it('sums the bytes of the resources a bridged edge stands for', () => {
+    const sized: GraphDescription = {
+      ...passes,
+      nodes: passes.nodes.map((n) => (n.id === 'mask@1' ? { ...n, metrics: { bytes: { value: 4096, unit: 'bytes' as const } } } : n)),
+    };
+    const edge = collapseData(sized).edges.find((e) => e.from === 'filter' && e.to === 'compact');
+    expect(edge?.metrics?.bytes).toEqual({ value: 4096, unit: 'bytes' });
   });
 
   it('merges several resources between the same two passes into one edge', () => {

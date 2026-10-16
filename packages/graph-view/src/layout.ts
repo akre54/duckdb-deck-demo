@@ -12,12 +12,22 @@ export interface LayoutOptions {
   rowGap?: number;
   /** Size of each node as drawn. The viewer passes its own so boxes do not overlap. */
   size?: (node: GraphNode) => NodeSize;
+  /**
+   * Wrap onto a new band below once the columns so far would pass this width, the way text
+   * wraps. A long pass chain then reads left to right, row after row, instead of running off
+   * the screen. A column wider than this still gets a band to itself.
+   */
+  wrapWidth?: number;
+  /** Vertical space between wrapped bands. Defaults to three row gaps. */
+  bandGap?: number;
 }
 
 export interface GraphLayout {
   positions: Record<string, { x: number; y: number }>;
   /** Column index of each node, left to right. */
   layers: Record<string, number>;
+  /** Wrapped band of each node, top to bottom; all 0 without `wrapWidth`. */
+  bands: Record<string, number>;
   width: number;
   height: number;
 }
@@ -88,20 +98,42 @@ export function layoutGraph(description: GraphDescription, options: LayoutOption
     column.forEach((n, i) => { row[n.id] = i; });
   }
 
-  // Columns are as wide as their widest node and centered on the tallest column.
+  // Columns are as wide as their widest node and centered on the tallest column of their band.
   const widths = columns.map((c) => Math.max(...c.map((n) => size(n).width)));
   const heights = columns.map((c) => c.reduce((h, n) => h + size(n).height, 0) + rowGap * Math.max(0, c.length - 1));
-  const height = Math.max(0, ...heights);
-  const positions: GraphLayout['positions'] = {};
-  let x = 0;
-  columns.forEach((column, i) => {
-    let y = (height - heights[i]) / 2;
-    for (const n of column) {
-      const s = size(n);
-      positions[n.id] = { x: x + (widths[i] - s.width) / 2, y };
-      y += s.height + rowGap;
-    }
-    x += widths[i] + columnGap;
+
+  // Greedy: a column joins the current band if the band stays within the wrap width.
+  const bandOf: number[] = [];
+  let band = 0;
+  let run = 0;
+  widths.forEach((w, i) => {
+    const next = run === 0 ? w : run + columnGap + w;
+    if (options.wrapWidth !== undefined && run > 0 && next > options.wrapWidth) { band++; run = w; } else run = next;
+    bandOf[i] = band;
   });
-  return { positions, layers, width: Math.max(0, x - columnGap), height };
+  const bandCount = band + 1;
+  const bandHeights = Array.from({ length: bandCount }, (_, b) => Math.max(0, ...heights.filter((_, i) => bandOf[i] === b)));
+  const bandGap = options.bandGap ?? rowGap * 3;
+
+  const positions: GraphLayout['positions'] = {};
+  const bands: GraphLayout['bands'] = {};
+  let width = 0;
+  let top = 0;
+  for (let b = 0; b < bandCount; b++) {
+    let x = 0;
+    columns.forEach((column, i) => {
+      if (bandOf[i] !== b) return;
+      let y = top + (bandHeights[b] - heights[i]) / 2;
+      for (const n of column) {
+        const s = size(n);
+        positions[n.id] = { x: x + (widths[i] - s.width) / 2, y };
+        bands[n.id] = b;
+        y += s.height + rowGap;
+      }
+      x += widths[i] + columnGap;
+    });
+    width = Math.max(width, x - columnGap);
+    top += bandHeights[b] + bandGap;
+  }
+  return { positions, layers, bands, width: Math.max(0, width), height: Math.max(0, top - bandGap) };
 }

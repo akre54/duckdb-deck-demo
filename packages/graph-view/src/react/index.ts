@@ -5,3 +5,4 @@
 
 export { GraphView, DEFAULT_KIND_COLORS, type GraphViewProps } from './GraphView.js';
 export { NodeDetails } from './NodeDetails.js';
+export { PreviewView } from './Popup.js';

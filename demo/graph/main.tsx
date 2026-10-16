@@ -6,6 +6,7 @@
  * `GPUCommandGraphInspector` records CPU timings on every run and GPU timings where the device
  * has `timestamp-query`; `describeCommandGraph` turns the compiled graph plus the inspector's
  * snapshot into the JSON the viewer draws. The JSON tab shows exactly what a producer emits.
+ * Hovering a buffer or texture reads it back from the GPU (`previewCommandGraphResource`).
  *
  * Per-pass GPU times come in steps of 65.5 µs (2^16 ns): Chrome quantizes timestamp queries
  * unless chrome://flags/#enable-webgpu-developer-features is on. A pass shown as 0 µs ran in
@@ -19,7 +20,9 @@ import { GPUCommandGraphInspector } from '@luma.gl/gpgpu/gpu-core';
 import { parseExpr } from '@noodles.gl/planner';
 import { formatMetric, type GraphDescription } from '@noodles.gl/graph-view';
 import { GraphView, NodeDetails } from '@noodles.gl/graph-view/react';
-import { LumaFilter, LumaGroupBy, describeCommandGraph } from '../../src/luma/index.js';
+import type { CompiledGPUCommandGraph } from '@luma.gl/gpgpu/gpu-core';
+import { LumaFilter, LumaGroupBy, describeCommandGraph, previewCommandGraphResource } from '../../src/luma/index.js';
+import { DensityGraph } from './density.js';
 
 const ROWS = 1 << 20;
 const BINS = 16;
@@ -27,7 +30,7 @@ const BINS = 16;
 interface Query {
   key: string;
   label: string;
-  graph: LumaFilter | LumaGroupBy;
+  graph: { run(params: Record<string, number>): void; readonly commandGraph: CompiledGPUCommandGraph<never> };
 }
 
 async function start(): Promise<{ queries: Query[]; inspector: GPUCommandGraphInspector; features: string[] }> {
@@ -55,7 +58,8 @@ async function start(): Promise<{ queries: Query[]; inspector: GPUCommandGraphIn
   const bin = new Uint32Array(ROWS);
   for (let i = 0; i < ROWS; i++) {
     v[i] = Math.random();
-    w[i] = Math.random() * 100;
+    // A sine band with noise, so the density map has a shape. Uniform w would draw flat static.
+    w[i] = Math.min(99.9, Math.max(0, 50 + 32 * Math.sin(v[i] * Math.PI * 3) + (Math.random() + Math.random() + Math.random() - 1.5) * 12));
     bin[i] = Math.floor(v[i] * BINS);
   }
   const buffers = { v: column('v', v), w: column('w', w), bin: column('bin', bin) };
@@ -87,6 +91,11 @@ async function start(): Promise<{ queries: Query[]; inspector: GPUCommandGraphIn
         predicate: parseExpr('v > {{cut}}'),
       }),
     },
+    {
+      key: 'density',
+      label: 'density of (v, w) where v > cut, into a 256×256 texture',
+      graph: new DensityGraph({ device, adapter, v: buffers.v, w: buffers.w, rows: ROWS, inspector }),
+    },
   ];
   return { queries, inspector, features: requiredFeatures };
 }
@@ -101,6 +110,7 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
   const narrow = useNarrow();
   const [collapse, setCollapse] = useState(narrow);
   const [compact, setCompact] = useState(narrow);
+  const [wrap, setWrap] = useState(true);
   const [tab, setTab] = useState<'node' | 'json'>('node');
   const [selected, setSelected] = useState<string>();
   const [description, setDescription] = useState<GraphDescription>();
@@ -143,6 +153,7 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
         <label>cut <input type="range" min={0} max={1} step={0.01} value={cut} onChange={(e) => setCut(Number(e.target.value))} /> {cut.toFixed(2)}</label>
         <label><input type="checkbox" checked={collapse} onChange={(e) => setCollapse(e.target.checked)} /> passes only</label>
         <label><input type="checkbox" checked={compact} onChange={(e) => setCompact(e.target.checked)} /> compact</label>
+        <label><input type="checkbox" checked={wrap} onChange={(e) => setWrap(e.target.checked)} /> wrap</label>
         <span style={{ marginLeft: narrow ? 0 : 'auto', color: '#8a92a6', fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
           {narrow ? '1M rows' : `${ROWS.toLocaleString('en-US')} rows · ${features.length ? features.join(', ') : 'no optional features'}`}
           {totals.map(([k, m]) => ` · ${k} ${formatMetric(m)}`).join('')}
@@ -153,7 +164,8 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
           ? (
             <GraphView
               description={description} collapse={collapse} selected={selected} onSelect={setSelected}
-              density={compact ? 'compact' : 'regular'}
+              density={compact ? 'compact' : 'regular'} wrap={wrap}
+              preview={(n) => previewCommandGraphResource(query.graph.commandGraph, n)}
             />
           )
           : <div style={{ padding: 16 }}>compiling…</div>}
