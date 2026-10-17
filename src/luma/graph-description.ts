@@ -29,7 +29,75 @@ export interface DescribeCommandGraphOptions {
 export function describeCommandGraph<P>(
   graph: CompiledGPUCommandGraph<P>, options: DescribeCommandGraphOptions = {},
 ): GraphDescription {
+  return describeOne(graph, options).description;
+}
+
+export interface DescribedGraph<P = unknown> {
+  graph: CompiledGPUCommandGraph<P>;
+  snapshot?: GPUCommandGraphInspectorGraphSnapshot;
+}
+
+/**
+ * Several command graphs that run in order, as one description: a GPU Dataframe query's graph,
+ * then a graph that renders what it selected, say.
+ *
+ * Each graph is described on its own, then joined where they share data. A resource a later
+ * graph imports and reads before writing is the same buffer or texture an earlier graph produced
+ * when both name one physical luma resource, so it becomes that earlier node rather than a new
+ * input: the query's `row indices` flows straight into the render passes that read it. Node ids
+ * are prefixed with their graph's id, and every node records its graph in `attributes.graph`,
+ * which is how `previewCommandGraphsResource` knows where to read.
+ *
+ * Whole-graph metrics add up per graph: the sum of medians, which is not the median of the sum
+ * but is the cost of running them all.
+ */
+export function describeCommandGraphs(graphs: DescribedGraph[], options: { id?: string; label?: string } = {}): GraphDescription {
+  const nodes: GraphNode[] = [];
+  const edges: GraphEdge[] = [];
+  const latest = new Map<object, { id: string; version: number }>();
+  const totals: Record<string, GraphMetric> = {};
+  let order = 0;
+  for (const { graph, snapshot } of graphs) {
+    const { description, physicalOf } = describeOne(graph, { snapshot });
+    const rename = new Map<string, string>();
+    for (const n of description.nodes) {
+      const physical = physicalOf.get(n.id);
+      const upstream = physical && n.attributes?.version === 0 ? latest.get(physical) : undefined;
+      if (upstream) { rename.set(n.id, upstream.id); continue; }
+      const id = `${graph.id}:${n.id}`;
+      rename.set(n.id, id);
+      nodes.push({
+        ...n, id,
+        ...(n.order !== undefined ? { order: order + n.order } : {}),
+        attributes: { ...n.attributes, graph: graph.id },
+      });
+    }
+    for (const e of description.edges) edges.push({ ...e, from: rename.get(e.from)!, to: rename.get(e.to)! });
+    // What this graph leaves in each shared resource is what the next graph reads. That includes
+    // a resource it only read: the filter's input column is the render graph's input too.
+    for (const n of description.nodes) {
+      const physical = physicalOf.get(n.id);
+      const version = Number(n.attributes?.version ?? 0);
+      if (physical && version >= (latest.get(physical)?.version ?? -1)) latest.set(physical, { id: rename.get(n.id)!, version });
+    }
+    order += graph.stats.nodeOrder.length;
+    for (const [k, m] of Object.entries(description.metrics ?? {})) {
+      const t = totals[k];
+      // Each run encodes every graph once, so encodings are the fewest any graph saw, not a sum.
+      const value = !t ? m.value : k === 'encodings' ? Math.min(t.value, m.value) : t.value + m.value;
+      totals[k] = { value, unit: m.unit };
+    }
+  }
+  const id = options.id ?? graphs.map((g) => g.graph.id).join('+');
+  return { version: 1, id, label: options.label ?? id, nodes, edges, metrics: totals };
+}
+
+/** One graph's description, and the physical buffer or texture behind each of its data nodes. */
+function describeOne<P>(
+  graph: CompiledGPUCommandGraph<P>, options: DescribeCommandGraphOptions,
+): { description: GraphDescription; physicalOf: Map<string, object> } {
   const { snapshot } = options;
+  const physicalOf = new Map<string, object>();
   const uses = resourceUsesOf(graph);
   const preflight = new Map(graph.preflight.nodes.map((n) => [n.id, n]));
   const timings = new Map(snapshot?.nodes.map((n) => [n.id, n]) ?? []);
@@ -53,6 +121,7 @@ export function describeCommandGraph<P>(
         // The layout of the bytes, which is what a preview needs to show them as values.
         attributes: { resource: r.id, version: v, transient: r.transient, ...r.layout },
       });
+      if (r.physical) physicalOf.set(id, r.physical);
     }
     return id;
   };
@@ -84,8 +153,10 @@ export function describeCommandGraph<P>(
     for (const r of node?.resources ?? []) {
       const current = version.get(r.id);
       // A read of a resource nothing in the graph has written is a read of its imported contents.
-      // Color already says read or write; a label is only worth its clutter for the other usages.
-      const label = r.usage.startsWith('storage-') ? undefined : r.usage;
+      // Color already says read or write; a label is only worth its clutter for the usages that
+      // say something more (uniform, indirect, copy), not for a texture's ordinary sampled read or
+      // attachment write.
+      const label = r.usage.startsWith('storage-') || r.usage === 'sampled' || r.usage === 'render-attachment' ? undefined : r.usage;
       // The tooltip's facts: how the pass touches the resource, and how many bytes of it.
       const moved = r.range?.byteLength ?? r.byteLength;
       const detail = {
@@ -96,7 +167,12 @@ export function describeCommandGraph<P>(
           ...(r.range?.byteOffset ? { byteOffset: r.range.byteOffset } : {}),
         },
       };
-      if (r.reads) edges.push({ from: resourceNode(r, current ?? 0), to: nodeId, kind: 'read', label, ...detail });
+      // luma counts a render attachment as read and written, since the pass may load it. The graph
+      // does not record whether it clears or loads, so a texture's first use as an attachment is
+      // taken as a clear: otherwise every render target grows an empty "input" twin. A pass that
+      // loads an imported texture's contents (drawing over a canvas) loses that read edge.
+      const reads = r.reads && !(r.usage === 'render-attachment' && current === undefined);
+      if (reads) edges.push({ from: resourceNode(r, current ?? 0), to: nodeId, kind: 'read', label, ...detail });
       if (r.writes) {
         const next = (current ?? 0) + 1;
         version.set(r.id, next);
@@ -115,7 +191,7 @@ export function describeCommandGraph<P>(
   if (snapshot?.totals.cpu.p50Milliseconds !== undefined) metrics.cpu = sampled(snapshot.totals.cpu);
   if (snapshot) metrics.encodings = { value: snapshot.encodingCount, unit: 'count' };
 
-  return { version: 1, id: graph.id, label: options.label ?? graph.id, nodes, edges, metrics };
+  return { description: { version: 1, id: graph.id, label: options.label ?? graph.id, nodes, edges, metrics }, physicalOf };
 }
 
 function sampled(d: { p50Milliseconds?: number; p95Milliseconds?: number }): GraphMetric {
@@ -188,6 +264,12 @@ interface ResourceUse {
   range?: { byteOffset: number; byteLength: number };
   /** Element format and extent: `format`, `rows` and `byteStride`, or `format`, `width`, `height`. */
   layout: Record<string, string | number>;
+  /**
+   * The luma buffer or texture behind the handle, when the graph has one to name: an imported
+   * resource's default, or a transient's allocation. Two graphs that touch the same one are
+   * sharing data, which is how `describeCommandGraphs` joins them.
+   */
+  physical?: object;
 }
 
 interface NodeUses {
@@ -196,7 +278,11 @@ interface NodeUses {
   dependsOn: string[];
 }
 
-type Handle = { id: string; byteLength?: number; transient?: boolean; width?: number; height?: number; format?: string };
+type Handle = {
+  id: string; byteLength?: number; transient?: boolean; width?: number; height?: number; format?: string;
+  defaultBuffer?: object; defaultTexture?: object;
+};
+type Internals = { transientBuffers?: Map<Handle, object>; transientTextures?: Map<Handle, object> };
 type View = { buffer: Handle; format: string; length: number; byteOffset: number; byteStride: number; rowByteLength: number };
 type RawUse =
   | { buffer: Handle | View; usage: string }
@@ -221,18 +307,21 @@ function resourceUsesOf<P>(graph: CompiledGPUCommandGraph<P>): Map<string, NodeU
     out.set(node.id, {
       type: node.type,
       dependsOn: node.dependsOn ?? [],
-      resources: (node.resources ?? []).map(toResourceUse),
+      resources: (node.resources ?? []).map((use) => toResourceUse(use, graph as unknown as Internals)),
     });
   }
   return out;
 }
 
-function toResourceUse(use: RawUse): ResourceUse {
+function toResourceUse(use: RawUse, internals: Internals): ResourceUse {
+  // A dynamic import wraps the concrete resource in `buffer`/`texture`; luma unwraps it the same way.
+  const unwrap = (r: object | undefined) => (r && 'buffer' in r && !('handle' in r) ? (r as { buffer: object }).buffer : r);
   if ('buffer' in use) {
     const view = 'buffer' in use.buffer ? use.buffer : undefined;
     const handle = view ? view.buffer : (use.buffer as Handle);
     return {
       id: handle.id, kind: 'buffer', usage: use.usage, byteLength: handle.byteLength, transient: !!handle.transient,
+      physical: handle.transient ? internals.transientBuffers?.get(handle) : unwrap(handle.defaultBuffer),
       reads: BUFFER_READS.has(use.usage), writes: BUFFER_WRITES.has(use.usage),
       ...(view ? {
         range: { byteOffset: view.byteOffset, byteLength: Math.max(0, view.length - 1) * view.byteStride + view.rowByteLength },
@@ -244,6 +333,7 @@ function toResourceUse(use: RawUse): ResourceUse {
     const handle = 'texture' in use.texture ? use.texture.texture : use.texture;
     return {
       id: handle.id, kind: 'texture', usage: use.usage, transient: !!handle.transient,
+      physical: handle.transient ? internals.transientTextures?.get(handle) : unwrap(handle.defaultTexture),
       byteLength: handle.format && texelBytes(handle.format) ? (handle.width ?? 0) * (handle.height ?? 0) * texelBytes(handle.format)! : undefined,
       reads: TEXTURE_READS.has(use.usage), writes: TEXTURE_WRITES.has(use.usage),
       layout: { ...(handle.format ? { format: handle.format } : {}), width: handle.width ?? 0, height: handle.height ?? 0 },

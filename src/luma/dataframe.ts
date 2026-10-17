@@ -134,6 +134,7 @@ export class LumaFilter {
   private readonly query: CompiledGPUDataFrameQuery;
   private readonly runner: CommandGraphRunner;
   private readonly wrapped: LumaBuffer[] = [];
+  private readonly batchData: GPURecordBatch[];
 
   constructor(props: LumaFilterProps) {
     const { device, adapter, columns, rows, predicate, params = {}, topology = { kind: 'packed' }, inspector } = props;
@@ -144,6 +145,7 @@ export class LumaFilter {
     const step = topology.kind === 'packed' ? Math.max(1, rows) : topology.rows;
     const formatted = Object.fromEntries(Object.entries(columns).map(([name, buffer]) => [name, { buffer, format: 'float32' as const }]));
     const recordBatches = borrowColumns(this.luma, formatted, rows, step, this.wrapped);
+    this.batchData = recordBatches;
     this.batches = recordBatches.length;
 
     this.frame = new GPUDataFrame({ table: new GPUTable({ batches: recordBatches }), ownership: 'borrowed' });
@@ -167,6 +169,20 @@ export class LumaFilter {
   }
 
   /** Compacted selected-row ids for batch `i` (u32, source-row numbering). */
+  /**
+   * luma's handles on this filter's buffers: the input columns as it reads them, and its outputs.
+   * A graph that imports these (`importGPUData`) reads the same luma buffers, so
+   * `describeCommandGraphs` draws the two graphs as one.
+   */
+  data(batch = 0): { columns: Record<string, GPUData>; rowIndices: GPUData; selectedCount: GPUData; selectionMask: GPUData } {
+    return {
+      columns: this.batchData[batch].gpuData,
+      rowIndices: this.query.rowIndices.data[batch],
+      selectedCount: this.query.selectedCounts.data[batch],
+      selectionMask: this.query.selectionMask.data[batch],
+    };
+  }
+
   rowIndices(batch = 0): GPUBuffer {
     return bufferOf(this.query.rowIndices.data[batch]);
   }
@@ -237,6 +253,7 @@ export class LumaGroupBy {
   private readonly query: CompiledGPUDataFrameQuery;
   private readonly runner: CommandGraphRunner;
   private readonly wrapped: LumaBuffer[] = [];
+  private readonly batchData: GPURecordBatch[];
 
   constructor(props: LumaGroupByProps) {
     const { device, adapter, key, groupCount, columns, rows, aggregates, predicate, params = {}, inspector } = props;
@@ -248,6 +265,7 @@ export class LumaGroupBy {
     const formatted: Record<string, ColumnRef> = { [key.name]: { buffer: key.buffer, format: 'uint32' } };
     for (const [name, buffer] of Object.entries(columns)) formatted[name] = { buffer, format: 'float32' };
     const batches = borrowColumns(this.luma, formatted, rows, Math.max(1, rows), this.wrapped);
+    this.batchData = batches;
 
     this.frame = new GPUDataFrame({ table: new GPUTable({ batches }), ownership: 'borrowed' });
     const graph = new GPUCommandGraph<GPUDataFrameQueryParameters>(this.luma, { id: graphId('noodles-luma-group-by') });
@@ -273,6 +291,11 @@ export class LumaGroupBy {
   }
 
   /** One aggregate's `groupCount` values: u32 for `count`, f32 otherwise. */
+  /** luma's handles on the input columns and on each aggregate's output, as `LumaFilter.data`. */
+  data(): { columns: Record<string, GPUData>; outputs: Record<string, GPUData> } {
+    return { columns: this.batchData[0].gpuData, outputs: this.query.table.batches[0].gpuData as Record<string, GPUData> };
+  }
+
   output(name: string): GPUBuffer {
     const data = this.query.table.batches[0].gpuData[name];
     if (!data) throw new Error(`no group-by output "${name}"`);

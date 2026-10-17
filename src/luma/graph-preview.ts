@@ -24,6 +24,17 @@ export interface PreviewOptions {
   rows?: number;
 }
 
+/**
+ * The preview for a node of a `describeCommandGraphs` view: read from the graph the node came
+ * from (`attributes.graph`).
+ */
+export function previewCommandGraphsResource(
+  graphs: CompiledGPUCommandGraph<never>[], node: GraphNode, options: PreviewOptions = {},
+): Promise<NodePreview | undefined> {
+  const graph = graphs.find((g) => g.id === node.attributes?.graph) ?? graphs[0];
+  return previewCommandGraphResource(graph, node, options);
+}
+
 export async function previewCommandGraphResource<P>(
   graph: CompiledGPUCommandGraph<P>, node: GraphNode, options: PreviewOptions = {},
 ): Promise<NodePreview | undefined> {
@@ -69,9 +80,14 @@ export async function previewCommandGraphResource<P>(
     if (!texture) return { kind: 'text', text: 'Supplied per encoding; no default texture to read.' };
     const { width, height, format } = textureHandle;
     const bpp = texelBytes(format);
-    if (!bpp || !RGBA_FORMATS.has(format)) return { kind: 'text', text: `${format} ${width}×${height}; only 8-bit RGBA formats are drawn.` };
+    const float = FLOAT_FORMATS.has(format);
+    if (!bpp || (!RGBA_FORMATS.has(format) && !float)) return { kind: 'text', text: `${format} ${width}×${height}; not drawn.` };
     const bytesPerRow = Math.ceil((width * bpp) / 256) * 256;
     const raw = await readTexture(internals.device.handle, texture.handle, width, height, bytesPerRow);
+    if (float) {
+      const { rgba, max } = floatToRgba(raw, format, width, height, bytesPerRow);
+      return { kind: 'image', width, height, rgba, note: `${format}, log-scaled to its max (${Number(max.toPrecision(4))}). ${note(!!textureHandle.transient)}` };
+    }
     return { kind: 'image', width, height, rgba: toRgba(raw, format, width, height, bytesPerRow), note: note(!!textureHandle.transient) };
   }
   return undefined;
@@ -151,6 +167,40 @@ const TEXEL_BYTES: Record<string, number> = {
   r32float: 4, r32uint: 4, rg32float: 8, rgba16float: 8, rgba32float: 16, r8unorm: 1,
 };
 const RGBA_FORMATS = new Set(['rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb', 'rgba8uint']);
+const FLOAT_FORMATS = new Set(['r32float', 'rg32float', 'rgba32float', 'rgba16float']);
+
+/**
+ * A float texture as something to look at: each color channel scaled by `log(1 + v) / log(1 + max)`
+ * over the largest value in the image, alpha opaque. An accumulation or blur target holds counts
+ * in the hundreds and weights near zero in the same image; linear scaling would show one bright
+ * pixel on black. Channels a format lacks read as 0.
+ */
+export function floatToRgba(raw: Uint8Array, format: string, width: number, height: number, bytesPerRow: number): { rgba: Uint8ClampedArray<ArrayBuffer>; max: number } {
+  const channels = format.startsWith('rgba') ? 4 : format.startsWith('rg') ? 2 : 1;
+  const isHalf = format.endsWith('16float');
+  const bytes = isHalf ? 2 : 4;
+  const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+  const read = (offset: number) => (isHalf ? half(view.getUint16(offset, true)) : view.getFloat32(offset, true));
+  const values = new Float32Array(width * height * 3);
+  let max = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      for (let c = 0; c < Math.min(3, channels); c++) {
+        const v = Math.max(0, read(y * bytesPerRow + (x * channels + c) * bytes));
+        values[(y * width + x) * 3 + c] = Number.isFinite(v) ? v : 0;
+        if (Number.isFinite(v)) max = Math.max(max, v);
+      }
+    }
+  }
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  const scale = max > 0 ? 255 / Math.log1p(max) : 0;
+  for (let i = 0; i < width * height; i++) {
+    // A one-channel format is drawn gray rather than red.
+    for (let c = 0; c < 3; c++) rgba[i * 4 + c] = Math.log1p(values[i * 3 + (channels === 1 ? 0 : c)]) * scale;
+    rgba[i * 4 + 3] = 255;
+  }
+  return { rgba, max };
+}
 
 function half(h: number): number {
   const s = h & 0x8000 ? -1 : 1;

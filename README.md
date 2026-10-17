@@ -385,10 +385,20 @@ Documents are JSON (`demo/editor/examples/*.json`); Save and Open round-trip the
 
 ## The GPU command graph viewer
 
-`npm run dev`, then open `/graph/`. It runs four luma.gl command graphs over 1M rows every
-frame: three GPU Dataframe queries (a filter, the same filter in four batches, and a filtered
-group-by) and a hand-written density map that bins (v, w) into a 256×256 texture
-(`demo/graph/density.ts`). Each compiled `GPUCommandGraph` is drawn with its passes, the
+`npm run dev`, then open `/graph/`. It runs luma.gl command graphs over 1M rows every frame:
+three GPU Dataframe queries (a filter, the same filter in four batches, and a filtered
+group-by), a hand-written density map that bins (v, w) into a 256×256 texture
+(`demo/graph/density.ts`), and two render pipelines, each a query's graph followed by a graph of
+render passes that imports its buffers:
+
+- **heatmap** (`demo/graph/heatmap.ts`): filter, then indirect draw arguments from the GPU-resident
+  count, an additive splat into a float texture, a separable blur, a colormap, a points overlay
+  and a composite.
+- **histogram** (`demo/graph/histogram.ts`): group-by into 64 bins, then a max reduction, bars
+  colored by the bin's mean, a line through the means, axes, and a composite.
+
+`describeCommandGraphs` draws a pipeline's graphs joined where they name the same luma buffer,
+and the panel shows its last texture, the picture it makes. Each compiled `GPUCommandGraph` is drawn with its passes, the
 buffers and textures they read and write, and per-pass CPU and GPU time from luma's
 `GPUCommandGraphInspector`. Hover a buffer to read its first rows back from the GPU, or the
 density texture to see it; hover an edge for its usage, format and bytes. The layout menu

@@ -7,19 +7,16 @@
  * enough, and because they declare their buffer and texture uses to luma like any contributor,
  * luma orders them and the viewer draws them with nothing special-cased.
  *
- * The passes record with raw WebGPU (`computePass.handle`) rather than luma's `ComputePipeline`,
- * since the bindings here are fixed and few. The bind groups are rebuilt only when a resolved
- * buffer or view changes.
+ * The passes are `computeKernel`s (`./passes.ts`): raw WGSL, with every buffer and texture they
+ * touch declared to luma.
  */
 
-import { Buffer as LumaBuffer, Texture, type Device } from '@luma.gl/core';
+import { Buffer as LumaBuffer, Texture } from '@luma.gl/core';
 import type { WebGPUDevice } from '@luma.gl/webgpu';
-import {
-  GPUCommandGraph, type CompiledGPUCommandGraph, type GPUCommandGraphInspector,
-  type GPUCommandGraphEncodeContext, type GraphBufferHandle, type GraphTextureHandle,
-} from '@luma.gl/gpgpu/gpu-core';
+import { GPUCommandGraph, type CompiledGPUCommandGraph, type GPUCommandGraphInspector } from '@luma.gl/gpgpu/gpu-core';
 import { CommandGraphRunner } from '../../src/luma/index.js';
 import { graphId, lumaDeviceFor } from '../../src/luma/dataframe.js';
+import { computeKernel } from './passes.js';
 
 export const DENSITY_SIZE = 256;
 const N = DENSITY_SIZE;
@@ -60,7 +57,7 @@ export class DensityGraph {
       id: 'clear-bins',
       resources: [{ buffer: bins, usage: 'storage-write' }],
       workload: { operation: 'Density', commandCount: 1, maximumInvocationCount: N * N, writeByteLength: N * N * 4 },
-      compile: ({ device: d }) => kernel(d, CLEAR, [bins], (N * N) / 256),
+      compile: ({ device: d }) => computeKernel<Params>(d, CLEAR, [bins], (N * N) / 256),
     });
     graph.addComputePass({
       id: 'accumulate',
@@ -69,7 +66,7 @@ export class DensityGraph {
         { buffer: params, usage: 'uniform' }, { buffer: bins, usage: 'storage-read-write' },
       ],
       workload: { operation: 'Density', commandCount: 1, maximumInvocationCount: rows, readByteLength: rows * 8, writeByteLength: N * N * 4 },
-      compile: ({ device: d }) => kernel(d, ACCUMULATE, [vIn, wIn, params, bins], Math.ceil(rows / 256), ({ parameters }) => {
+      compile: ({ device: d }) => computeKernel<Params>(d, ACCUMULATE, [vIn, wIn, params, bins], Math.ceil(rows / 256), ({ parameters }) => {
         // Before this command buffer is submitted, so the pass sees this run's `cut`.
         (d as WebGPUDevice).handle.queue.writeBuffer(uniforms.handle as GPUBuffer, 0, new Float32Array([parameters.cut, rows, 0, 0]));
       }),
@@ -78,7 +75,7 @@ export class DensityGraph {
       id: 'colorize',
       resources: [{ buffer: bins, usage: 'storage-read' }, { texture: image, usage: 'storage-write' }],
       workload: { operation: 'Density', commandCount: 1, maximumInvocationCount: N * N, readByteLength: N * N * 4, writeByteLength: N * N * 4 },
-      compile: ({ device: d }) => kernel(d, COLORIZE, [bins, image], [N / 16, N / 16]),
+      compile: ({ device: d }) => computeKernel<Params>(d, COLORIZE, [bins, image], [N / 16, N / 16]),
     });
 
     this.runner = new CommandGraphRunner(luma, graph.compile(), inspector);
@@ -97,45 +94,6 @@ export class DensityGraph {
     this.runner.graph.destroy();
     this.uniforms.destroy();
   }
-}
-
-/**
- * One compute pass: a WGSL module whose bindings are `resources` in order, dispatched over
- * `groups` workgroups. `before` runs at encode time, before the dispatch is recorded.
- */
-function kernel(
-  device: Device,
-  code: string,
-  resources: (GraphBufferHandle | GraphTextureHandle)[],
-  groups: number | [number, number],
-  before?: (context: GPUCommandGraphEncodeContext<Params>) => void,
-) {
-  const gpu = (device as WebGPUDevice).handle;
-  // `auto` is safe here: every binding is fixed and used, which is what makes it unsafe for the
-  // generated kernels (AGENTS.md).
-  const pipeline = gpu.createComputePipeline({ layout: 'auto', compute: { module: gpu.createShaderModule({ code }), entryPoint: 'main' } });
-  let cached: { key: unknown[]; group: GPUBindGroup } | undefined;
-  return {
-    encode(context: GPUCommandGraphEncodeContext<Params> & { computePass: unknown }) {
-      before?.(context);
-      const bound = resources.map((r) =>
-        'byteLength' in r ? (context.getBuffer(r).handle as GPUBuffer) : (context.getTextureView(r).handle as GPUTextureView));
-      if (!cached || cached.key.some((k, i) => k !== bound[i])) {
-        cached = {
-          key: bound,
-          group: gpu.createBindGroup({
-            layout: pipeline.getBindGroupLayout(0),
-            entries: bound.map((resource, binding) => ({ binding, resource: resource instanceof GPUBuffer ? { buffer: resource } : resource })),
-          }),
-        };
-      }
-      const pass = (context.computePass as { handle: GPUComputePassEncoder }).handle;
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, cached.group);
-      const [x, y] = typeof groups === 'number' ? [groups, 1] : groups;
-      pass.dispatchWorkgroups(x, y);
-    },
-  };
 }
 
 const CLEAR = /* wgsl */ `

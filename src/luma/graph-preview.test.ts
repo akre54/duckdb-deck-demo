@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decodeRows, elementOf, texelBytes, toRgba } from './graph-preview.js';
+import { decodeRows, elementOf, floatToRgba, texelBytes, toRgba } from './graph-preview.js';
 
 describe('elementOf', () => {
   it('parses luma vector formats', () => {
@@ -57,5 +57,22 @@ describe('toRgba', () => {
     expect(texelBytes('rgba8unorm')).toBe(4);
     expect(texelBytes('rgba32float')).toBe(16);
     expect(texelBytes('depth24plus')).toBeUndefined();
+  });
+});
+
+describe('floatToRgba', () => {
+  it('log-scales every color channel to the image maximum and draws a one-channel format gray', () => {
+    const f = new Float32Array([0, 1, 3, 0]); // r32float, 2x2, rows tightly packed below
+    const bytesPerRow = 256;
+    const raw = new Uint8Array(bytesPerRow * 2);
+    new Float32Array(raw.buffer, 0, 2).set(f.subarray(0, 2));
+    new Float32Array(raw.buffer, bytesPerRow, 2).set(f.subarray(2, 4));
+    const { rgba, max } = floatToRgba(raw, 'r32float', 2, 2, bytesPerRow);
+    expect(max).toBe(3);
+    const gray = (i: number) => [rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2], rgba[i * 4 + 3]];
+    expect(gray(0)).toEqual([0, 0, 0, 255]);
+    expect(gray(2)).toEqual([255, 255, 255, 255]);
+    // log(1 + 1) / log(1 + 3) of the way up: 0.5.
+    expect(gray(1)[0]).toBe(128);
   });
 });
