@@ -4,9 +4,12 @@
  * Each query below is compiled once into a `GPUCommandGraph` and re-run every frame with the
  * slider's value as its parameter, the way a brushed histogram re-runs. A
  * `GPUCommandGraphInspector` records CPU timings on every run and GPU timings where the device
- * has `timestamp-query`; `describeCommandGraph` turns the compiled graph plus the inspector's
+ * has `timestamp-query`; `describeCommandGraphs` turns the compiled graphs plus the inspector's
  * snapshot into the JSON the viewer draws. The JSON tab shows exactly what a producer emits.
- * Hovering a buffer or texture reads it back from the GPU (`previewCommandGraphResource`).
+ * Hovering a buffer or texture reads it back from the GPU (`previewCommandGraphsResource`).
+ * The two pipelines (heatmap, histogram) are a GPU Dataframe query's graph followed by a graph
+ * of render passes that draw its results; the viewer shows them joined, and the panel shows the
+ * last pass's texture, the picture the pipeline makes.
  *
  * Per-pass GPU times come in steps of 65.5 µs (2^16 ns): Chrome quantizes timestamp queries
  * unless chrome://flags/#enable-webgpu-developer-features is on. A pass shown as 0 µs ran in
@@ -18,12 +21,14 @@ import { useEffect, useMemo, useState } from 'react';
 import '@xyflow/react/dist/style.css';
 import { GPUCommandGraphInspector } from '@luma.gl/gpgpu/gpu-core';
 import { parseExpr } from '@noodles.gl/planner';
-import { formatMetric, type GraphDescription } from '@noodles.gl/graph-view';
-import { GraphView, NodeDetails } from '@noodles.gl/graph-view/react';
+import { formatMetric, type GraphDescription, type NodePreview } from '@noodles.gl/graph-view';
+import { GraphView, NodeDetails, PreviewView } from '@noodles.gl/graph-view/react';
 import { dagreLayout, forceLayout } from '@noodles.gl/graph-view/layouts';
 import type { CompiledGPUCommandGraph } from '@luma.gl/gpgpu/gpu-core';
-import { LumaFilter, LumaGroupBy, describeCommandGraph, previewCommandGraphResource } from '../../src/luma/index.js';
+import { LumaFilter, LumaGroupBy, describeCommandGraphs, previewCommandGraphsResource } from '../../src/luma/index.js';
 import { DensityGraph } from './density.js';
+import { HeatmapPipeline } from './heatmap.js';
+import { HistogramPipeline, CHART } from './histogram.js';
 
 const ROWS = 1 << 20;
 const BINS = 16;
@@ -31,8 +36,17 @@ const BINS = 16;
 interface Query {
   key: string;
   label: string;
-  graph: { run(params: Record<string, number>): void; readonly commandGraph: CompiledGPUCommandGraph<never> };
+  /** One command graph, or several that run in order and are drawn joined. */
+  graph: { run(params: Record<string, number>): void; readonly commandGraphs: CompiledGPUCommandGraph<never>[] };
+  /** The resource holding the picture a render pipeline makes, shown in the panel. */
+  output?: string;
 }
+
+/** A single-graph runner (`LumaFilter`, `LumaGroupBy`, `DensityGraph`) as a one-graph pipeline. */
+const single = (g: { run(params: Record<string, number>): void; readonly commandGraph: CompiledGPUCommandGraph<never> }): Query['graph'] => ({
+  run: (params) => g.run(params),
+  get commandGraphs() { return [g.commandGraph]; },
+});
 
 async function start(): Promise<{ queries: Query[]; inspector: GPUCommandGraphInspector; features: string[] }> {
   if (!('gpu' in navigator)) throw new Error('WebGPU is not available in this browser.');
@@ -57,13 +71,15 @@ async function start(): Promise<{ queries: Query[]; inspector: GPUCommandGraphIn
   const v = new Float32Array(ROWS);
   const w = new Float32Array(ROWS);
   const bin = new Uint32Array(ROWS);
+  const bin64 = new Uint32Array(ROWS);
   for (let i = 0; i < ROWS; i++) {
     v[i] = Math.random();
     // A sine band with noise, so the density map has a shape. Uniform w would draw flat static.
     w[i] = Math.min(99.9, Math.max(0, 50 + 32 * Math.sin(v[i] * Math.PI * 3) + (Math.random() + Math.random() + Math.random() - 1.5) * 12));
     bin[i] = Math.floor(v[i] * BINS);
+    bin64[i] = Math.floor(v[i] * CHART.bins);
   }
-  const buffers = { v: column('v', v), w: column('w', w), bin: column('bin', bin) };
+  const buffers = { v: column('v', v), w: column('w', w), bin: column('bin', bin), bin64: column('bin64', bin64) };
 
   const inspector = new GPUCommandGraphInspector({ maxSamples: 120 });
   const common = { device, adapter, rows: ROWS, params: { cut: 0.5 }, inspector };
@@ -71,31 +87,43 @@ async function start(): Promise<{ queries: Query[]; inspector: GPUCommandGraphIn
     {
       key: 'filter',
       label: 'filter: v > cut',
-      graph: new LumaFilter({ ...common, columns: { v: buffers.v }, predicate: parseExpr('v > {{cut}}') }),
+      graph: single(new LumaFilter({ ...common, columns: { v: buffers.v }, predicate: parseExpr('v > {{cut}}') })),
     },
     {
       key: 'filter-batched',
       label: 'filter, 4 batches',
-      graph: new LumaFilter({
+      graph: single(new LumaFilter({
         ...common, columns: { v: buffers.v }, predicate: parseExpr('v > {{cut}}'), topology: { kind: 'batched', rows: ROWS / 4 },
-      }),
+      })),
     },
     {
       key: 'group-by',
       label: 'group by bin: count, mean(w) where v > cut',
-      graph: new LumaGroupBy({
+      graph: single(new LumaGroupBy({
         ...common,
         key: { name: 'bin', buffer: buffers.bin },
         groupCount: BINS,
         columns: { v: buffers.v, w: buffers.w },
         aggregates: { n: 'count', m: { mean: 'w' } },
         predicate: parseExpr('v > {{cut}}'),
-      }),
+      })),
     },
     {
       key: 'density',
       label: 'density of (v, w) where v > cut, into a 256×256 texture',
-      graph: new DensityGraph({ device, adapter, v: buffers.v, w: buffers.w, rows: ROWS, inspector }),
+      graph: single(new DensityGraph({ device, adapter, v: buffers.v, w: buffers.w, rows: ROWS, inspector })),
+    },
+    {
+      key: 'heatmap',
+      label: 'pipeline: filter, then splat, blur, colormap, points, composite',
+      graph: new HeatmapPipeline({ device, adapter, v: buffers.v, w: buffers.w, rows: ROWS, inspector }),
+      output: HeatmapPipeline.output,
+    },
+    {
+      key: 'histogram',
+      label: 'pipeline: group-by, then bars, mean line, axes, chart',
+      graph: new HistogramPipeline({ device, adapter, v: buffers.v, w: buffers.w, bin: buffers.bin64, rows: ROWS, inspector }),
+      output: HistogramPipeline.output,
     },
   ];
   return { queries, inspector, features: requiredFeatures };
@@ -115,6 +143,7 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
   const [tab, setTab] = useState<'node' | 'json'>('node');
   const [selected, setSelected] = useState<string>();
   const [description, setDescription] = useState<GraphDescription>();
+  const [picture, setPicture] = useState<NodePreview>();
   const query = queries.find((q) => q.key === active)!;
 
   // Run the active graph every frame; re-describe it four times a second.
@@ -122,8 +151,16 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
     let frame = 0;
     let last = performance.now();
     const describe = () => {
-      const snapshot = inspector.getSnapshot().graphs.find((g) => g.id === query.graph.commandGraph.id);
-      setDescription(describeCommandGraph(query.graph.commandGraph, { snapshot, label: query.label }));
+      const snapshots = inspector.getSnapshot().graphs;
+      const graphs = query.graph.commandGraphs.map((graph) => ({ graph, snapshot: snapshots.find((s) => s.id === graph.id) }));
+      const next = describeCommandGraphs(graphs, { label: query.label });
+      setDescription(next);
+      // The picture: the output resource's last version, read back like any preview.
+      const out = query.output && next.nodes
+        .filter((n) => n.attributes?.resource === query.output)
+        .sort((a, b) => Number(b.attributes?.version) - Number(a.attributes?.version))[0];
+      if (out) void previewCommandGraphsResource(query.graph.commandGraphs, out).then(setPicture);
+      else setPicture(undefined);
     };
     const tick = (now: number) => {
       query.graph.run({ cut });
@@ -170,7 +207,7 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
             <GraphView
               description={description} collapse={collapse} selected={selected} onSelect={setSelected}
               density={compact ? 'compact' : 'regular'} layout={LAYOUTS[arrange].layout}
-              preview={(n) => previewCommandGraphResource(query.graph.commandGraph, n)}
+              preview={(n) => previewCommandGraphsResource(query.graph.commandGraphs, n)}
             />
           )
           : <div style={{ padding: 16 }}>compiling…</div>}
@@ -184,10 +221,13 @@ function App({ queries, inspector, features }: Awaited<ReturnType<typeof start>>
           </div>
           {tab === 'node'
             ? (node ? <NodeDetails node={node} /> : (
+              <>
+              {picture && <div style={{ marginBottom: 10 }}><PreviewView title="output" preview={picture} /></div>}
               <p style={{ color: '#8a92a6', margin: 0 }}>
                 {narrow ? 'Tap' : 'Click'} a node. The orange bar is each pass's share of the slowest pass's GPU time.
                 Chrome reports pass times in 65.5 µs steps unless WebGPU developer features are on.
               </p>
+              </>
             ))
             : <pre style={{ margin: 0, fontSize: 10.5, whiteSpace: 'pre-wrap', color: '#b9c2d6' }}>{JSON.stringify(description, null, 2)}</pre>}
         </aside>
